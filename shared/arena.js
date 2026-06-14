@@ -58,8 +58,9 @@ export function addPlayer(arena, playerOptions) {
     thrusting: false,
     shake: 0,
     radius: ENGINE.ship.radius,
-    health: ENGINE.player.maxHealth,
-    maxHealth: ENGINE.player.maxHealth,
+    healthBars: ENGINE.player.startingHealthBars,
+    health: playerMaxHealth(ENGINE.player.startingHealthBars),
+    maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars),
     resources: {
       rock: 0,
       ore: 0,
@@ -295,9 +296,11 @@ function processPlayerMining(arena, player, dtSeconds) {
     y: player.y + direction.y * player.radius
   };
   const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, ENGINE.mining.rayLength);
+  const playerHit = raycastPlayers(arena, player, start, angle, Math.min(hit.distance, ENGINE.mining.rayLength));
+  const hitResult = playerHit || hit;
   const end = {
-    x: hit.x,
-    y: hit.y
+    x: hitResult.x,
+    y: hitResult.y
   };
 
   player.miningRay = {
@@ -305,14 +308,23 @@ function processPlayerMining(arena, player, dtSeconds) {
     startY: roundForSnapshot(start.y),
     endX: roundForSnapshot(end.x),
     endY: roundForSnapshot(end.y),
-    hit: hit.hit,
-    mineable: hit.mineable,
-    tileX: hit.tileX,
-    tileY: hit.tileY,
-    index: hit.index,
-    tile: hit.tile,
+    hit: hitResult.hit,
+    hitType: playerHit ? "player" : hit.hit ? "asteroid" : null,
+    mineable: !playerHit && hit.mineable,
+    tileX: playerHit ? null : hit.tileX,
+    tileY: playerHit ? null : hit.tileY,
+    index: playerHit ? null : hit.index,
+    tile: playerHit ? null : hit.tile,
+    targetId: playerHit?.target.id ?? null,
+    targetNumber: playerHit?.target.number ?? null,
     progress: 0
   };
+
+  if (playerHit) {
+    damagePlayer(playerHit.target, ENGINE.mining.playerDamagePerSecond * dtSeconds);
+    resetPlayerMiningTarget(player);
+    return;
+  }
 
   if (!hit.mineable) {
     resetPlayerMiningTarget(player);
@@ -428,6 +440,82 @@ function resetPlayerMiningTarget(player) {
   player.miningTargetIndex = null;
   player.miningPhase = null;
   player.miningProgress = 0;
+}
+
+function raycastPlayers(arena, attacker, start, angle, maxDistance) {
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  let nearest = null;
+
+  for (const target of arena.players.values()) {
+    if (!target.alive || target.id === attacker.id) {
+      continue;
+    }
+
+    const hit = rayCircleIntersection(start, direction, target, target.radius, maxDistance);
+    if (!hit || (nearest && hit.distance >= nearest.distance)) {
+      continue;
+    }
+
+    nearest = {
+      hit: true,
+      mineable: false,
+      x: hit.x,
+      y: hit.y,
+      distance: hit.distance,
+      target
+    };
+  }
+
+  return nearest;
+}
+
+function rayCircleIntersection(start, direction, circle, radius, maxDistance) {
+  const toCircleX = circle.x - start.x;
+  const toCircleY = circle.y - start.y;
+  const projection = toCircleX * direction.x + toCircleY * direction.y;
+  const closestDistanceSq =
+    toCircleX * toCircleX +
+    toCircleY * toCircleY -
+    projection * projection;
+  const radiusSq = radius * radius;
+
+  if (closestDistanceSq > radiusSq) {
+    return null;
+  }
+
+  const halfChord = Math.sqrt(Math.max(0, radiusSq - closestDistanceSq));
+  const distance = projection - halfChord;
+  if (distance < 0 || distance > maxDistance) {
+    return null;
+  }
+
+  return {
+    distance,
+    x: start.x + direction.x * distance,
+    y: start.y + direction.y * distance
+  };
+}
+
+function damagePlayer(player, amount) {
+  player.health = clamp(player.health - amount, 0, player.maxHealth);
+  if (player.health > 0) {
+    return;
+  }
+
+  player.alive = false;
+  player.mining = false;
+  player.miningRay = null;
+  player.thrusting = false;
+  player.vx = 0;
+  player.vy = 0;
+}
+
+function playerMaxHealth(healthBars) {
+  const bars = clamp(Math.round(healthBars), 1, ENGINE.player.maxHealthBars);
+  return bars * ENGINE.player.healthPerBar;
 }
 
 function circleTileOverlap(circle, tile) {
@@ -601,6 +689,7 @@ function snapshotPlayer(player) {
     thrusting: player.thrusting,
     shake: roundForSnapshot(player.shake),
     radius: player.radius,
+    healthBars: player.healthBars,
     health: roundForSnapshot(player.health),
     maxHealth: player.maxHealth,
     resources: {

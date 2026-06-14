@@ -1087,6 +1087,11 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
   const rowStep = 10;
   const hp = clamp(player.health ?? 0, 0, player.maxHealth || 1);
   const maxHp = Math.max(1, player.maxHealth || 1);
+  const healthBars = clamp(
+    Math.round(player.healthBars || maxHp / ENGINE.player.healthPerBar || ENGINE.player.startingHealthBars),
+    1,
+    ENGINE.player.maxHealthBars
+  );
   const resources = player.resources || {};
 
   ctx.fillStyle = colors.foreground;
@@ -1098,23 +1103,31 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
     fontSize: 8,
     color: colors.foreground
   });
-  drawHudBar(ctx, x + 22, hpY + 1, contentRight - (x + 22), 5, hp / maxHp, colors);
+  drawHudHealthBars(ctx, x + 22, hpY + 1, contentRight - (x + 22), 5, hp, maxHp, healthBars, colors);
 
   drawHudResource(ctx, "ROCK", resources.rock || 0, contentX, contentRight, rowY, textRenderer, colors);
   drawHudResource(ctx, "ORE", resources.ore || 0, contentX, contentRight, rowY + rowStep, textRenderer, colors);
   drawHudResource(ctx, "DIAMOND", resources.diamond || 0, contentX, contentRight, rowY + rowStep * 2, textRenderer, colors);
 }
 
-function drawHudBar(ctx, x, y, width, height, progress, colors) {
-  const fillWidth = Math.round((width - 2) * clamp(progress, 0, 1));
+function drawHudHealthBars(ctx, x, y, width, height, health, maxHealth, bars, colors) {
+  const gap = 1;
+  const segmentWidth = Math.max(3, Math.floor((width - gap * (bars - 1)) / bars));
+  const segmentHealth = maxHealth / bars;
 
-  ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x, y, width, 1);
-  ctx.fillRect(x, y + height - 1, width, 1);
-  ctx.fillRect(x, y, 1, height);
-  ctx.fillRect(x + width - 1, y, 1, height);
-  if (fillWidth > 0) {
-    ctx.fillRect(x + 1, y + 1, fillWidth, height - 2);
+  for (let index = 0; index < bars; index += 1) {
+    const segmentX = x + index * (segmentWidth + gap);
+    const segmentProgress = clamp((health - segmentHealth * index) / segmentHealth, 0, 1);
+    const fillWidth = Math.round((segmentWidth - 2) * segmentProgress);
+
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(segmentX, y, segmentWidth, 1);
+    ctx.fillRect(segmentX, y + height - 1, segmentWidth, 1);
+    ctx.fillRect(segmentX, y, 1, height);
+    ctx.fillRect(segmentX + segmentWidth - 1, y, 1, height);
+    if (fillWidth > 0) {
+      ctx.fillRect(segmentX + 1, y + 1, fillWidth, height - 2);
+    }
   }
 }
 

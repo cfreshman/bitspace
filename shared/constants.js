@@ -27,11 +27,15 @@ export const ENGINE = Object.freeze({
     maxSpeed: 160
   },
   player: {
-    maxHealth: 100,
+    startingHealthBars: 3,
+    maxHealthBars: 7,
+    healthPerBar: 100,
+    maxHealth: 300,
     maxResourceAmount: 999
   },
   mining: {
     rayLength: 28,
+    playerDamagePerSecond: 45,
     rockSeconds: 0.5,
     oreSeconds: 0.5,
     diamondSeconds: 5
