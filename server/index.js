@@ -15,7 +15,10 @@ import {
   sanitizePlayerName,
   setPlayerInput,
   setPlayerName,
+  setPlayerTalk,
+  snapshotAsteroid,
   snapshotArena,
+  takeAsteroidUpdates,
   stepArena
 } from "../shared/arena.js";
 
@@ -78,6 +81,7 @@ io.on("connection", (socket) => {
     render: RENDER,
     world: ENGINE.world
   });
+  socket.emit(SERVER_EVENTS.asteroid, snapshotAsteroid(arena));
   socket.emit(SERVER_EVENTS.snapshot, snapshotArena(arena));
   broadcastLobby();
 
@@ -89,6 +93,10 @@ io.on("connection", (socket) => {
     if (setPlayerName(arena, socket.id, name)) {
       broadcastLobby();
     }
+  });
+
+  socket.on(CLIENT_EVENTS.talk, (text) => {
+    setPlayerTalk(arena, socket.id, text);
   });
 
   socket.on("disconnect", () => {
@@ -103,6 +111,10 @@ setInterval(() => {
   lastTickTime = now;
 
   stepArena(arena, dtSeconds);
+  const asteroidUpdates = takeAsteroidUpdates(arena);
+  if (asteroidUpdates.length > 0) {
+    io.to(arenaRoom).emit(SERVER_EVENTS.asteroidUpdate, asteroidUpdates);
+  }
 
   const ticksPerSnapshot = Math.max(1, Math.floor(ENGINE.tickRate / ENGINE.snapshotRate));
   if (arena.tick % ticksPerSnapshot === 0) {

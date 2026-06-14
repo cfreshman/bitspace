@@ -26,6 +26,15 @@ export const ENGINE = Object.freeze({
     drag: 0.9,
     maxSpeed: 160
   },
+  player: {
+    maxHealth: 100
+  },
+  mining: {
+    rayLength: 28,
+    rockSeconds: 0.5,
+    oreSeconds: 0.5,
+    diamondSeconds: 5
+  },
   collision: {
     boundaryRestitution: 0.42,
     shipRestitution: 0.55,

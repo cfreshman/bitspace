@@ -1,4 +1,11 @@
 import { ENGINE, RENDER } from "./constants.js";
+import {
+  ASTEROID_TILE,
+  blockingTilesNearCircle,
+  createAsteroid,
+  raycastAsteroid,
+  serializeAsteroid
+} from "./asteroid.js";
 import { createEmptyInput, normalizeInput } from "./input.js";
 import {
   clamp,
@@ -9,11 +16,16 @@ import {
 const DEFAULT_ARENA_ID = "main";
 
 export function createArena(options = {}) {
+  const seed = options.seed ?? "bitspace-main";
+
   return {
     id: options.id ?? DEFAULT_ARENA_ID,
-    seed: options.seed ?? "bitspace-main",
+    seed,
     tick: 0,
     players: new Map(),
+    asteroid: options.asteroid ?? createAsteroid({ seed: `${seed}:asteroid` }),
+    asteroidMining: new Map(),
+    asteroidUpdates: [],
     // Extension channels are intentionally empty until the game design is explicit.
     entities: new Map(),
     effects: []
@@ -26,11 +38,12 @@ export function addPlayer(arena, playerOptions) {
   }
 
   const number = nextPlayerNumber(arena);
-  const spawn = spawnForPlayerNumber(number);
+  const spawn = spawnForPlayerNumber(number, arena.asteroid);
   const player = {
     id: playerOptions.id,
     number,
     name: sanitizePlayerName(playerOptions.name || `Pilot ${number}`),
+    talk: "",
     x: spawn.x,
     y: spawn.y,
     vx: 0,
@@ -38,9 +51,20 @@ export function addPlayer(arena, playerOptions) {
     angle: spawn.angle,
     aimAngle: spawn.angle,
     mining: false,
+    miningRay: null,
+    miningTargetIndex: null,
+    miningPhase: null,
+    miningProgress: 0,
     thrusting: false,
     shake: 0,
     radius: ENGINE.ship.radius,
+    health: ENGINE.player.maxHealth,
+    maxHealth: ENGINE.player.maxHealth,
+    resources: {
+      rock: 0,
+      ore: 0,
+      diamond: 0
+    },
     alive: true,
     input: createEmptyInput(),
     lastInputSeq: 0,
@@ -81,16 +105,32 @@ export function setPlayerName(arena, playerId, name) {
   return true;
 }
 
+export function setPlayerTalk(arena, playerId, text) {
+  const player = arena.players.get(playerId);
+  if (!player) {
+    return false;
+  }
+
+  const talk = sanitizeTalkText(text);
+  if (!talk) {
+    return false;
+  }
+
+  player.talk = talk;
+  return true;
+}
+
 export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate) {
   arena.tick += 1;
 
   for (const player of arena.players.values()) {
     if (player.alive) {
-      stepPlayer(player, dtSeconds);
+      stepPlayer(arena, player, dtSeconds);
     }
   }
 
   resolvePlayerCollisions(arena);
+  processMining(arena, dtSeconds);
 }
 
 export function snapshotArena(arena) {
@@ -101,9 +141,35 @@ export function snapshotArena(arena) {
     render: RENDER,
     world: ENGINE.world,
     players: Array.from(arena.players.values()).map(snapshotPlayer),
+    asteroidMining: snapshotAsteroidMining(arena),
     entities: Array.from(arena.entities.values()),
     effects: arena.effects
   };
+}
+
+export function snapshotAsteroid(arena) {
+  return serializeAsteroid(arena.asteroid);
+}
+
+function snapshotAsteroidMining(arena) {
+  return Array.from(arena.asteroidMining.entries()).flatMap(([index, state]) => {
+    const target = miningTargetForTile(arena.asteroid, index);
+    if (!target || target.phase !== state.phase) {
+      return [];
+    }
+
+    return {
+      index,
+      phase: state.phase,
+      progress: roundForSnapshot(clamp(state.progress / target.seconds, 0, 1))
+    };
+  });
+}
+
+export function takeAsteroidUpdates(arena) {
+  const updates = arena.asteroidUpdates;
+  arena.asteroidUpdates = [];
+  return updates;
 }
 
 export function lobbySnapshot(arena) {
@@ -124,7 +190,15 @@ export function sanitizePlayerName(name) {
     .slice(0, 18) || "Pilot";
 }
 
-function stepPlayer(player, dtSeconds) {
+export function sanitizeTalkText(text) {
+  return String(text)
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 36);
+}
+
+function stepPlayer(arena, player, dtSeconds) {
   player.shake = Math.max(0, player.shake - ENGINE.collision.shakeDecay * dtSeconds);
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
@@ -152,31 +226,243 @@ function stepPlayer(player, dtSeconds) {
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
 
-  const boundaryImpact = constrainPlayerToWorld(player);
-  addShake(player, boundaryImpact);
+  resolveStaticCollisions(arena, player);
 }
 
-function constrainPlayerToWorld(player) {
-  const min = player.radius;
-  const maxX = ENGINE.world.width - player.radius;
-  const maxY = ENGINE.world.height - player.radius;
-  const x = clamp(player.x, min, maxX);
-  const y = clamp(player.y, min, maxY);
+function resolveStaticCollisions(arena, player) {
+  return arena.asteroid ? resolveAsteroidCollisions(arena.asteroid, player) : 0;
+}
+
+function resolveAsteroidCollisions(asteroid, player) {
   let impact = 0;
 
-  if (x !== player.x) {
-    impact = Math.max(impact, Math.abs(player.vx));
-    player.vx *= -ENGINE.collision.boundaryRestitution;
+  for (let pass = 0; pass < 4; pass += 1) {
+    let resolved = false;
+    const blockers = blockingTilesNearCircle(asteroid, player.x, player.y, player.radius);
+
+    for (const blocker of blockers) {
+      const hit = circleTileOverlap(player, blocker);
+      if (!hit) {
+        continue;
+      }
+
+      player.x += hit.normalX * hit.overlap;
+      player.y += hit.normalY * hit.overlap;
+
+      const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
+      impact = Math.max(impact, Math.abs(normalSpeed));
+      if (normalSpeed < 0) {
+        player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
+        player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
+      }
+
+      resolved = true;
+    }
+
+    if (!resolved) {
+      break;
+    }
   }
 
-  if (y !== player.y) {
-    impact = Math.max(impact, Math.abs(player.vy));
-    player.vy *= -ENGINE.collision.boundaryRestitution;
-  }
-
-  player.x = x;
-  player.y = y;
+  clampPlayerVelocity(player);
   return impact;
+}
+
+function processMining(arena, dtSeconds) {
+  for (const player of arena.players.values()) {
+    if (!player.alive) {
+      continue;
+    }
+
+    processPlayerMining(arena, player, dtSeconds);
+  }
+}
+
+function processPlayerMining(arena, player, dtSeconds) {
+  if (!player.mining) {
+    resetPlayerMiningTarget(player);
+    player.miningRay = null;
+    return;
+  }
+
+  const angle = player.aimAngle ?? player.angle;
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const start = {
+    x: player.x + direction.x * player.radius,
+    y: player.y + direction.y * player.radius
+  };
+  const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, ENGINE.mining.rayLength);
+  const end = {
+    x: hit.x,
+    y: hit.y
+  };
+
+  player.miningRay = {
+    startX: roundForSnapshot(start.x),
+    startY: roundForSnapshot(start.y),
+    endX: roundForSnapshot(end.x),
+    endY: roundForSnapshot(end.y),
+    hit: hit.hit,
+    mineable: hit.mineable,
+    tileX: hit.tileX,
+    tileY: hit.tileY,
+    index: hit.index,
+    tile: hit.tile,
+    progress: 0
+  };
+
+  if (!hit.mineable) {
+    resetPlayerMiningTarget(player);
+    return;
+  }
+
+  const target = miningTargetForTile(arena.asteroid, hit.index);
+  if (!target) {
+    resetPlayerMiningTarget(player);
+    return;
+  }
+
+  if (player.miningTargetIndex !== hit.index || player.miningPhase !== target.phase) {
+    player.miningTargetIndex = hit.index;
+    player.miningPhase = target.phase;
+  }
+
+  const progress = addMiningProgress(arena, hit.index, target, dtSeconds);
+  player.miningProgress = progress;
+  player.miningRay.progress = roundForSnapshot(clamp(progress / target.seconds, 0, 1));
+
+  if (progress < target.seconds) {
+    return;
+  }
+
+  completeMiningTarget(arena, player, hit.index, target);
+  clearMiningProgress(arena, hit.index);
+  resetPlayerMiningTarget(player);
+}
+
+function miningTargetForTile(asteroid, index) {
+  const tile = asteroid.tiles[index];
+  const amount = asteroid.amounts[index] || 0;
+
+  if (tile === ASTEROID_TILE.ore && amount > 0) {
+    return {
+      phase: `${ASTEROID_TILE.ore}:${amount}`,
+      resource: "ore",
+      seconds: ENGINE.mining.oreSeconds
+    };
+  }
+
+  if (tile === ASTEROID_TILE.diamond && amount > 0) {
+    return {
+      phase: ASTEROID_TILE.diamond,
+      resource: "diamond",
+      seconds: ENGINE.mining.diamondSeconds
+    };
+  }
+
+  if (tile === ASTEROID_TILE.rock || tile === ASTEROID_TILE.ore || tile === ASTEROID_TILE.diamond) {
+    return {
+      phase: ASTEROID_TILE.rock,
+      resource: "rock",
+      seconds: ENGINE.mining.rockSeconds
+    };
+  }
+
+  return null;
+}
+
+function completeMiningTarget(arena, player, index, target) {
+  if (target.resource === "ore") {
+    const nextAmount = Math.max(0, arena.asteroid.amounts[index] - 1);
+    player.resources.ore += 1;
+    setAsteroidTile(arena, index, nextAmount > 0 ? ASTEROID_TILE.ore : ASTEROID_TILE.rock, nextAmount);
+    return;
+  }
+
+  if (target.resource === "diamond") {
+    player.resources.diamond += 1;
+    setAsteroidTile(arena, index, ASTEROID_TILE.rock, 0);
+    return;
+  }
+
+  player.resources.rock += 1;
+  setAsteroidTile(arena, index, ASTEROID_TILE.empty, 0);
+}
+
+function setAsteroidTile(arena, index, tile, amount) {
+  arena.asteroid.tiles[index] = tile;
+  arena.asteroid.amounts[index] = amount;
+  arena.asteroidUpdates.push({
+    index,
+    tile,
+    amount
+  });
+}
+
+function addMiningProgress(arena, index, target, dtSeconds) {
+  const current = arena.asteroidMining.get(index);
+  const progress = current?.phase === target.phase ? current.progress + dtSeconds : dtSeconds;
+  arena.asteroidMining.set(index, {
+    phase: target.phase,
+    progress
+  });
+  return progress;
+}
+
+function clearMiningProgress(arena, index) {
+  arena.asteroidMining.delete(index);
+}
+
+function resetPlayerMiningTarget(player) {
+  player.miningTargetIndex = null;
+  player.miningPhase = null;
+  player.miningProgress = 0;
+}
+
+function circleTileOverlap(circle, tile) {
+  const tileRight = tile.x + tile.size;
+  const tileBottom = tile.y + tile.size;
+  const closestX = clamp(circle.x, tile.x, tileRight);
+  const closestY = clamp(circle.y, tile.y, tileBottom);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+  const distanceSq = dx * dx + dy * dy;
+
+  if (distanceSq > 0) {
+    if (distanceSq >= circle.radius * circle.radius) {
+      return null;
+    }
+
+    const distance = Math.sqrt(distanceSq);
+    return {
+      normalX: dx / distance,
+      normalY: dy / distance,
+      overlap: circle.radius - distance
+    };
+  }
+
+  const left = circle.x - tile.x;
+  const right = tileRight - circle.x;
+  const top = circle.y - tile.y;
+  const bottom = tileBottom - circle.y;
+  const nearest = Math.min(left, right, top, bottom);
+
+  if (nearest === left) {
+    return { normalX: -1, normalY: 0, overlap: circle.radius + left };
+  }
+
+  if (nearest === right) {
+    return { normalX: 1, normalY: 0, overlap: circle.radius + right };
+  }
+
+  if (nearest === top) {
+    return { normalX: 0, normalY: -1, overlap: circle.radius + top };
+  }
+
+  return { normalX: 0, normalY: 1, overlap: circle.radius + bottom };
 }
 
 function resolvePlayerCollisions(arena) {
@@ -186,6 +472,10 @@ function resolvePlayerCollisions(arena) {
     for (let bIndex = aIndex + 1; bIndex < players.length; bIndex += 1) {
       resolvePlayerPair(players[aIndex], players[bIndex], aIndex + bIndex);
     }
+  }
+
+  for (const player of players) {
+    resolveStaticCollisions(arena, player);
   }
 }
 
@@ -209,9 +499,6 @@ function resolvePlayerPair(a, b, fallbackSeed) {
   a.y -= ny * separation;
   b.x += nx * separation;
   b.y += ny * separation;
-
-  clampPlayerPosition(a);
-  clampPlayerPosition(b);
 
   const relativeVx = b.vx - a.vx;
   const relativeVy = b.vy - a.vy;
@@ -239,11 +526,6 @@ function resolvePlayerPair(a, b, fallbackSeed) {
   addShake(b, impact);
 }
 
-function clampPlayerPosition(player) {
-  player.x = clamp(player.x, player.radius, ENGINE.world.width - player.radius);
-  player.y = clamp(player.y, player.radius, ENGINE.world.height - player.radius);
-}
-
 function clampPlayerVelocity(player) {
   const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed);
   player.vx = velocity.x;
@@ -269,7 +551,18 @@ function nextPlayerNumber(arena) {
   return arena.players.size + 1;
 }
 
-function spawnForPlayerNumber(number) {
+function spawnForPlayerNumber(number, asteroid) {
+  const pocket = asteroid?.pockets.find((candidate) => candidate.playerNumber === number);
+  if (pocket) {
+    const centerX = ENGINE.world.width / 2;
+    const centerY = ENGINE.world.height / 2;
+    return {
+      x: pocket.spawnX,
+      y: pocket.spawnY,
+      angle: Math.atan2(centerY - pocket.spawnY, centerX - pocket.spawnX)
+    };
+  }
+
   const margin = Math.max(RENDER.width, ENGINE.world.sectorSize * 32);
   const maxX = ENGINE.world.width - margin;
   const maxY = ENGINE.world.height - margin;
@@ -288,6 +581,7 @@ function snapshotPlayer(player) {
     id: player.id,
     number: player.number,
     name: player.name,
+    talk: player.talk,
     x: roundForSnapshot(player.x),
     y: roundForSnapshot(player.y),
     vx: roundForSnapshot(player.vx),
@@ -295,9 +589,17 @@ function snapshotPlayer(player) {
     angle: roundForSnapshot(player.angle),
     aimAngle: roundForSnapshot(player.aimAngle),
     mining: player.mining,
+    miningRay: player.miningRay,
     thrusting: player.thrusting,
     shake: roundForSnapshot(player.shake),
     radius: player.radius,
+    health: roundForSnapshot(player.health),
+    maxHealth: player.maxHealth,
+    resources: {
+      rock: player.resources.rock,
+      ore: player.resources.ore,
+      diamond: player.resources.diamond
+    },
     alive: player.alive
   };
 }

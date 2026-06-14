@@ -3,18 +3,28 @@ import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import { createRenderer } from "/renderer.js";
 
+const TALK_MAX_CHARS = 36;
 const canvas = document.querySelector("#scene");
 const renderer = createRenderer(canvas);
+const talkInput = createTalkInput();
 const keys = new Set();
 const state = {
   playerId: null,
   snapshot: null,
+  asteroid: null,
   inputSeq: 0,
   mouse: {
     x: 0,
     y: 0,
     down: false,
     aimAngle: 0
+  },
+  chat: {
+    active: false,
+    draft: "",
+    caret: 0,
+    selectionStart: 0,
+    selectionEnd: 0
   }
 };
 
@@ -32,7 +42,36 @@ socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   state.snapshot = snapshot;
 });
 
+socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
+  state.asteroid = {
+    ...asteroid,
+    tiles: asteroid.tiles.split(""),
+    amounts: asteroid.amounts.split("")
+  };
+});
+
+socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
+  if (!state.asteroid) {
+    return;
+  }
+
+  for (const update of updates) {
+    state.asteroid.tiles[update.index] = update.tile;
+    state.asteroid.amounts[update.index] = update.amount;
+  }
+});
+
 window.addEventListener("keydown", (event) => {
+  if (state.chat.active) {
+    return;
+  }
+
+  if (event.code === "KeyT" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    activateTalk();
+    return;
+  }
+
   if (shouldCaptureKey(event.code)) {
     event.preventDefault();
   }
@@ -40,6 +79,10 @@ window.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("keyup", (event) => {
+  if (state.chat.active) {
+    return;
+  }
+
   if (shouldCaptureKey(event.code)) {
     event.preventDefault();
   }
@@ -49,6 +92,29 @@ window.addEventListener("keyup", (event) => {
 window.addEventListener("blur", () => {
   keys.clear();
   state.mouse.down = false;
+});
+
+talkInput.addEventListener("input", syncTalkDraft);
+talkInput.addEventListener("keyup", syncTalkDraft);
+talkInput.addEventListener("click", syncTalkDraft);
+talkInput.addEventListener("select", syncTalkDraft);
+talkInput.addEventListener("pointerup", syncTalkDraft);
+talkInput.addEventListener("keydown", (event) => {
+  event.stopPropagation();
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitTalk();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeTalk();
+    return;
+  }
+
+  requestAnimationFrame(syncTalkDraft);
 });
 
 canvas.addEventListener("pointermove", (event) => {
@@ -95,6 +161,8 @@ function draw(now = 0) {
   updateAimFromSnapshot();
   renderer.draw(state.snapshot, {
     playerId: state.playerId,
+    asteroid: state.asteroid,
+    chat: state.chat,
     aimAngle: state.mouse.aimAngle,
     mining: state.mouse.down,
     timeSeconds: now / 1000
@@ -102,8 +170,65 @@ function draw(now = 0) {
   requestAnimationFrame(draw);
 }
 
+function createTalkInput() {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.maxLength = TALK_MAX_CHARS;
+  input.autocomplete = "off";
+  input.autocapitalize = "sentences";
+  input.spellcheck = false;
+  input.className = "talk-input";
+  input.setAttribute("aria-label", "Talk");
+  document.body.append(input);
+  return input;
+}
+
+function activateTalk() {
+  state.chat.active = true;
+  state.mouse.down = false;
+  keys.clear();
+  talkInput.value = "";
+  talkInput.focus({ preventScroll: true });
+  syncTalkDraft();
+}
+
+function closeTalk() {
+  state.chat.active = false;
+  talkInput.blur();
+  talkInput.value = "";
+  syncTalkDraft();
+}
+
+function submitTalk() {
+  const text = talkInput.value.trim().replace(/\s+/g, " ");
+  if (text && socket.connected) {
+    socket.emit(CLIENT_EVENTS.talk, text);
+  }
+
+  closeTalk();
+}
+
+function syncTalkDraft() {
+  state.chat.draft = talkInput.value;
+  state.chat.caret = talkInput.selectionStart ?? talkInput.value.length;
+  state.chat.selectionStart = talkInput.selectionStart ?? state.chat.caret;
+  state.chat.selectionEnd = talkInput.selectionEnd ?? state.chat.caret;
+}
+
 function readInput() {
   state.inputSeq += 1;
+  if (state.chat.active) {
+    return normalizeInput({
+      seq: state.inputSeq,
+      moveX: 0,
+      moveY: 0,
+      aimAngle: state.mouse.aimAngle,
+      mining: false,
+      interact: false,
+      build: false
+    });
+  }
+
   const move = readMoveVector();
 
   return normalizeInput({
@@ -225,6 +350,7 @@ function shouldCaptureKey(code) {
     "KeyA",
     "KeyS",
     "KeyD",
+    "KeyT",
     "Space"
   ].includes(code);
 }

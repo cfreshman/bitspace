@@ -1,23 +1,88 @@
-import { RENDER } from "/shared/constants.js";
+import { ENGINE, RENDER } from "/shared/constants.js";
+import { ASTEROID_TILE, raycastAsteroid } from "/shared/asteroid.js";
 
 const ENTITY_PIXEL_SIZE = 1;
 const STAR_CELL_SIZE = 16;
 const STAR_PARALLAX = 0.22;
+const ASTEROID_DASH_PERIOD = 10;
+const ASTEROID_DASH_ON = 5;
+const VISIBILITY_VERTEX_EPSILON = 0.0007;
+const VISIBILITY_TILE_MARGIN = 3;
 const SMALL_ORB_RADIUS = 3;
 const REAR_ORBS = Object.freeze([
-  { rear: 9, side: 0 },
-  { rear: 7, side: -5 },
-  { rear: 7, side: 5 }
+  { rear: 7, side: -5, layer: "back" },
+  { rear: 7, side: 5, layer: "back" },
+  { rear: 9, side: 0, layer: "front" }
 ]);
-const MINING_RAY_LENGTH = 28;
 const THRUSTER_PARTICLE_RATE = 70;
-const MAX_THRUSTER_PARTICLES = 180;
+const MINING_PARTICLE_RATE = 90;
+const MAX_PARTICLES = 260;
+const BITMAP_GLYPHS = Object.freeze({
+  " ": ["000", "000", "000", "000", "000", "000", "000"],
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+  C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+  G: ["01111", "10000", "10000", "10011", "10001", "10001", "01111"],
+  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
+  I: ["111", "010", "010", "010", "010", "010", "111"],
+  J: ["00111", "00010", "00010", "00010", "10010", "10010", "01100"],
+  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+  L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+  M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+  Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
+  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+  V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
+  W: ["10001", "10001", "10001", "10101", "10101", "10101", "01010"],
+  X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+  Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+  Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
+  0: ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+  1: ["010", "110", "010", "010", "010", "010", "111"],
+  2: ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+  3: ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+  4: ["10010", "10010", "10010", "11111", "00010", "00010", "00010"],
+  5: ["11111", "10000", "10000", "11110", "00001", "00001", "11110"],
+  6: ["01110", "10000", "10000", "11110", "10001", "10001", "01110"],
+  7: ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+  8: ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+  9: ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
+  ".": ["0", "0", "0", "0", "0", "0", "1"],
+  ",": ["0", "0", "0", "0", "0", "1", "1"],
+  "!": ["1", "1", "1", "1", "1", "0", "1"],
+  "?": ["01110", "10001", "00001", "00010", "00100", "00000", "00100"],
+  "'": ["1", "1", "0", "0", "0", "0", "0"],
+  "\"": ["101", "101", "000", "000", "000", "000", "000"],
+  "-": ["0000", "0000", "0000", "1111", "0000", "0000", "0000"],
+  "_": ["00000", "00000", "00000", "00000", "00000", "00000", "11111"],
+  ":": ["0", "1", "0", "0", "0", "1", "0"],
+  ";": ["0", "1", "0", "0", "0", "1", "1"],
+  "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
+  "\\": ["10000", "01000", "01000", "00100", "00010", "00010", "00001"],
+  "(": ["001", "010", "100", "100", "100", "010", "001"],
+  ")": ["100", "010", "001", "001", "001", "010", "100"],
+  "#": ["01010", "11111", "01010", "01010", "11111", "01010", "01010"],
+  "+": ["00000", "00100", "00100", "11111", "00100", "00100", "00000"],
+  "*": ["00000", "10101", "01110", "11111", "01110", "10101", "00000"],
+  "=": ["00000", "11111", "00000", "00000", "11111", "00000", "00000"],
+  "@": ["01110", "10001", "10111", "10101", "10111", "10000", "01111"],
+  "&": ["01100", "10010", "10100", "01000", "10101", "10010", "01101"]
+});
 
 export function createRenderer(canvas) {
   canvas.width = RENDER.width;
   canvas.height = RENDER.height;
   const canvasContext = canvas.getContext("2d", { alpha: false });
   const surface = createPixelSurface(canvasContext, RENDER.width, RENDER.height);
+  const textRenderer = createPixelTextRenderer(RENDER.width, RENDER.height);
   const colors = {
     foreground: RENDER.foreground,
     background: RENDER.background
@@ -50,7 +115,7 @@ export function createRenderer(canvas) {
         colors.background = snapshot.render.background || colors.background;
       }
 
-      drawFrame(surface, snapshot, { ...options, timeSeconds, dtSeconds }, colors, {
+      drawFrame(surface, snapshot, { ...options, timeSeconds, dtSeconds }, colors, textRenderer, {
         particles,
         emitCarry,
         nextSeed() {
@@ -105,6 +170,92 @@ function createPixelSurface(canvasContext, width, height) {
   };
 }
 
+function createPixelTextRenderer(width, height) {
+  return {
+    measure(text, options = {}) {
+      return measureBitmapText(text, options);
+    },
+    draw(ctx, text, x, y, options = {}) {
+      const lines = options.lines || [text];
+      const scale = textScale(options);
+      const lineHeight = options.lineHeight || 9 * scale;
+      const maxWidth = options.width || width;
+      const heightPx = Math.max(1, lineHeight * lines.length);
+      ctx.fillStyle = options.color || RENDER.foreground;
+
+      lines.forEach((line, index) => {
+        drawBitmapTextLine(ctx, String(line), x, y + index * lineHeight, maxWidth, scale, options);
+      });
+
+      return {
+        width: Math.max(1, Math.min(maxWidth, Math.max(...lines.map((line) => this.measure(line, options))))),
+        height: heightPx
+      };
+    }
+  };
+}
+
+function measureBitmapText(text, options = {}) {
+  const scale = textScale(options);
+  const characters = String(text).toUpperCase();
+  let width = 0;
+
+  for (const character of characters) {
+    width += (glyphWidth(character) + 1) * scale;
+  }
+
+  return Math.max(0, width - scale);
+}
+
+function drawBitmapTextLine(ctx, text, x, y, maxWidth, scale, options = {}) {
+  let cursorX = x;
+  const selectionStart = Math.min(options.selectionStart ?? -1, options.selectionEnd ?? -1);
+  const selectionEnd = Math.max(options.selectionStart ?? -1, options.selectionEnd ?? -1);
+
+  for (let index = 0; index < String(text).length; index += 1) {
+    const character = String(text)[index].toUpperCase();
+    const glyph = BITMAP_GLYPHS[character] || BITMAP_GLYPHS["?"];
+    const glyphWidthPx = glyphWidth(character) * scale;
+    if (cursorX + glyphWidthPx > x + maxWidth) {
+      break;
+    }
+
+    if (index >= selectionStart && index < selectionEnd) {
+      ctx.fillStyle = options.selectionBackground || RENDER.foreground;
+      ctx.fillRect(cursorX - Math.floor(scale / 2), y - scale, glyphWidthPx + scale, 9 * scale);
+      ctx.fillStyle = options.selectionColor || RENDER.background;
+    } else {
+      ctx.fillStyle = options.color || RENDER.foreground;
+    }
+
+    drawBitmapGlyph(ctx, glyph, cursorX, y, scale);
+    cursorX += glyphWidthPx + scale;
+  }
+}
+
+function drawBitmapGlyph(ctx, glyph, x, y, scale) {
+  for (let row = 0; row < glyph.length; row += 1) {
+    for (let col = 0; col < glyph[row].length; col += 1) {
+      if (glyph[row][col] === "1") {
+        ctx.fillRect(x + col * scale, y + row * scale, scale, scale);
+      }
+    }
+  }
+}
+
+function glyphWidth(character) {
+  const glyph = BITMAP_GLYPHS[String(character).toUpperCase()] || BITMAP_GLYPHS["?"];
+  return glyph[0].length;
+}
+
+function textScale(options = {}) {
+  if (options.scale) {
+    return options.scale;
+  }
+
+  return (options.fontSize || 8) >= 10 ? 2 : 1;
+}
+
 function colorFor(value, cache) {
   if (!cache.has(value)) {
     cache.set(value, packColor(value));
@@ -129,7 +280,7 @@ function getViewportSize() {
   };
 }
 
-function drawFrame(ctx, snapshot, options, colors, particleState) {
+function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) {
   ctx.imageSmoothingEnabled = false;
   ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, RENDER.width, RENDER.height);
@@ -141,8 +292,13 @@ function drawFrame(ctx, snapshot, options, colors, particleState) {
   }
 
   const camera = cameraForSnapshot(snapshot, options.playerId, options.timeSeconds);
+  const diamondMiningTargets = diamondMiningTargetMap(snapshot);
   drawStars(ctx, snapshot, camera);
-  drawWorldBounds(ctx, snapshot, camera);
+  if (options.asteroid) {
+    drawAsteroid(ctx, options.asteroid, camera, colors, options.timeSeconds ?? snapshot.tick / 60, diamondMiningTargets);
+  } else {
+    drawWorldBounds(ctx, snapshot, camera);
+  }
 
   for (const entity of snapshot.entities || []) {
     drawEntity(ctx, entity, camera);
@@ -162,6 +318,10 @@ function drawFrame(ctx, snapshot, options, colors, particleState) {
     if (renderPlayer.thrusting) {
       emitThrusterParticles(particleState, renderPlayer, options.dtSeconds);
     }
+
+    if (renderPlayer.mining && renderPlayer.miningRay?.hit) {
+      emitMiningParticles(particleState, renderPlayer, options.dtSeconds);
+    }
   }
 
   updateThrusterParticles(particleState.particles, options.dtSeconds);
@@ -169,10 +329,29 @@ function drawFrame(ctx, snapshot, options, colors, particleState) {
 
   for (const renderPlayer of renderPlayers) {
     if (renderPlayer.mining) {
-      drawMiningRay(ctx, renderPlayer, camera, options.timeSeconds ?? snapshot.tick / 60, colors);
+      drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
     }
     drawShip(ctx, renderPlayer, camera, colors, options.timeSeconds ?? snapshot.tick / 60);
   }
+
+  for (const renderPlayer of renderPlayers) {
+    drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
+  }
+
+  applyVisibilityClip(
+    ctx,
+    options.asteroid,
+    renderPlayers.find((player) => player.id === options.playerId),
+    camera,
+    colors
+  );
+  drawPlayerHud(
+    ctx,
+    renderPlayers.find((player) => player.id === options.playerId),
+    colors,
+    textRenderer
+  );
+  drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
 }
 
 function cameraForSnapshot(snapshot, playerId, timeSeconds = 0) {
@@ -200,6 +379,541 @@ function shakeOffset(amount, timeSeconds) {
     x: Math.round(Math.sin(timeSeconds * 91.7) * amount),
     y: Math.round(Math.cos(timeSeconds * 83.3) * amount)
   };
+}
+
+function diamondMiningTargetMap(snapshot) {
+  const targets = new Map();
+
+  for (const miningState of snapshot.asteroidMining || []) {
+    if (miningState.phase === ASTEROID_TILE.diamond) {
+      targets.set(miningState.index, miningState.progress || 0);
+    }
+  }
+
+  for (const player of snapshot.players || []) {
+    if (player.miningRay?.mineable && player.miningRay.tile === ASTEROID_TILE.diamond) {
+      targets.set(player.miningRay.index, player.miningRay.progress || 0);
+    }
+  }
+
+  return targets;
+}
+
+function drawAsteroid(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets) {
+  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets);
+  drawAsteroidBoundary(ctx, asteroid, camera, colors);
+}
+
+function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const maxTileX = Math.min(
+    asteroid.widthTiles - 1,
+    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+  );
+  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const maxTileY = Math.min(
+    asteroid.heightTiles - 1,
+    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+  );
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const tile = asteroid.tiles[index];
+      if (!isRockTile(tile)) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
+      drawRockTile(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+
+      if (tile === ASTEROID_TILE.ore) {
+        drawOreRings(ctx, screenX, screenY, tileSize, amountAt(asteroid, index), hashCell(asteroid.seed, tileX, tileY));
+      } else if (tile === ASTEROID_TILE.diamond) {
+        drawDiamondWireframe(
+          ctx,
+          screenX,
+          screenY,
+          tileSize,
+          hashCell(asteroid.seed, tileX, tileY),
+          diamondMiningTargets.get(index) ?? null
+        );
+      }
+    }
+  }
+}
+
+function drawRockTile(ctx, asteroid, tileX, tileY, x, y, size, colors) {
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x, y, size, size);
+  ctx.fillStyle = colors.foreground;
+
+  const right = x + size - 1;
+  const bottom = y + size - 1;
+  if (!isRockTileAt(asteroid, tileX, tileY - 1)) {
+    drawPixelLine(ctx, x, y, right, y);
+  }
+
+  if (!isRockTileAt(asteroid, tileX + 1, tileY)) {
+    drawPixelLine(ctx, right, y, right, bottom);
+  }
+
+  if (!isRockTileAt(asteroid, tileX, tileY + 1)) {
+    drawPixelLine(ctx, right, bottom, x, bottom);
+  }
+
+  if (!isRockTileAt(asteroid, tileX - 1, tileY)) {
+    drawPixelLine(ctx, x, bottom, x, y);
+  }
+}
+
+function drawOreRings(ctx, tileX, tileY, size, amount, hash) {
+  const count = clamp(Math.round(amount), 1, 3);
+
+  for (let index = 0; index < count; index += 1) {
+    const seed = hash ^ Math.imul(index + 1, 1597334677);
+    const radius = 2 + randomUnit(seed, 1) * 0.65;
+    const margin = Math.ceil(radius + 2);
+    const center = {
+      x: tileX + margin + Math.round(randomUnit(seed, 2) * (size - margin * 2)),
+      y: tileY + margin + Math.round(randomUnit(seed, 3) * (size - margin * 2))
+    };
+    const tilt = randomUnit(seed, 4) * (Math.PI / 4);
+    const tiltAxis = randomUnit(seed, 5) * Math.PI * 2;
+    const spin = randomUnit(seed, 6) * Math.PI * 2;
+
+    drawProjectedRing(ctx, center.x, center.y, radius, tilt, tiltAxis, spin);
+  }
+}
+
+function drawProjectedRing(ctx, centerX, centerY, radius, tilt, tiltAxis, spin) {
+  const axis = {
+    x: Math.cos(tiltAxis),
+    y: Math.sin(tiltAxis)
+  };
+  const perpendicular = {
+    x: -axis.y,
+    y: axis.x
+  };
+  const cosTilt = Math.cos(tilt);
+  const sinTilt = Math.sin(tilt);
+  const points = [];
+
+  for (let step = 0; step < 16; step += 1) {
+    const angle = spin + (step / 16) * Math.PI * 2;
+    const alongAxis = Math.cos(angle) * radius;
+    const alongTilt = Math.sin(angle) * radius;
+    const z = alongTilt * sinTilt;
+    const perspective = 1 + z * 0.035;
+    points.push({
+      x: Math.round(centerX + (axis.x * alongAxis + perpendicular.x * alongTilt * cosTilt) * perspective),
+      y: Math.round(centerY + (axis.y * alongAxis + perpendicular.y * alongTilt * cosTilt) * perspective)
+    });
+  }
+
+  for (let index = 0; index < points.length; index += 1) {
+    const from = points[index];
+    const to = points[(index + 1) % points.length];
+    drawPixelLine(ctx, from.x, from.y, to.x, to.y);
+  }
+}
+
+function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = null) {
+  const centerX = tileX + Math.floor(size / 2);
+  const centerY = tileY + Math.floor(size / 2);
+  const progressOffset = miningProgress === null ? 0 : clamp(miningProgress, 0, 1);
+  const yaw = ((hash & 255) / 255) * Math.PI * 2 + progressOffset * 0.18;
+  const pitch = (((hash >>> 8) & 255) / 255) * Math.PI * 2 + progressOffset * 0.12;
+  const roll =
+    (((hash >>> 16) & 255) / 255) * Math.PI * 2 +
+    progressOffset * 0.28;
+  const vertices = [
+    { x: 1, y: 1, z: 1 },
+    { x: -1, y: -1, z: 1 },
+    { x: -1, y: 1, z: -1 },
+    { x: 1, y: -1, z: -1 }
+  ].map((point) => projectPoint3D(rotatePoint3D(point, yaw, pitch, roll), centerX, centerY));
+  const edges = [
+    [0, 1],
+    [0, 2],
+    [0, 3],
+    [1, 2],
+    [1, 3],
+    [2, 3]
+  ];
+
+  for (const [fromIndex, toIndex] of edges) {
+    const from = vertices[fromIndex];
+    const to = vertices[toIndex];
+    drawPixelLine(ctx, from.x, from.y, to.x, to.y);
+  }
+}
+
+function rotatePoint3D(point, yaw, pitch, roll) {
+  const yawCos = Math.cos(yaw);
+  const yawSin = Math.sin(yaw);
+  const pitchCos = Math.cos(pitch);
+  const pitchSin = Math.sin(pitch);
+  const rollCos = Math.cos(roll);
+  const rollSin = Math.sin(roll);
+  const yawed = {
+    x: point.x * yawCos + point.z * yawSin,
+    y: point.y,
+    z: -point.x * yawSin + point.z * yawCos
+  };
+  const pitched = {
+    x: yawed.x,
+    y: yawed.y * pitchCos - yawed.z * pitchSin,
+    z: yawed.y * pitchSin + yawed.z * pitchCos
+  };
+
+  return {
+    x: pitched.x * rollCos - pitched.y * rollSin,
+    y: pitched.x * rollSin + pitched.y * rollCos,
+    z: pitched.z
+  };
+}
+
+function projectPoint3D(point, centerX, centerY) {
+  const perspective = 3.1 / (3.1 - point.z);
+  const scale = 3.7 * perspective;
+
+  return {
+    x: Math.round(centerX + point.x * scale),
+    y: Math.round(centerY + point.y * scale)
+  };
+}
+
+function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const maxTileX = Math.min(
+    asteroid.widthTiles - 1,
+    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+  );
+  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const maxTileY = Math.min(
+    asteroid.heightTiles - 1,
+    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+  );
+
+  ctx.fillStyle = colors.foreground;
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (!isPlayableTile(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
+
+      if (!isPlayableTile(asteroid, tileX - 1, tileY)) {
+        drawDashedBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize);
+      }
+
+      if (!isPlayableTile(asteroid, tileX + 1, tileY)) {
+        drawDashedBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize);
+      }
+
+      if (!isPlayableTile(asteroid, tileX, tileY - 1)) {
+        drawDashedBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize);
+      }
+
+      if (!isPlayableTile(asteroid, tileX, tileY + 1)) {
+        drawDashedBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize);
+      }
+    }
+  }
+}
+
+function drawDashedBoundaryVertical(ctx, x, y, length, worldY) {
+  for (let offset = 0; offset < length; offset += 1) {
+    if (positiveModulo(worldY + offset, ASTEROID_DASH_PERIOD) < ASTEROID_DASH_ON) {
+      ctx.fillRect(x, y + offset, 1, 1);
+    }
+  }
+}
+
+function drawDashedBoundaryHorizontal(ctx, x, y, length, worldX) {
+  for (let offset = 0; offset < length; offset += 1) {
+    if (positiveModulo(worldX + offset, ASTEROID_DASH_PERIOD) < ASTEROID_DASH_ON) {
+      ctx.fillRect(x + offset, y, 1, 1);
+    }
+  }
+}
+
+function isRockTile(tile) {
+  return tile === ASTEROID_TILE.rock || tile === ASTEROID_TILE.ore || tile === ASTEROID_TILE.diamond;
+}
+
+function isRockTileAt(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  return isRockTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX]);
+}
+
+function amountAt(asteroid, index) {
+  return Number.parseInt(asteroid.amounts[index] || "0", 36) || 0;
+}
+
+function isPlayableTile(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  return asteroid.playable[tileY * asteroid.widthTiles + tileX] === "1";
+}
+
+function applyVisibilityClip(ctx, asteroid, player, camera, colors) {
+  if (!asteroid || !player) {
+    return;
+  }
+
+  const polygon = computeVisibilityPolygon(asteroid, player, camera);
+  if (polygon.length < 3) {
+    return;
+  }
+
+  fillOutsidePolygon(ctx, polygon, colors.background);
+}
+
+function computeVisibilityPolygon(asteroid, player, camera) {
+  const origin = {
+    x: player.x,
+    y: player.y
+  };
+  const viewport = {
+    left: camera.x,
+    top: camera.y,
+    right: camera.x + RENDER.width,
+    bottom: camera.y + RENDER.height
+  };
+  const edges = collectVisibilityEdges(asteroid, viewport);
+  const angles = collectVisibilityAngles(edges, origin);
+  const points = [];
+
+  for (const angle of angles) {
+    const hit = nearestRayEdgeIntersection(origin, angle, edges);
+    if (hit) {
+      points.push({
+        x: hit.x - camera.x,
+        y: hit.y - camera.y,
+        angle
+      });
+    }
+  }
+
+  points.sort((a, b) => a.angle - b.angle);
+  return dedupeVisibilityPolygon(points);
+}
+
+function collectVisibilityEdges(asteroid, viewport) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const minTileX = Math.max(0, Math.floor(viewport.left / tileSize) - VISIBILITY_TILE_MARGIN);
+  const maxTileX = Math.min(
+    asteroid.widthTiles - 1,
+    Math.ceil(viewport.right / tileSize) + VISIBILITY_TILE_MARGIN
+  );
+  const minTileY = Math.max(0, Math.floor(viewport.top / tileSize) - VISIBILITY_TILE_MARGIN);
+  const maxTileY = Math.min(
+    asteroid.heightTiles - 1,
+    Math.ceil(viewport.bottom / tileSize) + VISIBILITY_TILE_MARGIN
+  );
+  const edges = [
+    { ax: viewport.left, ay: viewport.top, bx: viewport.right, by: viewport.top },
+    { ax: viewport.right, ay: viewport.top, bx: viewport.right, by: viewport.bottom },
+    { ax: viewport.right, ay: viewport.bottom, bx: viewport.left, by: viewport.bottom },
+    { ax: viewport.left, ay: viewport.bottom, bx: viewport.left, by: viewport.top }
+  ];
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const x = tileX * tileSize;
+      const y = tileY * tileSize;
+      const right = x + tileSize;
+      const bottom = y + tileSize;
+
+      if (isRockTileAt(asteroid, tileX, tileY)) {
+        if (!isRockTileAt(asteroid, tileX, tileY - 1)) {
+          edges.push({ ax: x, ay: y, bx: right, by: y });
+        }
+        if (!isRockTileAt(asteroid, tileX + 1, tileY)) {
+          edges.push({ ax: right, ay: y, bx: right, by: bottom });
+        }
+        if (!isRockTileAt(asteroid, tileX, tileY + 1)) {
+          edges.push({ ax: right, ay: bottom, bx: x, by: bottom });
+        }
+        if (!isRockTileAt(asteroid, tileX - 1, tileY)) {
+          edges.push({ ax: x, ay: bottom, bx: x, by: y });
+        }
+        continue;
+      }
+
+      if (!isPlayableTile(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      if (!isPlayableTile(asteroid, tileX, tileY - 1)) {
+        edges.push({ ax: x, ay: y, bx: right, by: y });
+      }
+      if (!isPlayableTile(asteroid, tileX + 1, tileY)) {
+        edges.push({ ax: right, ay: y, bx: right, by: bottom });
+      }
+      if (!isPlayableTile(asteroid, tileX, tileY + 1)) {
+        edges.push({ ax: right, ay: bottom, bx: x, by: bottom });
+      }
+      if (!isPlayableTile(asteroid, tileX - 1, tileY)) {
+        edges.push({ ax: x, ay: bottom, bx: x, by: y });
+      }
+    }
+  }
+
+  return edges;
+}
+
+function collectVisibilityAngles(edges, origin) {
+  const angles = [];
+  const seen = new Set();
+
+  for (const edge of edges) {
+    addVisibilityVertexAngles(angles, seen, origin, edge.ax, edge.ay);
+    addVisibilityVertexAngles(angles, seen, origin, edge.bx, edge.by);
+  }
+
+  return angles;
+}
+
+function addVisibilityVertexAngles(angles, seen, origin, x, y) {
+  const baseAngle = Math.atan2(y - origin.y, x - origin.x);
+
+  for (const angle of [
+    baseAngle - VISIBILITY_VERTEX_EPSILON,
+    baseAngle,
+    baseAngle + VISIBILITY_VERTEX_EPSILON
+  ]) {
+    const normalized = normalizeSignedAngle(angle);
+    const key = Math.round(normalized * 1000000);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    angles.push(normalized);
+  }
+}
+
+function nearestRayEdgeIntersection(origin, angle, edges) {
+  const ray = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  for (const edge of edges) {
+    const hit = rayEdgeIntersection(origin, ray, edge);
+    if (!hit || hit.distance >= nearestDistance) {
+      continue;
+    }
+
+    nearest = hit;
+    nearestDistance = hit.distance;
+  }
+
+  return nearest;
+}
+
+function rayEdgeIntersection(origin, ray, edge) {
+  const segment = {
+    x: edge.bx - edge.ax,
+    y: edge.by - edge.ay
+  };
+  const denominator = cross(ray.x, ray.y, segment.x, segment.y);
+
+  if (Math.abs(denominator) < 0.000001) {
+    return null;
+  }
+
+  const dx = edge.ax - origin.x;
+  const dy = edge.ay - origin.y;
+  const distance = cross(dx, dy, segment.x, segment.y) / denominator;
+  const segmentProgress = cross(dx, dy, ray.x, ray.y) / denominator;
+
+  if (distance < 0 || segmentProgress < 0 || segmentProgress > 1) {
+    return null;
+  }
+
+  return {
+    x: origin.x + ray.x * distance,
+    y: origin.y + ray.y * distance,
+    distance
+  };
+}
+
+function dedupeVisibilityPolygon(points) {
+  const deduped = [];
+
+  for (const point of points) {
+    const previous = deduped[deduped.length - 1];
+    if (previous && Math.abs(previous.x - point.x) < 0.05 && Math.abs(previous.y - point.y) < 0.05) {
+      continue;
+    }
+
+    deduped.push(point);
+  }
+
+  if (deduped.length > 1) {
+    const first = deduped[0];
+    const last = deduped[deduped.length - 1];
+    if (Math.abs(first.x - last.x) < 0.05 && Math.abs(first.y - last.y) < 0.05) {
+      deduped.pop();
+    }
+  }
+
+  return deduped;
+}
+
+function fillOutsidePolygon(ctx, polygon, color) {
+  ctx.fillStyle = color;
+
+  for (let y = 0; y < RENDER.height; y += 1) {
+    const intersections = polygonScanlineIntersections(polygon, y + 0.5);
+    let cursor = 0;
+    let inside = false;
+
+    for (const intersection of intersections) {
+      const x = clamp(Math.round(intersection), 0, RENDER.width);
+      if (!inside && x > cursor) {
+        ctx.fillRect(cursor, y, x - cursor, 1);
+      }
+
+      cursor = x;
+      inside = !inside;
+    }
+
+    if (!inside && cursor < RENDER.width) {
+      ctx.fillRect(cursor, y, RENDER.width - cursor, 1);
+    }
+  }
+}
+
+function polygonScanlineIntersections(polygon, scanY) {
+  const intersections = [];
+
+  for (let index = 0; index < polygon.length; index += 1) {
+    const from = polygon[index];
+    const to = polygon[(index + 1) % polygon.length];
+    if ((from.y <= scanY && to.y > scanY) || (to.y <= scanY && from.y > scanY)) {
+      intersections.push(from.x + ((scanY - from.y) * (to.x - from.x)) / (to.y - from.y));
+    }
+  }
+
+  return intersections.sort((a, b) => a - b);
 }
 
 function drawWorldBounds(ctx, snapshot, camera) {
@@ -351,13 +1065,225 @@ function drawShip(ctx, player, camera, colors, timeSeconds) {
 
   void timeSeconds;
 
-  for (const orb of REAR_ORBS) {
+  for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
     const orbX = Math.round(x + rear.x * orb.rear + side.x * orb.side);
     const orbY = Math.round(y + rear.y * orb.rear + side.y * orb.side);
     drawSphere(ctx, orbX, orbY, SMALL_ORB_RADIUS, player.angle, colors, [mainOccluder]);
   }
 
   drawSphere(ctx, x, y, player.radius, player.angle, colors);
+
+  for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "front")) {
+    const orbX = Math.round(x + rear.x * orb.rear + side.x * orb.side);
+    const orbY = Math.round(y + rear.y * orb.rear + side.y * orb.side);
+    drawSphere(ctx, orbX, orbY, SMALL_ORB_RADIUS, player.angle, colors);
+  }
+}
+
+function drawTalkBubble(ctx, player, camera, colors, textRenderer) {
+  if (!player.talk) {
+    return;
+  }
+
+  const screen = worldToScreen(player, camera);
+  const maxTextWidth = 160;
+  const lines = wrapPixelText(player.talk, maxTextWidth, textRenderer, {
+    fontSize: 10
+  }).slice(0, 3);
+  const lineHeight = 16;
+  const textWidth = Math.max(...lines.map((line) => textRenderer.measure(line, { fontSize: 10 })));
+  const width = Math.min(maxTextWidth + 8, textWidth + 8);
+  const height = lines.length * lineHeight + 6;
+  const x = clamp(Math.round(screen.x - width / 2), 2, RENDER.width - width - 2);
+  const y = clamp(Math.round(screen.y - player.radius - height - 9), 2, RENDER.height - height - 2);
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillRect(Math.round(screen.x) - 1, y + height, 3, 2);
+  ctx.fillRect(Math.round(screen.x), y + height + 2, 1, 1);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  textRenderer.draw(ctx, "", x + 4, y + 3, {
+    lines,
+    width: width - 8,
+    fontSize: 10,
+    lineHeight,
+    color: colors.foreground
+  });
+}
+
+function drawChatOverlay(ctx, chat, colors, textRenderer, timeSeconds) {
+  if (!chat?.active) {
+    return;
+  }
+
+  const panelX = 10;
+  const panelY = RENDER.height - 43;
+  const panelWidth = RENDER.width - panelX * 2;
+  const panelHeight = 33;
+  const prompt = "type to talk, enter to send";
+  const draft = chat.draft || "";
+  const shownDraft = draft || " ";
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(panelX + 1, panelY + 1, panelWidth - 2, panelHeight - 2);
+  textRenderer.draw(ctx, prompt, panelX + 5, panelY + 4, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  textRenderer.draw(ctx, shownDraft, panelX + 5, panelY + 17, {
+    fontSize: 10,
+    color: colors.foreground,
+    width: panelWidth - 10,
+    selectionStart: chat.selectionStart ?? chat.caret ?? 0,
+    selectionEnd: chat.selectionEnd ?? chat.caret ?? 0,
+    selectionBackground: colors.foreground,
+    selectionColor: colors.background
+  });
+
+  if (Math.floor(timeSeconds * 2) % 2 === 0) {
+    const beforeCaret = draft.slice(0, chat.caret ?? draft.length);
+    const caretX = panelX + 5 + textRenderer.measure(beforeCaret, { fontSize: 10 });
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(clamp(caretX, panelX + 5, panelX + panelWidth - 7), panelY + 17, 2, 14);
+  }
+}
+
+function drawPlayerHud(ctx, player, colors, textRenderer) {
+  if (!player) {
+    return;
+  }
+
+  const x = 8;
+  const y = 8;
+  const width = 124;
+  const height = 38;
+  const hp = clamp(player.health ?? 0, 0, player.maxHealth || 1);
+  const maxHp = Math.max(1, player.maxHealth || 1);
+  const resources = player.resources || {};
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+
+  textRenderer.draw(ctx, "HP", x + 5, y + 5, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  drawHudBar(ctx, x + 23, y + 5, 92, 7, hp / maxHp, colors);
+
+  const rowY = y + 22;
+  drawRockResourceIcon(ctx, x + 7, rowY, colors);
+  drawHudCount(ctx, resources.rock || 0, x + 17, rowY - 2, textRenderer, colors);
+  drawOreResourceIcon(ctx, x + 45, rowY, colors);
+  drawHudCount(ctx, resources.ore || 0, x + 55, rowY - 2, textRenderer, colors);
+  drawDiamondResourceIcon(ctx, x + 83, rowY, colors);
+  drawHudCount(ctx, resources.diamond || 0, x + 93, rowY - 2, textRenderer, colors);
+}
+
+function drawHudBar(ctx, x, y, width, height, progress, colors) {
+  const fillWidth = Math.round((width - 2) * clamp(progress, 0, 1));
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  ctx.fillStyle = colors.foreground;
+  if (fillWidth > 0) {
+    ctx.fillRect(x + 1, y + 1, fillWidth, height - 2);
+  }
+}
+
+function drawHudCount(ctx, value, x, y, textRenderer, colors) {
+  textRenderer.draw(ctx, String(Math.min(999, Math.max(0, Math.floor(value)))), x, y, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: 22
+  });
+}
+
+function drawRockResourceIcon(ctx, x, y, colors) {
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, 6, 1);
+  ctx.fillRect(x, y + 5, 6, 1);
+  ctx.fillRect(x, y, 1, 6);
+  ctx.fillRect(x + 5, y, 1, 6);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 2, y + 2, 2, 2);
+}
+
+function drawOreResourceIcon(ctx, x, y, colors) {
+  ctx.fillStyle = colors.foreground;
+  drawPixelLine(ctx, x + 3, y, x + 5, y + 2);
+  drawPixelLine(ctx, x + 5, y + 2, x + 3, y + 5);
+  drawPixelLine(ctx, x + 3, y + 5, x, y + 3);
+  drawPixelLine(ctx, x, y + 3, x + 3, y);
+}
+
+function drawDiamondResourceIcon(ctx, x, y, colors) {
+  ctx.fillStyle = colors.foreground;
+  drawPixelLine(ctx, x + 3, y, x + 6, y + 3);
+  drawPixelLine(ctx, x + 6, y + 3, x + 3, y + 6);
+  drawPixelLine(ctx, x + 3, y + 6, x, y + 3);
+  drawPixelLine(ctx, x, y + 3, x + 3, y);
+  drawPixelLine(ctx, x, y + 3, x + 6, y + 3);
+}
+
+function wrapPixelText(text, maxWidth, textRenderer, options) {
+  const words = String(text).split(" ");
+  const lines = [];
+  let line = "";
+
+  for (const word of words) {
+    const nextLine = line ? `${line} ${word}` : word;
+    if (textRenderer.measure(nextLine, options) <= maxWidth) {
+      line = nextLine;
+      continue;
+    }
+
+    if (line) {
+      lines.push(line);
+      line = "";
+    }
+
+    if (textRenderer.measure(word, options) <= maxWidth) {
+      line = word;
+    } else {
+      const chunks = breakPixelWord(word, maxWidth, textRenderer, options);
+      lines.push(...chunks.slice(0, -1));
+      line = chunks[chunks.length - 1] || "";
+    }
+  }
+
+  if (line) {
+    lines.push(line);
+  }
+
+  return lines.length > 0 ? lines : [""];
+}
+
+function breakPixelWord(word, maxWidth, textRenderer, options) {
+  const chunks = [];
+  let chunk = "";
+
+  for (const character of word) {
+    const nextChunk = `${chunk}${character}`;
+    if (textRenderer.measure(nextChunk, options) <= maxWidth || !chunk) {
+      chunk = nextChunk;
+    } else {
+      chunks.push(chunk);
+      chunk = character;
+    }
+  }
+
+  if (chunk) {
+    chunks.push(chunk);
+  }
+
+  return chunks;
 }
 
 function emitThrusterParticles(state, player, dtSeconds) {
@@ -399,8 +1325,47 @@ function emitThrusterParticles(state, player, dtSeconds) {
     });
   }
 
-  if (state.particles.length > MAX_THRUSTER_PARTICLES) {
-    state.particles.splice(0, state.particles.length - MAX_THRUSTER_PARTICLES);
+  if (state.particles.length > MAX_PARTICLES) {
+    state.particles.splice(0, state.particles.length - MAX_PARTICLES);
+  }
+}
+
+function emitMiningParticles(state, player, dtSeconds) {
+  const ray = player.miningRay;
+  const direction = {
+    x: Math.cos(player.aimAngle ?? player.angle),
+    y: Math.sin(player.aimAngle ?? player.angle)
+  };
+  const normal = {
+    x: -direction.y,
+    y: direction.x
+  };
+  const key = `mine:${player.id || player.number}`;
+  const carry = (state.emitCarry.get(key) || 0) + MINING_PARTICLE_RATE * dtSeconds;
+  const count = Math.floor(carry);
+  state.emitCarry.set(key, carry - count);
+
+  for (let index = 0; index < count; index += 1) {
+    const seed = state.nextSeed();
+    const sideJitter = (randomUnit(seed, 1) - 0.5) * 6;
+    const impactJitter = randomUnit(seed, 2) * 2;
+    const speed = 16 + randomUnit(seed, 3) * 44;
+    const spread = (randomUnit(seed, 4) - 0.5) * 36;
+    const life = 0.12 + randomUnit(seed, 5) * 0.24;
+
+    state.particles.push({
+      x: ray.endX - direction.x * impactJitter + normal.x * sideJitter,
+      y: ray.endY - direction.y * impactJitter + normal.y * sideJitter,
+      vx: -direction.x * speed + normal.x * spread,
+      vy: -direction.y * speed + normal.y * spread,
+      age: 0,
+      life,
+      seed
+    });
+  }
+
+  if (state.particles.length > MAX_PARTICLES) {
+    state.particles.splice(0, state.particles.length - MAX_PARTICLES);
   }
 }
 
@@ -479,9 +1444,8 @@ function fillDisk(ctx, cx, cy, radius, occluders = []) {
   }
 }
 
-function drawMiningRay(ctx, player, camera, timeSeconds, colors) {
+function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
   ctx.fillStyle = colors.foreground;
-  const center = worldToScreen(player, camera);
   const angle = player.aimAngle ?? player.angle;
   const direction = {
     x: Math.cos(angle),
@@ -491,16 +1455,29 @@ function drawMiningRay(ctx, player, camera, timeSeconds, colors) {
     x: -direction.y,
     y: direction.x
   };
-  const start = {
-    x: center.x + direction.x * player.radius,
-    y: center.y + direction.y * player.radius
+  const center = worldToScreen(player, camera);
+  const fallbackStart = {
+    x: player.x + direction.x * player.radius,
+    y: player.y + direction.y * player.radius
   };
-  const length = MINING_RAY_LENGTH;
+  const fallbackHit = !player.miningRay && asteroid
+    ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, ENGINE.mining.rayLength)
+    : null;
+  const start = player.miningRay
+    ? worldToScreen({ x: player.miningRay.startX, y: player.miningRay.startY }, camera)
+    : {
+        x: center.x + direction.x * player.radius,
+        y: center.y + direction.y * player.radius
+      };
   const phase = timeSeconds * 10 + player.number;
-  const tip = {
-    x: Math.round(start.x + direction.x * length),
-    y: Math.round(start.y + direction.y * length)
-  };
+  const tip = player.miningRay
+    ? worldToScreen({ x: player.miningRay.endX, y: player.miningRay.endY }, camera)
+    : fallbackHit
+      ? worldToScreen(fallbackHit, camera)
+    : {
+        x: Math.round(start.x + direction.x * ENGINE.mining.rayLength),
+        y: Math.round(start.y + direction.y * ENGINE.mining.rayLength)
+      };
 
   for (let index = 0; index < 3; index += 1) {
     const offset = Math.round(Math.sin(phase + (index * Math.PI * 2) / 3) * 2);
@@ -603,6 +1580,15 @@ function hashCell(seed, x, y) {
   }
 
   return hash >>> 0;
+}
+
+function cross(ax, ay, bx, by) {
+  return ax * by - ay * bx;
+}
+
+function normalizeSignedAngle(angle) {
+  const fullTurn = Math.PI * 2;
+  return ((angle + Math.PI) % fullTurn + fullTurn) % fullTurn - Math.PI;
 }
 
 function clamp(value, min, max) {
