@@ -6,8 +6,8 @@ const STAR_CELL_SIZE = 16;
 const STAR_PARALLAX = 0.22;
 const ASTEROID_DASH_PERIOD = 10;
 const ASTEROID_DASH_ON = 5;
-const VISIBILITY_VERTEX_EPSILON = 0.0007;
-const VISIBILITY_TILE_MARGIN = 3;
+const ROCK_OUTER_CORNER_RADIUS = 3;
+const ROCK_INNER_CORNER_RADIUS = 1;
 const SMALL_ORB_RADIUS = 3;
 const REAR_ORBS = Object.freeze([
   { rear: 7, side: -5, layer: "back" },
@@ -313,6 +313,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         }
       : player
   );
+  const localPlayer = renderPlayers.find((player) => player.id === options.playerId);
 
   for (const renderPlayer of renderPlayers) {
     if (renderPlayer.thrusting) {
@@ -338,16 +339,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
   }
 
-  applyVisibilityClip(
-    ctx,
-    options.asteroid,
-    renderPlayers.find((player) => player.id === options.playerId),
-    camera,
-    colors
-  );
   drawPlayerHud(
     ctx,
-    renderPlayers.find((player) => player.id === options.playerId),
+    localPlayer,
     colors,
     textRenderer
   );
@@ -427,8 +421,36 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
 
       const screenX = Math.round(tileX * tileSize - camera.x);
       const screenY = Math.round(tileY * tileSize - camera.y);
-      drawRockTile(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+      drawRockFill(ctx, screenX, screenY, tileSize, colors);
+    }
+  }
 
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const tile = asteroid.tiles[index];
+      if (!isRockTile(tile)) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
+      drawRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+    }
+  }
+
+  drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors);
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const tile = asteroid.tiles[index];
+      if (!isRockTile(tile)) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
       if (tile === ASTEROID_TILE.ore) {
         drawOreRings(ctx, screenX, screenY, tileSize, amountAt(asteroid, index), hashCell(asteroid.seed, tileX, tileY));
       } else if (tile === ASTEROID_TILE.diamond) {
@@ -445,27 +467,171 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
   }
 }
 
-function drawRockTile(ctx, asteroid, tileX, tileY, x, y, size, colors) {
+function drawRockFill(ctx, x, y, size, colors) {
   ctx.fillStyle = colors.background;
   ctx.fillRect(x, y, size, size);
+}
+
+function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
   ctx.fillStyle = colors.foreground;
 
+  const north = isRockTileAt(asteroid, tileX, tileY - 1);
+  const east = isRockTileAt(asteroid, tileX + 1, tileY);
+  const south = isRockTileAt(asteroid, tileX, tileY + 1);
+  const west = isRockTileAt(asteroid, tileX - 1, tileY);
+  const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
+  const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
+  const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
+  const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
   const right = x + size - 1;
   const bottom = y + size - 1;
-  if (!isRockTileAt(asteroid, tileX, tileY - 1)) {
-    drawPixelLine(ctx, x, y, right, y);
+  const topOpen = !north;
+  const rightOpen = !east;
+  const bottomOpen = !south;
+  const leftOpen = !west;
+  const outerTopLeft = topOpen && leftOpen;
+  const outerTopRight = topOpen && rightOpen;
+  const outerBottomRight = bottomOpen && rightOpen;
+  const outerBottomLeft = bottomOpen && leftOpen;
+  const topTrimLeft = outerTopLeft
+    ? ROCK_OUTER_CORNER_RADIUS
+    : topOpen && west && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const topTrimRight = outerTopRight
+    ? ROCK_OUTER_CORNER_RADIUS
+    : topOpen && east && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const rightTrimTop = outerTopRight
+    ? ROCK_OUTER_CORNER_RADIUS
+    : rightOpen && north && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const rightTrimBottom = outerBottomRight
+    ? ROCK_OUTER_CORNER_RADIUS
+    : rightOpen && south && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const bottomTrimRight = outerBottomRight
+    ? ROCK_OUTER_CORNER_RADIUS
+    : bottomOpen && east && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const bottomTrimLeft = outerBottomLeft
+    ? ROCK_OUTER_CORNER_RADIUS
+    : bottomOpen && west && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const leftTrimBottom = outerBottomLeft
+    ? ROCK_OUTER_CORNER_RADIUS
+    : leftOpen && south && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const leftTrimTop = outerTopLeft
+    ? ROCK_OUTER_CORNER_RADIUS
+    : leftOpen && north && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+
+  if (topOpen) {
+    drawPixelLine(
+      ctx,
+      x + topTrimLeft,
+      y,
+      right - topTrimRight,
+      y
+    );
   }
 
-  if (!isRockTileAt(asteroid, tileX + 1, tileY)) {
-    drawPixelLine(ctx, right, y, right, bottom);
+  if (rightOpen) {
+    drawPixelLine(
+      ctx,
+      right,
+      y + rightTrimTop,
+      right,
+      bottom - rightTrimBottom
+    );
   }
 
-  if (!isRockTileAt(asteroid, tileX, tileY + 1)) {
-    drawPixelLine(ctx, right, bottom, x, bottom);
+  if (bottomOpen) {
+    drawPixelLine(
+      ctx,
+      right - bottomTrimRight,
+      bottom,
+      x + bottomTrimLeft,
+      bottom
+    );
   }
 
-  if (!isRockTileAt(asteroid, tileX - 1, tileY)) {
-    drawPixelLine(ctx, x, bottom, x, y);
+  if (leftOpen) {
+    drawPixelLine(
+      ctx,
+      x,
+      bottom - leftTrimBottom,
+      x,
+      y + leftTrimTop
+    );
+  }
+
+  drawOuterRockCorners(ctx, x, y, right, bottom, {
+    outerTopLeft,
+    outerTopRight,
+    outerBottomRight,
+    outerBottomLeft
+  });
+}
+
+function drawOuterRockCorners(ctx, x, y, right, bottom, corners) {
+  if (corners.outerTopLeft) {
+    drawPixelLine(ctx, x, y + ROCK_OUTER_CORNER_RADIUS, x + ROCK_OUTER_CORNER_RADIUS, y);
+  }
+
+  if (corners.outerTopRight) {
+    drawPixelLine(ctx, right - ROCK_OUTER_CORNER_RADIUS, y, right, y + ROCK_OUTER_CORNER_RADIUS);
+  }
+
+  if (corners.outerBottomRight) {
+    drawPixelLine(ctx, right, bottom - ROCK_OUTER_CORNER_RADIUS, right - ROCK_OUTER_CORNER_RADIUS, bottom);
+  }
+
+  if (corners.outerBottomLeft) {
+    drawPixelLine(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom, x, bottom - ROCK_OUTER_CORNER_RADIUS);
+  }
+}
+
+function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors) {
+  ctx.fillStyle = colors.foreground;
+
+  for (let tileY = minTileY - 1; tileY <= maxTileY + 1; tileY += 1) {
+    for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
+      if (isRockTileAt(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      const x = Math.round(tileX * tileSize - camera.x);
+      const y = Math.round(tileY * tileSize - camera.y);
+      const topEdge = y - 1;
+      const leftEdge = x - 1;
+      const rightEdge = x + tileSize;
+      const bottomEdge = y + tileSize;
+      const rightInside = rightEdge - 1;
+      const bottomInside = bottomEdge - 1;
+      const north = isRockTileAt(asteroid, tileX, tileY - 1);
+      const east = isRockTileAt(asteroid, tileX + 1, tileY);
+      const south = isRockTileAt(asteroid, tileX, tileY + 1);
+      const west = isRockTileAt(asteroid, tileX - 1, tileY);
+      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
+      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
+      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
+      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
+
+      if (north && west && northWest) {
+        drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS);
+      }
+
+      if (north && east && northEast) {
+        drawPixelLine(ctx, rightInside - ROCK_INNER_CORNER_RADIUS, topEdge, rightEdge, y + ROCK_INNER_CORNER_RADIUS);
+      }
+
+      if (south && east && southEast) {
+        drawPixelLine(
+          ctx,
+          rightEdge,
+          bottomInside - ROCK_INNER_CORNER_RADIUS,
+          rightInside - ROCK_INNER_CORNER_RADIUS,
+          bottomEdge
+        );
+      }
+
+      if (south && west && southWest) {
+        drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, bottomEdge, leftEdge, bottomInside - ROCK_INNER_CORNER_RADIUS);
+      }
+    }
   }
 }
 
@@ -667,253 +833,6 @@ function isPlayableTile(asteroid, tileX, tileY) {
   }
 
   return asteroid.playable[tileY * asteroid.widthTiles + tileX] === "1";
-}
-
-function applyVisibilityClip(ctx, asteroid, player, camera, colors) {
-  if (!asteroid || !player) {
-    return;
-  }
-
-  const polygon = computeVisibilityPolygon(asteroid, player, camera);
-  if (polygon.length < 3) {
-    return;
-  }
-
-  fillOutsidePolygon(ctx, polygon, colors.background);
-}
-
-function computeVisibilityPolygon(asteroid, player, camera) {
-  const origin = {
-    x: player.x,
-    y: player.y
-  };
-  const viewport = {
-    left: camera.x,
-    top: camera.y,
-    right: camera.x + RENDER.width,
-    bottom: camera.y + RENDER.height
-  };
-  const edges = collectVisibilityEdges(asteroid, viewport);
-  const angles = collectVisibilityAngles(edges, origin);
-  const points = [];
-
-  for (const angle of angles) {
-    const hit = nearestRayEdgeIntersection(origin, angle, edges);
-    if (hit) {
-      points.push({
-        x: hit.x - camera.x,
-        y: hit.y - camera.y,
-        angle
-      });
-    }
-  }
-
-  points.sort((a, b) => a.angle - b.angle);
-  return dedupeVisibilityPolygon(points);
-}
-
-function collectVisibilityEdges(asteroid, viewport) {
-  const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const minTileX = Math.max(0, Math.floor(viewport.left / tileSize) - VISIBILITY_TILE_MARGIN);
-  const maxTileX = Math.min(
-    asteroid.widthTiles - 1,
-    Math.ceil(viewport.right / tileSize) + VISIBILITY_TILE_MARGIN
-  );
-  const minTileY = Math.max(0, Math.floor(viewport.top / tileSize) - VISIBILITY_TILE_MARGIN);
-  const maxTileY = Math.min(
-    asteroid.heightTiles - 1,
-    Math.ceil(viewport.bottom / tileSize) + VISIBILITY_TILE_MARGIN
-  );
-  const edges = [
-    { ax: viewport.left, ay: viewport.top, bx: viewport.right, by: viewport.top },
-    { ax: viewport.right, ay: viewport.top, bx: viewport.right, by: viewport.bottom },
-    { ax: viewport.right, ay: viewport.bottom, bx: viewport.left, by: viewport.bottom },
-    { ax: viewport.left, ay: viewport.bottom, bx: viewport.left, by: viewport.top }
-  ];
-
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      const x = tileX * tileSize;
-      const y = tileY * tileSize;
-      const right = x + tileSize;
-      const bottom = y + tileSize;
-
-      if (isRockTileAt(asteroid, tileX, tileY)) {
-        if (!isRockTileAt(asteroid, tileX, tileY - 1)) {
-          edges.push({ ax: x, ay: y, bx: right, by: y });
-        }
-        if (!isRockTileAt(asteroid, tileX + 1, tileY)) {
-          edges.push({ ax: right, ay: y, bx: right, by: bottom });
-        }
-        if (!isRockTileAt(asteroid, tileX, tileY + 1)) {
-          edges.push({ ax: right, ay: bottom, bx: x, by: bottom });
-        }
-        if (!isRockTileAt(asteroid, tileX - 1, tileY)) {
-          edges.push({ ax: x, ay: bottom, bx: x, by: y });
-        }
-        continue;
-      }
-
-      if (!isPlayableTile(asteroid, tileX, tileY)) {
-        continue;
-      }
-
-      if (!isPlayableTile(asteroid, tileX, tileY - 1)) {
-        edges.push({ ax: x, ay: y, bx: right, by: y });
-      }
-      if (!isPlayableTile(asteroid, tileX + 1, tileY)) {
-        edges.push({ ax: right, ay: y, bx: right, by: bottom });
-      }
-      if (!isPlayableTile(asteroid, tileX, tileY + 1)) {
-        edges.push({ ax: right, ay: bottom, bx: x, by: bottom });
-      }
-      if (!isPlayableTile(asteroid, tileX - 1, tileY)) {
-        edges.push({ ax: x, ay: bottom, bx: x, by: y });
-      }
-    }
-  }
-
-  return edges;
-}
-
-function collectVisibilityAngles(edges, origin) {
-  const angles = [];
-  const seen = new Set();
-
-  for (const edge of edges) {
-    addVisibilityVertexAngles(angles, seen, origin, edge.ax, edge.ay);
-    addVisibilityVertexAngles(angles, seen, origin, edge.bx, edge.by);
-  }
-
-  return angles;
-}
-
-function addVisibilityVertexAngles(angles, seen, origin, x, y) {
-  const baseAngle = Math.atan2(y - origin.y, x - origin.x);
-
-  for (const angle of [
-    baseAngle - VISIBILITY_VERTEX_EPSILON,
-    baseAngle,
-    baseAngle + VISIBILITY_VERTEX_EPSILON
-  ]) {
-    const normalized = normalizeSignedAngle(angle);
-    const key = Math.round(normalized * 1000000);
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    angles.push(normalized);
-  }
-}
-
-function nearestRayEdgeIntersection(origin, angle, edges) {
-  const ray = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
-  let nearest = null;
-  let nearestDistance = Infinity;
-
-  for (const edge of edges) {
-    const hit = rayEdgeIntersection(origin, ray, edge);
-    if (!hit || hit.distance >= nearestDistance) {
-      continue;
-    }
-
-    nearest = hit;
-    nearestDistance = hit.distance;
-  }
-
-  return nearest;
-}
-
-function rayEdgeIntersection(origin, ray, edge) {
-  const segment = {
-    x: edge.bx - edge.ax,
-    y: edge.by - edge.ay
-  };
-  const denominator = cross(ray.x, ray.y, segment.x, segment.y);
-
-  if (Math.abs(denominator) < 0.000001) {
-    return null;
-  }
-
-  const dx = edge.ax - origin.x;
-  const dy = edge.ay - origin.y;
-  const distance = cross(dx, dy, segment.x, segment.y) / denominator;
-  const segmentProgress = cross(dx, dy, ray.x, ray.y) / denominator;
-
-  if (distance < 0 || segmentProgress < 0 || segmentProgress > 1) {
-    return null;
-  }
-
-  return {
-    x: origin.x + ray.x * distance,
-    y: origin.y + ray.y * distance,
-    distance
-  };
-}
-
-function dedupeVisibilityPolygon(points) {
-  const deduped = [];
-
-  for (const point of points) {
-    const previous = deduped[deduped.length - 1];
-    if (previous && Math.abs(previous.x - point.x) < 0.05 && Math.abs(previous.y - point.y) < 0.05) {
-      continue;
-    }
-
-    deduped.push(point);
-  }
-
-  if (deduped.length > 1) {
-    const first = deduped[0];
-    const last = deduped[deduped.length - 1];
-    if (Math.abs(first.x - last.x) < 0.05 && Math.abs(first.y - last.y) < 0.05) {
-      deduped.pop();
-    }
-  }
-
-  return deduped;
-}
-
-function fillOutsidePolygon(ctx, polygon, color) {
-  ctx.fillStyle = color;
-
-  for (let y = 0; y < RENDER.height; y += 1) {
-    const intersections = polygonScanlineIntersections(polygon, y + 0.5);
-    let cursor = 0;
-    let inside = false;
-
-    for (const intersection of intersections) {
-      const x = clamp(Math.round(intersection), 0, RENDER.width);
-      if (!inside && x > cursor) {
-        ctx.fillRect(cursor, y, x - cursor, 1);
-      }
-
-      cursor = x;
-      inside = !inside;
-    }
-
-    if (!inside && cursor < RENDER.width) {
-      ctx.fillRect(cursor, y, RENDER.width - cursor, 1);
-    }
-  }
-}
-
-function polygonScanlineIntersections(polygon, scanY) {
-  const intersections = [];
-
-  for (let index = 0; index < polygon.length; index += 1) {
-    const from = polygon[index];
-    const to = polygon[(index + 1) % polygon.length];
-    if ((from.y <= scanY && to.y > scanY) || (to.y <= scanY && from.y > scanY)) {
-      intersections.push(from.x + ((scanY - from.y) * (to.x - from.x)) / (to.y - from.y));
-    }
-  }
-
-  return intersections.sort((a, b) => a - b);
 }
 
 function drawWorldBounds(ctx, snapshot, camera) {
@@ -1158,8 +1077,14 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
 
   const x = 8;
   const y = 8;
-  const width = 124;
-  const height = 38;
+  const width = 112;
+  const height = 48;
+  const padding = 4;
+  const contentX = x + padding;
+  const contentRight = x + width - padding;
+  const hpY = y + padding;
+  const rowY = y + 18;
+  const rowStep = 10;
   const hp = clamp(player.health ?? 0, 0, player.maxHealth || 1);
   const maxHp = Math.max(1, player.maxHealth || 1);
   const resources = player.resources || {};
@@ -1169,67 +1094,44 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
   ctx.fillStyle = colors.background;
   ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
 
-  textRenderer.draw(ctx, "HP", x + 5, y + 5, {
+  textRenderer.draw(ctx, "HP", contentX, hpY, {
     fontSize: 8,
     color: colors.foreground
   });
-  drawHudBar(ctx, x + 23, y + 5, 92, 7, hp / maxHp, colors);
+  drawHudBar(ctx, x + 22, hpY + 1, contentRight - (x + 22), 5, hp / maxHp, colors);
 
-  const rowY = y + 22;
-  drawRockResourceIcon(ctx, x + 7, rowY, colors);
-  drawHudCount(ctx, resources.rock || 0, x + 17, rowY - 2, textRenderer, colors);
-  drawOreResourceIcon(ctx, x + 45, rowY, colors);
-  drawHudCount(ctx, resources.ore || 0, x + 55, rowY - 2, textRenderer, colors);
-  drawDiamondResourceIcon(ctx, x + 83, rowY, colors);
-  drawHudCount(ctx, resources.diamond || 0, x + 93, rowY - 2, textRenderer, colors);
+  drawHudResource(ctx, "ROCK", resources.rock || 0, contentX, contentRight, rowY, textRenderer, colors);
+  drawHudResource(ctx, "ORE", resources.ore || 0, contentX, contentRight, rowY + rowStep, textRenderer, colors);
+  drawHudResource(ctx, "DIAMOND", resources.diamond || 0, contentX, contentRight, rowY + rowStep * 2, textRenderer, colors);
 }
 
 function drawHudBar(ctx, x, y, width, height, progress, colors) {
   const fillWidth = Math.round((width - 2) * clamp(progress, 0, 1));
 
   ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x, y, width, height);
-  ctx.fillStyle = colors.background;
-  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
-  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, 1);
+  ctx.fillRect(x, y + height - 1, width, 1);
+  ctx.fillRect(x, y, 1, height);
+  ctx.fillRect(x + width - 1, y, 1, height);
   if (fillWidth > 0) {
     ctx.fillRect(x + 1, y + 1, fillWidth, height - 2);
   }
 }
 
-function drawHudCount(ctx, value, x, y, textRenderer, colors) {
-  textRenderer.draw(ctx, String(Math.min(999, Math.max(0, Math.floor(value)))), x, y, {
+function drawHudResource(ctx, label, value, labelX, countRight, y, textRenderer, colors) {
+  const count = String(Math.min(ENGINE.player.maxResourceAmount, Math.max(0, Math.floor(value))));
+  const countWidth = textRenderer.measure(count, { fontSize: 8 });
+
+  textRenderer.draw(ctx, label, labelX, y, {
     fontSize: 8,
     color: colors.foreground,
-    width: 22
+    width: 60
   });
-}
-
-function drawRockResourceIcon(ctx, x, y, colors) {
-  ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x, y, 6, 1);
-  ctx.fillRect(x, y + 5, 6, 1);
-  ctx.fillRect(x, y, 1, 6);
-  ctx.fillRect(x + 5, y, 1, 6);
-  ctx.fillStyle = colors.background;
-  ctx.fillRect(x + 2, y + 2, 2, 2);
-}
-
-function drawOreResourceIcon(ctx, x, y, colors) {
-  ctx.fillStyle = colors.foreground;
-  drawPixelLine(ctx, x + 3, y, x + 5, y + 2);
-  drawPixelLine(ctx, x + 5, y + 2, x + 3, y + 5);
-  drawPixelLine(ctx, x + 3, y + 5, x, y + 3);
-  drawPixelLine(ctx, x, y + 3, x + 3, y);
-}
-
-function drawDiamondResourceIcon(ctx, x, y, colors) {
-  ctx.fillStyle = colors.foreground;
-  drawPixelLine(ctx, x + 3, y, x + 6, y + 3);
-  drawPixelLine(ctx, x + 6, y + 3, x + 3, y + 6);
-  drawPixelLine(ctx, x + 3, y + 6, x, y + 3);
-  drawPixelLine(ctx, x, y + 3, x + 3, y);
-  drawPixelLine(ctx, x, y + 3, x + 6, y + 3);
+  textRenderer.draw(ctx, count, countRight - countWidth, y, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: countWidth + 1
+  });
 }
 
 function wrapPixelText(text, maxWidth, textRenderer, options) {
@@ -1580,15 +1482,6 @@ function hashCell(seed, x, y) {
   }
 
   return hash >>> 0;
-}
-
-function cross(ax, ay, bx, by) {
-  return ax * by - ay * bx;
-}
-
-function normalizeSignedAngle(angle) {
-  const fullTurn = Math.PI * 2;
-  return ((angle + Math.PI) % fullTurn + fullTurn) % fullTurn - Math.PI;
 }
 
 function clamp(value, min, max) {

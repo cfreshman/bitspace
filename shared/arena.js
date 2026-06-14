@@ -377,19 +377,27 @@ function miningTargetForTile(asteroid, index) {
 function completeMiningTarget(arena, player, index, target) {
   if (target.resource === "ore") {
     const nextAmount = Math.max(0, arena.asteroid.amounts[index] - 1);
-    player.resources.ore += 1;
+    addPlayerResource(player, "ore", 1);
     setAsteroidTile(arena, index, nextAmount > 0 ? ASTEROID_TILE.ore : ASTEROID_TILE.rock, nextAmount);
     return;
   }
 
   if (target.resource === "diamond") {
-    player.resources.diamond += 1;
+    addPlayerResource(player, "diamond", 1);
     setAsteroidTile(arena, index, ASTEROID_TILE.rock, 0);
     return;
   }
 
-  player.resources.rock += 1;
+  addPlayerResource(player, "rock", 1);
   setAsteroidTile(arena, index, ASTEROID_TILE.empty, 0);
+}
+
+function addPlayerResource(player, resource, amount) {
+  player.resources[resource] = clamp(
+    (player.resources[resource] || 0) + amount,
+    0,
+    ENGINE.player.maxResourceAmount
+  );
 }
 
 function setAsteroidTile(arena, index, tile, amount) {

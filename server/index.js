@@ -1,4 +1,5 @@
 import express from "express";
+import { randomBytes } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -29,7 +30,8 @@ const publicDir = path.join(rootDir, "public");
 const sharedDir = path.join(rootDir, "shared");
 const port = Number(process.env.PORT || process.env.BITSPACE_PORT || 7023);
 const arenaRoom = "arena:main";
-const arena = createArena({ id: "main", seed: process.env.BITSPACE_SEED || "bitspace-main" });
+const arenaSeed = process.env.BITSPACE_SEED || createArenaSeed();
+const arena = createArena({ id: "main", seed: arenaSeed });
 
 const app = express();
 const server = http.createServer(app);
@@ -46,6 +48,8 @@ app.get("/health", (_request, response) => {
     ok: true,
     name: "BITSPACE",
     arena: arena.id,
+    seed: arena.seed,
+    asteroidSeed: arena.asteroid.seed,
     tick: arena.tick,
     players: arena.players.size,
     maxPlayers: ENGINE.maxPlayers,
@@ -78,6 +82,8 @@ io.on("connection", (socket) => {
     tickRate: ENGINE.tickRate,
     snapshotRate: ENGINE.snapshotRate,
     maxPlayers: ENGINE.maxPlayers,
+    seed: arena.seed,
+    asteroidSeed: arena.asteroid.seed,
     render: RENDER,
     world: ENGINE.world
   });
@@ -124,8 +130,15 @@ setInterval(() => {
 
 server.listen(port, () => {
   console.log(`BITSPACE listening on port ${port}`);
+  console.log(`seed: ${arena.seed}`);
+  console.log(`asteroid seed: ${arena.asteroid.seed}`);
+  console.log(`replay: BITSPACE_SEED=${arena.seed} npm start`);
 });
 
 function broadcastLobby() {
   io.to(arenaRoom).emit(SERVER_EVENTS.lobby, lobbySnapshot(arena));
+}
+
+function createArenaSeed() {
+  return randomBytes(5).toString("hex");
 }

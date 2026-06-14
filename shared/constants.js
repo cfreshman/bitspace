@@ -16,8 +16,8 @@ export const ENGINE = Object.freeze({
   snapshotRate: 60,
   maxPlayers: 4,
   world: {
-    width: 2048,
-    height: 2048,
+    width: 4096,
+    height: 4096,
     sectorSize: 16
   },
   ship: {
@@ -27,7 +27,8 @@ export const ENGINE = Object.freeze({
     maxSpeed: 160
   },
   player: {
-    maxHealth: 100
+    maxHealth: 100,
+    maxResourceAmount: 999
   },
   mining: {
     rayLength: 28,
