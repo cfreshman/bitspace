@@ -1,7 +1,8 @@
 export const CLIENT_EVENTS = Object.freeze({
   input: "client:input",
   setName: "client:set-name",
-  talk: "client:talk"
+  talk: "client:talk",
+  upgrade: "client:upgrade"
 });
 
 export const SERVER_EVENTS = Object.freeze({

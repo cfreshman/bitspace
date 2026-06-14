@@ -12,6 +12,7 @@ import {
   addPlayer,
   createArena,
   lobbySnapshot,
+  purchasePlayerUpgrade,
   removePlayer,
   sanitizePlayerName,
   setPlayerInput,
@@ -103,6 +104,16 @@ io.on("connection", (socket) => {
 
   socket.on(CLIENT_EVENTS.talk, (text) => {
     setPlayerTalk(arena, socket.id, text);
+  });
+
+  socket.on(CLIENT_EVENTS.upgrade, (upgradeId) => {
+    const result = purchasePlayerUpgrade(arena, socket.id, upgradeId);
+    if (!result.ok) {
+      socket.emit(SERVER_EVENTS.notice, {
+        code: result.reason,
+        upgradeId
+      });
+    }
   });
 
   socket.on("disconnect", () => {

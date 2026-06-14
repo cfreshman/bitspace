@@ -1,5 +1,12 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
 import { ASTEROID_TILE, raycastAsteroid } from "/shared/asteroid.js";
+import {
+  aggregateUpgradeEffects,
+  canAffordUpgrade,
+  nextUpgradeCost,
+  UPGRADE_DEFINITIONS,
+  upgradeLevel
+} from "/shared/upgrades.js";
 
 const ENTITY_PIXEL_SIZE = 1;
 const STAR_CELL_SIZE = 16;
@@ -345,6 +352,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     colors,
     textRenderer
   );
+  drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer);
   drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
 }
 
@@ -1110,6 +1118,100 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
   drawHudResource(ctx, "DIAMOND", resources.diamond || 0, contentX, contentRight, rowY + rowStep * 2, textRenderer, colors);
 }
 
+function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer) {
+  if (!player) {
+    return;
+  }
+
+  if (!upgradesUi?.active) {
+    textRenderer.draw(ctx, "U - UPGRADES", 10, 62, {
+      fontSize: 8,
+      color: colors.foreground
+    });
+    return;
+  }
+
+  drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer);
+}
+
+function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
+  const x = 8;
+  const y = 60;
+  const width = 182;
+  const height = 112;
+  const resources = player.resources || {};
+  const selectedIndex = clamp(
+    Math.floor(upgradesUi.selectedIndex || 0),
+    0,
+    UPGRADE_DEFINITIONS.length - 1
+  );
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+
+  textRenderer.draw(ctx, "UPGRADES", x + 5, y + 5, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+
+  for (let index = 0; index < UPGRADE_DEFINITIONS.length; index += 1) {
+    const definition = UPGRADE_DEFINITIONS[index];
+    const level = upgradeLevel(player.upgrades, definition.id);
+    const cost = nextUpgradeCost(player.upgrades, definition.id);
+    const affordable = canAffordUpgrade(resources, cost);
+    const selected = index === selectedIndex;
+    const rowY = y + 18 + index * 10;
+    const marker = selected ? "*" : affordable ? "+" : " ";
+    const row = `${marker}${definition.code} ${level}/${definition.maxLevel} ${formatUpgradeCost(cost)}`;
+
+    if (selected) {
+      ctx.fillStyle = colors.foreground;
+      ctx.fillRect(x + 3, rowY - 1, width - 6, 9);
+    }
+
+    textRenderer.draw(ctx, row, x + 6, rowY, {
+      fontSize: 8,
+      color: selected ? colors.background : colors.foreground,
+      width: width - 12
+    });
+  }
+
+  const selectedDefinition = UPGRADE_DEFINITIONS[selectedIndex];
+  const selectedCost = nextUpgradeCost(player.upgrades, selectedDefinition?.id);
+  const footer = selectedCost
+    ? canAffordUpgrade(resources, selectedCost)
+      ? "ENTER BUY"
+      : `NEED ${formatUpgradeCost(selectedCost)}`
+    : "MAX LEVEL";
+
+  textRenderer.draw(ctx, footer, x + 5, y + height - 12, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: width - 10
+  });
+}
+
+function formatUpgradeCost(cost) {
+  if (!cost) {
+    return "MAX";
+  }
+
+  const parts = [];
+  if (cost.rock) {
+    parts.push(`${cost.rock}R`);
+  }
+  if (cost.ore) {
+    parts.push(`${cost.ore}O`);
+  }
+  if (cost.diamond) {
+    parts.push(`${cost.diamond}D`);
+  }
+
+  return parts.join(" ");
+}
+
 function drawHudHealthBars(ctx, x, y, width, height, health, maxHealth, bars, colors) {
   const gap = 1;
   const segmentWidth = Math.max(3, Math.floor((width - gap * (bars - 1)) / bars));
@@ -1202,6 +1304,7 @@ function breakPixelWord(word, maxWidth, textRenderer, options) {
 }
 
 function emitThrusterParticles(state, player, dtSeconds) {
+  const effects = aggregateUpgradeEffects(player.upgrades);
   const rearAngle = player.angle + Math.PI;
   const rear = {
     x: Math.cos(rearAngle),
@@ -1217,7 +1320,8 @@ function emitThrusterParticles(state, player, dtSeconds) {
     y: center.y + rear.y * (SMALL_ORB_RADIUS + 1)
   };
   const key = player.id || String(player.number);
-  const carry = (state.emitCarry.get(key) || 0) + THRUSTER_PARTICLE_RATE * dtSeconds;
+  const particleMultiplier = effects.thrusterParticleMultiplier;
+  const carry = (state.emitCarry.get(key) || 0) + THRUSTER_PARTICLE_RATE * particleMultiplier * dtSeconds;
   const count = Math.floor(carry);
   state.emitCarry.set(key, carry - count);
 
@@ -1225,8 +1329,8 @@ function emitThrusterParticles(state, player, dtSeconds) {
     const seed = state.nextSeed();
     const sideJitter = (randomUnit(seed, 1) - 0.5) * 4;
     const rearJitter = (randomUnit(seed, 2) - 0.5) * 2;
-    const speed = 38 + randomUnit(seed, 3) * 72;
-    const spread = (randomUnit(seed, 4) - 0.5) * 42;
+    const speed = (38 + randomUnit(seed, 3) * 72) * Math.sqrt(particleMultiplier);
+    const spread = (randomUnit(seed, 4) - 0.5) * 42 * Math.sqrt(particleMultiplier);
     const life = 0.22 + randomUnit(seed, 5) * 0.34;
 
     state.particles.push({
@@ -1247,6 +1351,7 @@ function emitThrusterParticles(state, player, dtSeconds) {
 
 function emitMiningParticles(state, player, dtSeconds) {
   const ray = player.miningRay;
+  const effects = aggregateUpgradeEffects(player.upgrades);
   const direction = {
     x: Math.cos(player.aimAngle ?? player.angle),
     y: Math.sin(player.aimAngle ?? player.angle)
@@ -1256,7 +1361,9 @@ function emitMiningParticles(state, player, dtSeconds) {
     y: direction.x
   };
   const key = `mine:${player.id || player.number}`;
-  const carry = (state.emitCarry.get(key) || 0) + MINING_PARTICLE_RATE * dtSeconds;
+  const carry =
+    (state.emitCarry.get(key) || 0) +
+    MINING_PARTICLE_RATE * effects.miningParticleMultiplier * dtSeconds;
   const count = Math.floor(carry);
   state.emitCarry.set(key, carry - count);
 
@@ -1361,6 +1468,8 @@ function fillDisk(ctx, cx, cy, radius, occluders = []) {
 
 function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
   ctx.fillStyle = colors.foreground;
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const angle = player.aimAngle ?? player.angle;
   const direction = {
     x: Math.cos(angle),
@@ -1376,7 +1485,7 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
     y: player.y + direction.y * player.radius
   };
   const fallbackHit = !player.miningRay && asteroid
-    ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, ENGINE.mining.rayLength)
+    ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, rayLength)
     : null;
   const start = player.miningRay
     ? worldToScreen({ x: player.miningRay.startX, y: player.miningRay.startY }, camera)
@@ -1384,14 +1493,14 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
         x: center.x + direction.x * player.radius,
         y: center.y + direction.y * player.radius
       };
-  const phase = timeSeconds * 10 + player.number;
+  const phase = timeSeconds * 10 * effects.raySpinMultiplier + player.number;
   const tip = player.miningRay
     ? worldToScreen({ x: player.miningRay.endX, y: player.miningRay.endY }, camera)
     : fallbackHit
       ? worldToScreen(fallbackHit, camera)
     : {
-        x: Math.round(start.x + direction.x * ENGINE.mining.rayLength),
-        y: Math.round(start.y + direction.y * ENGINE.mining.rayLength)
+        x: Math.round(start.x + direction.x * rayLength),
+        y: Math.round(start.y + direction.y * rayLength)
       };
 
   for (let index = 0; index < 3; index += 1) {

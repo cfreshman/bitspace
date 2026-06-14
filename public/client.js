@@ -1,6 +1,7 @@
 import { ENGINE } from "/shared/constants.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
+import { UPGRADE_DEFINITIONS } from "/shared/upgrades.js";
 import { createRenderer } from "/renderer.js";
 
 const TALK_MAX_CHARS = 36;
@@ -25,6 +26,10 @@ const state = {
     caret: 0,
     selectionStart: 0,
     selectionEnd: 0
+  },
+  upgrades: {
+    active: false,
+    selectedIndex: 0
   }
 };
 
@@ -66,9 +71,23 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (state.upgrades.active) {
+    handleUpgradeKey(event);
+    return;
+  }
+
   if (event.code === "KeyT" && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     activateTalk();
+    return;
+  }
+
+  if (event.code === "KeyU" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    if (event.repeat) {
+      return;
+    }
+    activateUpgrades();
     return;
   }
 
@@ -80,6 +99,13 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("keyup", (event) => {
   if (state.chat.active) {
+    return;
+  }
+
+  if (state.upgrades.active) {
+    if (shouldCaptureKey(event.code) || event.code === "Enter" || event.code === "Escape") {
+      event.preventDefault();
+    }
     return;
   }
 
@@ -163,8 +189,9 @@ function draw(now = 0) {
     playerId: state.playerId,
     asteroid: state.asteroid,
     chat: state.chat,
+    upgrades: state.upgrades,
     aimAngle: state.mouse.aimAngle,
-    mining: state.mouse.down,
+    mining: state.mouse.down && !state.chat.active && !state.upgrades.active,
     timeSeconds: now / 1000
   });
   requestAnimationFrame(draw);
@@ -185,11 +212,58 @@ function createTalkInput() {
 
 function activateTalk() {
   state.chat.active = true;
+  state.upgrades.active = false;
   state.mouse.down = false;
   keys.clear();
   talkInput.value = "";
   talkInput.focus({ preventScroll: true });
   syncTalkDraft();
+}
+
+function activateUpgrades() {
+  state.upgrades.active = true;
+  state.mouse.down = false;
+  keys.clear();
+}
+
+function closeUpgrades() {
+  state.upgrades.active = false;
+}
+
+function handleUpgradeKey(event) {
+  if (shouldCaptureKey(event.code) || event.code === "Enter" || event.code === "Escape") {
+    event.preventDefault();
+  }
+
+  if (event.code === "Escape" || event.code === "KeyU") {
+    if (event.repeat) {
+      return;
+    }
+    closeUpgrades();
+    return;
+  }
+
+  if (event.code === "ArrowUp" || event.code === "KeyW") {
+    state.upgrades.selectedIndex =
+      (state.upgrades.selectedIndex + UPGRADE_DEFINITIONS.length - 1) % UPGRADE_DEFINITIONS.length;
+    return;
+  }
+
+  if (event.code === "ArrowDown" || event.code === "KeyS") {
+    state.upgrades.selectedIndex =
+      (state.upgrades.selectedIndex + 1) % UPGRADE_DEFINITIONS.length;
+    return;
+  }
+
+  if (event.code === "Enter" || event.code === "Space") {
+    if (event.repeat) {
+      return;
+    }
+    const definition = UPGRADE_DEFINITIONS[state.upgrades.selectedIndex];
+    if (definition && socket.connected) {
+      socket.emit(CLIENT_EVENTS.upgrade, definition.id);
+    }
+  }
 }
 
 function closeTalk() {
@@ -217,7 +291,7 @@ function syncTalkDraft() {
 
 function readInput() {
   state.inputSeq += 1;
-  if (state.chat.active) {
+  if (state.chat.active || state.upgrades.active) {
     return normalizeInput({
       seq: state.inputSeq,
       moveX: 0,
@@ -351,6 +425,7 @@ function shouldCaptureKey(code) {
     "KeyS",
     "KeyD",
     "KeyT",
+    "KeyU",
     "Space"
   ].includes(code);
 }

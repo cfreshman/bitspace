@@ -31,6 +31,7 @@ export const ENGINE = Object.freeze({
     maxHealthBars: 7,
     healthPerBar: 100,
     maxHealth: 300,
+    rechargeDelaySeconds: 5,
     maxResourceAmount: 999
   },
   mining: {

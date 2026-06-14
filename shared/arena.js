@@ -12,6 +12,15 @@ import {
   clampMagnitude,
   roundForSnapshot
 } from "./math.js";
+import {
+  aggregateUpgradeEffects,
+  canAffordUpgrade,
+  createUpgradeState,
+  nextUpgradeCost,
+  sanitizeUpgradeState,
+  upgradeDefinitionById,
+  upgradeLevel
+} from "./upgrades.js";
 
 const DEFAULT_ARENA_ID = "main";
 
@@ -58,9 +67,11 @@ export function addPlayer(arena, playerOptions) {
     thrusting: false,
     shake: 0,
     radius: ENGINE.ship.radius,
+    upgrades: createUpgradeState(),
     healthBars: ENGINE.player.startingHealthBars,
     health: playerMaxHealth(ENGINE.player.startingHealthBars),
     maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars),
+    lastDamageTick: Number.NEGATIVE_INFINITY,
     resources: {
       rock: 0,
       ore: 0,
@@ -119,6 +130,38 @@ export function setPlayerTalk(arena, playerId, text) {
 
   player.talk = talk;
   return true;
+}
+
+export function purchasePlayerUpgrade(arena, playerId, upgradeId) {
+  const player = arena.players.get(playerId);
+  if (!player || !player.alive) {
+    return { ok: false, reason: "player_unavailable" };
+  }
+
+  const definition = upgradeDefinitionById(String(upgradeId || ""));
+  if (!definition) {
+    return { ok: false, reason: "unknown_upgrade" };
+  }
+
+  const currentLevel = upgradeLevel(player.upgrades, definition.id);
+  if (currentLevel >= definition.maxLevel) {
+    return { ok: false, reason: "upgrade_maxed" };
+  }
+
+  const cost = nextUpgradeCost(player.upgrades, definition.id);
+  if (!canAffordUpgrade(player.resources, cost)) {
+    return { ok: false, reason: "insufficient_resources" };
+  }
+
+  spendUpgradeCost(player, cost);
+  player.upgrades[definition.id] = currentLevel + 1;
+  syncPlayerDerivedStats(player);
+
+  return {
+    ok: true,
+    upgradeId: definition.id,
+    level: currentLevel + 1
+  };
 }
 
 export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate) {
@@ -201,6 +244,8 @@ export function sanitizeTalkText(text) {
 
 function stepPlayer(arena, player, dtSeconds) {
   player.shake = Math.max(0, player.shake - ENGINE.collision.shakeDecay * dtSeconds);
+  syncPlayerDerivedStats(player);
+  const effects = aggregateUpgradeEffects(player.upgrades);
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const isMoving = move.x !== 0 || move.y !== 0;
@@ -208,19 +253,20 @@ function stepPlayer(arena, player, dtSeconds) {
 
   if (isMoving) {
     player.angle = normalizeAngle(Math.atan2(move.y, move.x));
-    player.vx += move.x * ENGINE.ship.thrust * dtSeconds;
-    player.vy += move.y * ENGINE.ship.thrust * dtSeconds;
+    player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+    player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
   }
 
   player.aimAngle = player.input.aimAngle;
   player.mining = player.input.mining;
+  rechargePlayerHealth(arena, player, dtSeconds, effects);
 
   const fixedStepSeconds = 1 / ENGINE.tickRate;
-  const drag = Math.pow(ENGINE.ship.drag, dtSeconds / fixedStepSeconds);
+  const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
   player.vx *= drag;
   player.vy *= drag;
 
-  const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed);
+  const velocity = clampMagnitude(player.vx, player.vy, playerMaxSpeed(player, effects));
   player.vx = velocity.x;
   player.vy = velocity.y;
 
@@ -291,12 +337,14 @@ function processPlayerMining(arena, player, dtSeconds) {
     x: Math.cos(angle),
     y: Math.sin(angle)
   };
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  const rayLength = playerMiningRayLength(player, effects);
   const start = {
     x: player.x + direction.x * player.radius,
     y: player.y + direction.y * player.radius
   };
-  const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, ENGINE.mining.rayLength);
-  const playerHit = raycastPlayers(arena, player, start, angle, Math.min(hit.distance, ENGINE.mining.rayLength));
+  const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, rayLength);
+  const playerHit = raycastPlayers(arena, player, start, angle, Math.min(hit.distance, rayLength));
   const hitResult = playerHit || hit;
   const end = {
     x: hitResult.x,
@@ -321,7 +369,11 @@ function processPlayerMining(arena, player, dtSeconds) {
   };
 
   if (playerHit) {
-    damagePlayer(playerHit.target, ENGINE.mining.playerDamagePerSecond * dtSeconds);
+    damagePlayer(
+      playerHit.target,
+      ENGINE.mining.playerDamagePerSecond * effects.rayDamageMultiplier * dtSeconds,
+      arena.tick
+    );
     resetPlayerMiningTarget(player);
     return;
   }
@@ -342,7 +394,12 @@ function processPlayerMining(arena, player, dtSeconds) {
     player.miningPhase = target.phase;
   }
 
-  const progress = addMiningProgress(arena, hit.index, target, dtSeconds);
+  const progress = addMiningProgress(
+    arena,
+    hit.index,
+    target,
+    dtSeconds * effects.miningPowerMultiplier
+  );
   player.miningProgress = progress;
   player.miningRay.progress = roundForSnapshot(clamp(progress / target.seconds, 0, 1));
 
@@ -410,6 +467,12 @@ function addPlayerResource(player, resource, amount) {
     0,
     ENGINE.player.maxResourceAmount
   );
+}
+
+function spendUpgradeCost(player, cost) {
+  for (const [resource, amount] of Object.entries(cost || {})) {
+    player.resources[resource] = clamp((player.resources[resource] || 0) - amount, 0, ENGINE.player.maxResourceAmount);
+  }
 }
 
 function setAsteroidTile(arena, index, tile, amount) {
@@ -499,8 +562,12 @@ function rayCircleIntersection(start, direction, circle, radius, maxDistance) {
   };
 }
 
-function damagePlayer(player, amount) {
-  player.health = clamp(player.health - amount, 0, player.maxHealth);
+function damagePlayer(player, amount, tick = 0) {
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  const damage = Math.max(0, amount * effects.damageTakenMultiplier);
+
+  player.lastDamageTick = tick;
+  player.health = clamp(player.health - damage, 0, player.maxHealth);
   if (player.health > 0) {
     return;
   }
@@ -516,6 +583,52 @@ function damagePlayer(player, amount) {
 function playerMaxHealth(healthBars) {
   const bars = clamp(Math.round(healthBars), 1, ENGINE.player.maxHealthBars);
   return bars * ENGINE.player.healthPerBar;
+}
+
+function playerHealthBars(player) {
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  return clamp(
+    ENGINE.player.startingHealthBars + effects.healthBarsBonus,
+    ENGINE.player.startingHealthBars,
+    ENGINE.player.maxHealthBars
+  );
+}
+
+function playerMaxSpeed(player, effects = aggregateUpgradeEffects(player.upgrades)) {
+  return ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier;
+}
+
+function playerMiningRayLength(player, effects = aggregateUpgradeEffects(player.upgrades)) {
+  return ENGINE.mining.rayLength + effects.rayLengthBonus;
+}
+
+function syncPlayerDerivedStats(player) {
+  const oldMaxHealth = player.maxHealth || playerMaxHealth(ENGINE.player.startingHealthBars);
+  const healthBars = playerHealthBars(player);
+  const maxHealth = playerMaxHealth(healthBars);
+
+  player.healthBars = healthBars;
+  player.maxHealth = maxHealth;
+  if (maxHealth > oldMaxHealth) {
+    player.health = clamp((player.health || 0) + (maxHealth - oldMaxHealth), 0, maxHealth);
+  } else {
+    player.health = clamp(player.health || 0, 0, maxHealth);
+  }
+}
+
+function rechargePlayerHealth(arena, player, dtSeconds, effects) {
+  const rechargePerSecond = effects.healthRechargePerSecond;
+  if (rechargePerSecond <= 0 || player.health >= player.maxHealth || player.mining) {
+    return;
+  }
+
+  const ticksSinceDamage = arena.tick - (player.lastDamageTick ?? Number.NEGATIVE_INFINITY);
+  const secondsSinceDamage = ticksSinceDamage / ENGINE.tickRate;
+  if (secondsSinceDamage < ENGINE.player.rechargeDelaySeconds) {
+    return;
+  }
+
+  player.health = clamp(player.health + rechargePerSecond * dtSeconds, 0, player.maxHealth);
 }
 
 function circleTileOverlap(circle, tile) {
@@ -623,7 +736,7 @@ function resolvePlayerPair(a, b, fallbackSeed) {
 }
 
 function clampPlayerVelocity(player) {
-  const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed);
+  const velocity = clampMagnitude(player.vx, player.vy, playerMaxSpeed(player));
   player.vx = velocity.x;
   player.vy = velocity.y;
 }
@@ -689,6 +802,7 @@ function snapshotPlayer(player) {
     thrusting: player.thrusting,
     shake: roundForSnapshot(player.shake),
     radius: player.radius,
+    upgrades: sanitizeUpgradeState(player.upgrades),
     healthBars: player.healthBars,
     health: roundForSnapshot(player.health),
     maxHealth: player.maxHealth,
