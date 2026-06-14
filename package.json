@@ -1,0 +1,23 @@
+{
+  "name": "bitspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BITSPACE 1-bit socket arena scaffold.",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "check": "for file in server/*.js shared/*.js public/*.js scripts/*.mjs; do node --check \"$file\"; done",
+    "smoke:socket": "node scripts/smoke-socket.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.7.5"
+  }
+}

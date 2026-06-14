@@ -1,0 +1,17 @@
+html,
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #000000;
+}
+
+#scene {
+  position: fixed;
+  inset: 0 auto auto 0;
+  display: block;
+  object-fit: contain;
+  background: #000000;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+}
