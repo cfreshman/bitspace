@@ -51,3 +51,4 @@ LLM instructions
 - The rear boosters should produce one shared visual-only 1-bit particle plume from the point between the boosters while thrusting, with randomized particle velocities and lifetimes.
 - Star background should be a deterministic single layer. Larger/brighter 1-bit star shapes should appear at lower frequencies than smaller/dimmer stars, and the star layer should use parallax rather than moving 1:1 with the camera.
 - The camera should not be clamped to the map bounds. Map bounds should render as a dashed line when visible.
+- Bumping into world bounds or other ships should produce a small physics bounce and minor screen shake. Screen shake must be implemented inside the renderer/camera, not with HTML or CSS transforms.

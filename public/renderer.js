@@ -140,7 +140,7 @@ function drawFrame(ctx, snapshot, options, colors, particleState) {
     return;
   }
 
-  const camera = cameraForSnapshot(snapshot, options.playerId);
+  const camera = cameraForSnapshot(snapshot, options.playerId, options.timeSeconds);
   drawStars(ctx, snapshot, camera);
   drawWorldBounds(ctx, snapshot, camera);
 
@@ -175,17 +175,30 @@ function drawFrame(ctx, snapshot, options, colors, particleState) {
   }
 }
 
-function cameraForSnapshot(snapshot, playerId) {
+function cameraForSnapshot(snapshot, playerId, timeSeconds = 0) {
   const target =
     snapshot.players.find((player) => player.id === playerId) ||
     snapshot.players[0] || {
       x: snapshot.world.width / 2,
-      y: snapshot.world.height / 2
+      y: snapshot.world.height / 2,
+      shake: 0
     };
+  const shake = shakeOffset(target.shake || 0, timeSeconds);
 
   return {
-    x: target.x - RENDER.width / 2,
-    y: target.y - RENDER.height / 2
+    x: target.x - RENDER.width / 2 + shake.x,
+    y: target.y - RENDER.height / 2 + shake.y
+  };
+}
+
+function shakeOffset(amount, timeSeconds) {
+  if (amount <= 0) {
+    return { x: 0, y: 0 };
+  }
+
+  return {
+    x: Math.round(Math.sin(timeSeconds * 91.7) * amount),
+    y: Math.round(Math.cos(timeSeconds * 83.3) * amount)
   };
 }
 

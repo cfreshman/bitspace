@@ -39,6 +39,7 @@ export function addPlayer(arena, playerOptions) {
     aimAngle: spawn.angle,
     mining: false,
     thrusting: false,
+    shake: 0,
     radius: ENGINE.ship.radius,
     alive: true,
     input: createEmptyInput(),
@@ -88,6 +89,8 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate) {
       stepPlayer(player, dtSeconds);
     }
   }
+
+  resolvePlayerCollisions(arena);
 }
 
 export function snapshotArena(arena) {
@@ -122,6 +125,8 @@ export function sanitizePlayerName(name) {
 }
 
 function stepPlayer(player, dtSeconds) {
+  player.shake = Math.max(0, player.shake - ENGINE.collision.shakeDecay * dtSeconds);
+
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const isMoving = move.x !== 0 || move.y !== 0;
   player.thrusting = isMoving;
@@ -147,7 +152,8 @@ function stepPlayer(player, dtSeconds) {
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
 
-  constrainPlayerToWorld(player);
+  const boundaryImpact = constrainPlayerToWorld(player);
+  addShake(player, boundaryImpact);
 }
 
 function constrainPlayerToWorld(player) {
@@ -156,17 +162,97 @@ function constrainPlayerToWorld(player) {
   const maxY = ENGINE.world.height - player.radius;
   const x = clamp(player.x, min, maxX);
   const y = clamp(player.y, min, maxY);
+  let impact = 0;
 
   if (x !== player.x) {
-    player.vx *= -0.25;
+    impact = Math.max(impact, Math.abs(player.vx));
+    player.vx *= -ENGINE.collision.boundaryRestitution;
   }
 
   if (y !== player.y) {
-    player.vy *= -0.25;
+    impact = Math.max(impact, Math.abs(player.vy));
+    player.vy *= -ENGINE.collision.boundaryRestitution;
   }
 
   player.x = x;
   player.y = y;
+  return impact;
+}
+
+function resolvePlayerCollisions(arena) {
+  const players = Array.from(arena.players.values()).filter((player) => player.alive);
+
+  for (let aIndex = 0; aIndex < players.length; aIndex += 1) {
+    for (let bIndex = aIndex + 1; bIndex < players.length; bIndex += 1) {
+      resolvePlayerPair(players[aIndex], players[bIndex], aIndex + bIndex);
+    }
+  }
+}
+
+function resolvePlayerPair(a, b, fallbackSeed) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const minDistance = a.radius + b.radius;
+  const distance = Math.hypot(dx, dy);
+
+  if (distance >= minDistance) {
+    return;
+  }
+
+  const fallbackAngle = fallbackSeed * Math.PI * 0.5;
+  const nx = distance > 0 ? dx / distance : Math.cos(fallbackAngle);
+  const ny = distance > 0 ? dy / distance : Math.sin(fallbackAngle);
+  const overlap = minDistance - distance;
+  const separation = overlap / 2;
+
+  a.x -= nx * separation;
+  a.y -= ny * separation;
+  b.x += nx * separation;
+  b.y += ny * separation;
+
+  clampPlayerPosition(a);
+  clampPlayerPosition(b);
+
+  const relativeVx = b.vx - a.vx;
+  const relativeVy = b.vy - a.vy;
+  const relativeNormalSpeed = relativeVx * nx + relativeVy * ny;
+  let impact = Math.abs(relativeNormalSpeed);
+
+  if (relativeNormalSpeed < 0) {
+    impact = Math.max(impact, ENGINE.collision.shipPush);
+    const impulse = (-(1 + ENGINE.collision.shipRestitution) * relativeNormalSpeed) / 2;
+    a.vx -= nx * impulse;
+    a.vy -= ny * impulse;
+    b.vx += nx * impulse;
+    b.vy += ny * impulse;
+  } else {
+    impact = Math.max(impact, ENGINE.collision.shipPush);
+    a.vx -= nx * ENGINE.collision.shipPush;
+    a.vy -= ny * ENGINE.collision.shipPush;
+    b.vx += nx * ENGINE.collision.shipPush;
+    b.vy += ny * ENGINE.collision.shipPush;
+  }
+
+  clampPlayerVelocity(a);
+  clampPlayerVelocity(b);
+  addShake(a, impact);
+  addShake(b, impact);
+}
+
+function clampPlayerPosition(player) {
+  player.x = clamp(player.x, player.radius, ENGINE.world.width - player.radius);
+  player.y = clamp(player.y, player.radius, ENGINE.world.height - player.radius);
+}
+
+function clampPlayerVelocity(player) {
+  const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed);
+  player.vx = velocity.x;
+  player.vy = velocity.y;
+}
+
+function addShake(player, impact) {
+  const amount = Math.max(0, impact - ENGINE.collision.shakeThreshold) * ENGINE.collision.shakeScale;
+  player.shake = clamp(player.shake + amount, 0, ENGINE.collision.maxShake);
 }
 
 function nextPlayerNumber(arena) {
@@ -210,6 +296,7 @@ function snapshotPlayer(player) {
     aimAngle: roundForSnapshot(player.aimAngle),
     mining: player.mining,
     thrusting: player.thrusting,
+    shake: roundForSnapshot(player.shake),
     radius: player.radius,
     alive: player.alive
   };

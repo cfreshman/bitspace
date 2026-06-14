@@ -25,5 +25,14 @@ export const ENGINE = Object.freeze({
     thrust: 1000,
     drag: 0.9,
     maxSpeed: 160
+  },
+  collision: {
+    boundaryRestitution: 0.42,
+    shipRestitution: 0.55,
+    shipPush: 28,
+    shakeThreshold: 18,
+    shakeScale: 0.018,
+    maxShake: 3,
+    shakeDecay: 8
   }
 });
