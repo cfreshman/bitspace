@@ -22,9 +22,9 @@ export const ENGINE = Object.freeze({
   },
   ship: {
     radius: 7,
-    thrust: 1000,
+    thrust: 460,
     drag: 0.9,
-    maxSpeed: 160
+    maxSpeed: 72
   },
   player: {
     startingHealthBars: 3,

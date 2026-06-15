@@ -2,107 +2,110 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
   {
     id: "speed",
     label: "SPEED",
-    code: "SPD",
+    code: "SPEED",
     maxLevel: 5,
+    description: "SHIP THRUST AND TOP SPEED",
+    baseStatText: "100% THRUST / 100% SPEED",
     visual: "Longer shared thruster plume.",
     levels: Object.freeze([
       {
-        cost: { rock: 45, ore: 4 },
-        effects: { thrustMultiplier: 1.06, maxSpeedMultiplier: 1.06, thrusterParticleMultiplier: 1.08 }
+        cost: { ore: 4 },
+        effectText: "+45% THRUST / +32% SPEED",
+        effects: { thrustMultiplier: 1.45, maxSpeedMultiplier: 1.32, thrusterParticleMultiplier: 1.35 }
       },
       {
-        cost: { rock: 90, ore: 9 },
-        effects: { thrustMultiplier: 1.12, maxSpeedMultiplier: 1.13, thrusterParticleMultiplier: 1.16 }
+        cost: { ore: 9 },
+        effectText: "+75% THRUST / +58% SPEED",
+        effects: { thrustMultiplier: 1.75, maxSpeedMultiplier: 1.58, thrusterParticleMultiplier: 1.55 }
       },
       {
-        cost: { rock: 150, ore: 18, diamond: 1 },
-        effects: { thrustMultiplier: 1.18, maxSpeedMultiplier: 1.21, thrusterParticleMultiplier: 1.26 }
+        cost: { ore: 18, diamond: 1 },
+        effectText: "+105% THRUST / +82% SPEED",
+        effects: { thrustMultiplier: 2.05, maxSpeedMultiplier: 1.82, thrusterParticleMultiplier: 1.75 }
       },
       {
-        cost: { rock: 230, ore: 30, diamond: 2 },
-        effects: { thrustMultiplier: 1.25, maxSpeedMultiplier: 1.29, thrusterParticleMultiplier: 1.38 }
+        cost: { ore: 30, diamond: 2 },
+        effectText: "+135% THRUST / +105% SPEED",
+        effects: { thrustMultiplier: 2.35, maxSpeedMultiplier: 2.05, thrusterParticleMultiplier: 1.95 }
       },
       {
-        cost: { rock: 340, ore: 45, diamond: 4 },
-        effects: { thrustMultiplier: 1.32, maxSpeedMultiplier: 1.38, thrusterParticleMultiplier: 1.52 }
+        cost: { ore: 45, diamond: 4 },
+        effectText: "+170% THRUST / +128% SPEED",
+        effects: { thrustMultiplier: 2.7, maxSpeedMultiplier: 2.28, thrusterParticleMultiplier: 2.2 }
       }
-    ])
-  },
-  {
-    id: "control",
-    label: "CONTROL",
-    code: "CTL",
-    maxLevel: 4,
-    visual: "Tighter drift with the same ship silhouette.",
-    levels: Object.freeze([
-      { cost: { rock: 35, ore: 3 }, effects: { dragMultiplier: 0.965 } },
-      { cost: { rock: 75, ore: 7 }, effects: { dragMultiplier: 0.935 } },
-      { cost: { rock: 130, ore: 14, diamond: 1 }, effects: { dragMultiplier: 0.905 } },
-      { cost: { rock: 210, ore: 24, diamond: 2 }, effects: { dragMultiplier: 0.875 } }
     ])
   },
   {
     id: "range",
     label: "RANGE",
-    code: "RNG",
+    code: "RANGE",
     maxLevel: 5,
+    description: "MINING RAY REACHES FARTHER",
+    baseStatText: "100% RAY RANGE",
     visual: "Mining ray endpoint reaches farther.",
     levels: Object.freeze([
-      { cost: { rock: 55, ore: 6 }, effects: { rayLengthBonus: 5 } },
-      { cost: { rock: 110, ore: 12 }, effects: { rayLengthBonus: 10 } },
-      { cost: { rock: 180, ore: 22, diamond: 1 }, effects: { rayLengthBonus: 16 } },
-      { cost: { rock: 270, ore: 36, diamond: 2 }, effects: { rayLengthBonus: 23 } },
-      { cost: { rock: 390, ore: 55, diamond: 4 }, effects: { rayLengthBonus: 31 } }
+      { cost: { ore: 6 }, effectText: "+18% RAY RANGE", effects: { rayLengthBonus: 5 } },
+      { cost: { ore: 12 }, effectText: "+36% RAY RANGE", effects: { rayLengthBonus: 10 } },
+      { cost: { ore: 22, diamond: 1 }, effectText: "+57% RAY RANGE", effects: { rayLengthBonus: 16 } },
+      { cost: { ore: 36, diamond: 2 }, effectText: "+82% RAY RANGE", effects: { rayLengthBonus: 23 } },
+      { cost: { ore: 55, diamond: 4 }, effectText: "+111% RAY RANGE", effects: { rayLengthBonus: 31 } }
     ])
   },
   {
     id: "power",
     label: "POWER",
-    code: "PWR",
+    code: "POWER",
     maxLevel: 5,
+    description: "FASTER MINING AND MORE DAMAGE",
+    baseStatText: "100% RAY POWER",
     visual: "Mining ray rotates faster and hits harder.",
     levels: Object.freeze([
       {
-        cost: { rock: 60, ore: 10 },
+        cost: { ore: 10 },
+        effectText: "+15% RAY POWER",
         effects: {
           miningPowerMultiplier: 1.15,
-          rayDamageMultiplier: 1.12,
+          rayDamageMultiplier: 1.15,
           raySpinMultiplier: 1.18,
           miningParticleMultiplier: 1.1
         }
       },
       {
-        cost: { rock: 130, ore: 22, diamond: 1 },
+        cost: { ore: 22, diamond: 1 },
+        effectText: "+32% RAY POWER",
         effects: {
           miningPowerMultiplier: 1.32,
-          rayDamageMultiplier: 1.26,
+          rayDamageMultiplier: 1.32,
           raySpinMultiplier: 1.4,
           miningParticleMultiplier: 1.22
         }
       },
       {
-        cost: { rock: 220, ore: 40, diamond: 2 },
+        cost: { ore: 40, diamond: 2 },
+        effectText: "+52% RAY POWER",
         effects: {
           miningPowerMultiplier: 1.52,
-          rayDamageMultiplier: 1.43,
+          rayDamageMultiplier: 1.52,
           raySpinMultiplier: 1.68,
           miningParticleMultiplier: 1.36
         }
       },
       {
-        cost: { rock: 340, ore: 62, diamond: 4 },
+        cost: { ore: 62, diamond: 4 },
+        effectText: "+75% RAY POWER",
         effects: {
           miningPowerMultiplier: 1.75,
-          rayDamageMultiplier: 1.63,
+          rayDamageMultiplier: 1.75,
           raySpinMultiplier: 2,
           miningParticleMultiplier: 1.52
         }
       },
       {
-        cost: { rock: 500, ore: 90, diamond: 7 },
+        cost: { ore: 90, diamond: 7 },
+        effectText: "+105% RAY POWER",
         effects: {
           miningPowerMultiplier: 2.05,
-          rayDamageMultiplier: 1.88,
+          rayDamageMultiplier: 2.05,
           raySpinMultiplier: 2.38,
           miningParticleMultiplier: 1.72
         }
@@ -110,42 +113,33 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     ])
   },
   {
-    id: "hull",
-    label: "HULL",
-    code: "HUL",
+    id: "health",
+    label: "HEALTH",
+    code: "HEALTH",
     maxLevel: 4,
+    description: "ADDS ANOTHER HP BAR",
+    baseStatText: "3 HP BARS",
     visual: "HUD health bar count increases up to seven.",
     levels: Object.freeze([
-      { cost: { rock: 90, ore: 12 }, effects: { healthBarsBonus: 1 } },
-      { cost: { rock: 170, ore: 26, diamond: 1 }, effects: { healthBarsBonus: 2 } },
-      { cost: { rock: 290, ore: 45, diamond: 3 }, effects: { healthBarsBonus: 3 } },
-      { cost: { rock: 440, ore: 70, diamond: 6 }, effects: { healthBarsBonus: 4 } }
+      { cost: { ore: 12 }, effectText: "4 HP BARS", effects: { healthBarsBonus: 1 } },
+      { cost: { ore: 26, diamond: 1 }, effectText: "5 HP BARS", effects: { healthBarsBonus: 2 } },
+      { cost: { ore: 45, diamond: 3 }, effectText: "6 HP BARS", effects: { healthBarsBonus: 3 } },
+      { cost: { ore: 70, diamond: 6 }, effectText: "7 HP BARS", effects: { healthBarsBonus: 4 } }
     ])
   },
   {
     id: "repair",
     label: "REPAIR",
-    code: "REP",
+    code: "REPAIR",
     maxLevel: 4,
+    description: "SLOW HP REGEN AFTER DAMAGE",
+    baseStatText: "NO REPAIR",
     visual: "Health returns slowly after a quiet window.",
     levels: Object.freeze([
-      { cost: { rock: 80, ore: 16, diamond: 1 }, effects: { healthRechargePerSecond: 1.5 } },
-      { cost: { rock: 160, ore: 32, diamond: 2 }, effects: { healthRechargePerSecond: 3 } },
-      { cost: { rock: 280, ore: 55, diamond: 4 }, effects: { healthRechargePerSecond: 5 } },
-      { cost: { rock: 430, ore: 85, diamond: 7 }, effects: { healthRechargePerSecond: 7.5 } }
-    ])
-  },
-  {
-    id: "armor",
-    label: "ARMOR",
-    code: "ARM",
-    maxLevel: 4,
-    visual: "Incoming mining-ray damage is reduced.",
-    levels: Object.freeze([
-      { cost: { rock: 100, ore: 18, diamond: 1 }, effects: { damageTakenMultiplier: 0.94 } },
-      { cost: { rock: 210, ore: 36, diamond: 3 }, effects: { damageTakenMultiplier: 0.88 } },
-      { cost: { rock: 360, ore: 60, diamond: 5 }, effects: { damageTakenMultiplier: 0.81 } },
-      { cost: { rock: 560, ore: 95, diamond: 8 }, effects: { damageTakenMultiplier: 0.74 } }
+      { cost: { ore: 16, diamond: 1 }, effectText: "1 HP BAR PER 60S AFTER 5S", effects: { healthRechargePerSecond: 100 / 60 } },
+      { cost: { ore: 32, diamond: 2 }, effectText: "1 HP BAR PER 30S AFTER 5S", effects: { healthRechargePerSecond: 100 / 30 } },
+      { cost: { ore: 55, diamond: 4 }, effectText: "1 HP BAR PER 20S AFTER 5S", effects: { healthRechargePerSecond: 5 } },
+      { cost: { ore: 85, diamond: 7 }, effectText: "1 HP BAR PER 15S AFTER 5S", effects: { healthRechargePerSecond: 100 / 15 } }
     ])
   }
 ]);

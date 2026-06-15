@@ -24,6 +24,22 @@ const REAR_ORBS = Object.freeze([
 const THRUSTER_PARTICLE_RATE = 70;
 const MINING_PARTICLE_RATE = 90;
 const MAX_PARTICLES = 260;
+const UPGRADE_MENU_LAYOUT = Object.freeze({
+  x: 8,
+  y: 60,
+  width: 330,
+  padding: 12,
+  titleTop: 12,
+  rowTopOffset: 38,
+  rowHeight: 24,
+  rowInset: 12,
+  rowHighlightPadding: 4,
+  separatorGap: 10,
+  detailTopGap: 10,
+  detailLineHeight: 12,
+  detailLineCount: 4,
+  bottomPadding: 12
+});
 const BITMAP_GLYPHS = Object.freeze({
   " ": ["000", "000", "000", "000", "000", "000", "000"],
   A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
@@ -81,6 +97,7 @@ const BITMAP_GLYPHS = Object.freeze({
   "*": ["00000", "10101", "01110", "11111", "01110", "10101", "00000"],
   "=": ["00000", "11111", "00000", "00000", "11111", "00000", "00000"],
   "@": ["01110", "10001", "10111", "10101", "10111", "10000", "01111"],
+  "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
   "&": ["01100", "10010", "10100", "01000", "10101", "10010", "01101"]
 });
 
@@ -1135,10 +1152,10 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer) {
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
-  const x = 8;
-  const y = 60;
-  const width = 182;
-  const height = 112;
+  const width = UPGRADE_MENU_LAYOUT.width;
+  const height = upgradeMenuHeight();
+  const x = UPGRADE_MENU_LAYOUT.x;
+  const y = UPGRADE_MENU_LAYOUT.y;
   const resources = player.resources || {};
   const selectedIndex = clamp(
     Math.floor(upgradesUi.selectedIndex || 0),
@@ -1151,10 +1168,15 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
   ctx.fillStyle = colors.background;
   ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
 
-  textRenderer.draw(ctx, "UPGRADES", x + 5, y + 5, {
-    fontSize: 8,
+  textRenderer.draw(ctx, "UPGRADES", x + UPGRADE_MENU_LAYOUT.padding, y + UPGRADE_MENU_LAYOUT.titleTop, {
+    fontSize: 10,
     color: colors.foreground
   });
+
+  const rowX = x + UPGRADE_MENU_LAYOUT.rowInset;
+  const rowRight = x + width - UPGRADE_MENU_LAYOUT.rowInset;
+  const rowTop = y + UPGRADE_MENU_LAYOUT.rowTopOffset;
+  const rowHeight = UPGRADE_MENU_LAYOUT.rowHeight;
 
   for (let index = 0; index < UPGRADE_DEFINITIONS.length; index += 1) {
     const definition = UPGRADE_DEFINITIONS[index];
@@ -1162,51 +1184,108 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
     const cost = nextUpgradeCost(player.upgrades, definition.id);
     const affordable = canAffordUpgrade(resources, cost);
     const selected = index === selectedIndex;
-    const rowY = y + 18 + index * 10;
-    const marker = selected ? "*" : affordable ? "+" : " ";
-    const row = `${marker}${definition.code} ${level}/${definition.maxLevel} ${formatUpgradeCost(cost)}`;
+    const rowY = rowTop + index * rowHeight;
+    const levelText = `${level}/${definition.maxLevel}`;
+    const levelWidth = textRenderer.measure(levelText, { fontSize: 10 });
+    const labelX = rowX + 14;
 
     if (selected) {
       ctx.fillStyle = colors.foreground;
-      ctx.fillRect(x + 3, rowY - 1, width - 6, 9);
+      ctx.fillRect(
+        rowX - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
+        rowY - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
+        rowRight - rowX + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2,
+        14 + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2
+      );
     }
 
-    textRenderer.draw(ctx, row, x + 6, rowY, {
-      fontSize: 8,
+    if (affordable) {
+      textRenderer.draw(ctx, "+", rowX, rowY, {
+        fontSize: 10,
+        color: selected ? colors.background : colors.foreground,
+        width: 10
+      });
+    }
+
+    textRenderer.draw(ctx, definition.label, labelX, rowY, {
+      fontSize: 10,
       color: selected ? colors.background : colors.foreground,
-      width: width - 12
+      width: 176
+    });
+    textRenderer.draw(ctx, levelText, rowRight - levelWidth, rowY, {
+      fontSize: 10,
+      color: selected ? colors.background : colors.foreground,
+      width: levelWidth + 1
     });
   }
 
   const selectedDefinition = UPGRADE_DEFINITIONS[selectedIndex];
+  const selectedLevel = upgradeLevel(player.upgrades, selectedDefinition?.id);
+  const selectedUpgradeLevel = selectedDefinition?.levels[selectedLevel];
   const selectedCost = nextUpgradeCost(player.upgrades, selectedDefinition?.id);
-  const footer = selectedCost
-    ? canAffordUpgrade(resources, selectedCost)
-      ? "ENTER BUY"
-      : `NEED ${formatUpgradeCost(selectedCost)}`
-    : "MAX LEVEL";
+  const rowsBottom = y + UPGRADE_MENU_LAYOUT.rowTopOffset + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
+  const separatorY = rowsBottom + UPGRADE_MENU_LAYOUT.separatorGap;
+  const detailY = separatorY + UPGRADE_MENU_LAYOUT.detailTopGap;
+  const affordable = canAffordUpgrade(resources, selectedCost);
+  const currentText = currentUpgradeStatText(selectedDefinition, selectedLevel);
+  const nextText = selectedUpgradeLevel?.effectText || "MAX LEVEL";
+  const costText = selectedCost
+    ? `COST: ${formatUpgradeCostLong(selectedCost)}`
+    : "COST: MAX LEVEL";
+  const actionText = selectedCost
+    ? affordable ? "CLICK BUY" : "NEED RESOURCES"
+    : "MAXED";
 
-  textRenderer.draw(ctx, footer, x + 5, y + height - 12, {
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x + UPGRADE_MENU_LAYOUT.padding, separatorY, width - UPGRADE_MENU_LAYOUT.padding * 2, 1);
+  textRenderer.draw(ctx, "", x + UPGRADE_MENU_LAYOUT.padding, detailY, {
+    lines: [
+      `CURRENT: ${currentText}`,
+      `NEXT: ${nextText}`,
+      costText,
+      actionText
+    ],
     fontSize: 8,
+    lineHeight: UPGRADE_MENU_LAYOUT.detailLineHeight,
     color: colors.foreground,
-    width: width - 10
+    width: width - UPGRADE_MENU_LAYOUT.padding * 2
   });
 }
 
-function formatUpgradeCost(cost) {
+function upgradeMenuHeight() {
+  const rowsBottom = UPGRADE_MENU_LAYOUT.rowTopOffset + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
+  const separatorY = rowsBottom + UPGRADE_MENU_LAYOUT.separatorGap;
+  const detailTop = separatorY + UPGRADE_MENU_LAYOUT.detailTopGap;
+  const detailHeight = 7 + (UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
+  return detailTop + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
+}
+
+function currentUpgradeStatText(definition, level) {
+  if (!definition) {
+    return "";
+  }
+
+  if (level <= 0) {
+    return definition.baseStatText || "BASE";
+  }
+
+  return definition.levels[level - 1]?.effectText || definition.baseStatText || "BASE";
+}
+
+function formatUpgradeCostLong(cost) {
   if (!cost) {
     return "MAX";
   }
 
   const parts = [];
   if (cost.rock) {
-    parts.push(`${cost.rock}R`);
+    parts.push(`${cost.rock} ROCK`);
   }
   if (cost.ore) {
-    parts.push(`${cost.ore}O`);
+    parts.push(`${cost.ore} ORE`);
   }
   if (cost.diamond) {
-    parts.push(`${cost.diamond}D`);
+    parts.push(`${cost.diamond} DIAMOND`);
   }
 
   return parts.join(" ");

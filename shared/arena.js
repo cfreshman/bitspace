@@ -23,6 +23,7 @@ import {
 } from "./upgrades.js";
 
 const DEFAULT_ARENA_ID = "main";
+const INITIAL_SPAWN_ANGLE = Math.PI / 4;
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
@@ -763,12 +764,10 @@ function nextPlayerNumber(arena) {
 function spawnForPlayerNumber(number, asteroid) {
   const pocket = asteroid?.pockets.find((candidate) => candidate.playerNumber === number);
   if (pocket) {
-    const centerX = ENGINE.world.width / 2;
-    const centerY = ENGINE.world.height / 2;
     return {
       x: pocket.spawnX,
       y: pocket.spawnY,
-      angle: Math.atan2(centerY - pocket.spawnY, centerX - pocket.spawnX)
+      angle: INITIAL_SPAWN_ANGLE
     };
   }
 
@@ -776,10 +775,10 @@ function spawnForPlayerNumber(number, asteroid) {
   const maxX = ENGINE.world.width - margin;
   const maxY = ENGINE.world.height - margin;
   const spawns = [
-    { x: margin, y: margin, angle: Math.PI / 4 },
-    { x: maxX, y: margin, angle: (Math.PI * 3) / 4 },
-    { x: maxX, y: maxY, angle: (-Math.PI * 3) / 4 },
-    { x: margin, y: maxY, angle: -Math.PI / 4 }
+    { x: margin, y: margin, angle: INITIAL_SPAWN_ANGLE },
+    { x: maxX, y: margin, angle: INITIAL_SPAWN_ANGLE },
+    { x: maxX, y: maxY, angle: INITIAL_SPAWN_ANGLE },
+    { x: margin, y: maxY, angle: INITIAL_SPAWN_ANGLE }
   ];
 
   return spawns[(number - 1) % spawns.length];

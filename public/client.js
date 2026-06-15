@@ -1,10 +1,22 @@
 import { ENGINE } from "/shared/constants.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
-import { UPGRADE_DEFINITIONS } from "/shared/upgrades.js";
+import {
+  canAffordUpgrade,
+  nextUpgradeCost,
+  UPGRADE_DEFINITIONS
+} from "/shared/upgrades.js";
 import { createRenderer } from "/renderer.js";
 
 const TALK_MAX_CHARS = 36;
+const UPGRADE_MENU_LAYOUT = Object.freeze({
+  x: 8,
+  y: 60,
+  width: 330,
+  rowTopOffset: 38,
+  rowHeight: 24,
+  rowInset: 12
+});
 const canvas = document.querySelector("#scene");
 const renderer = createRenderer(canvas);
 const talkInput = createTalkInput();
@@ -145,11 +157,21 @@ talkInput.addEventListener("keydown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   updateMouse(event);
+  if (state.upgrades.active) {
+    updateUpgradeSelectionFromMouse();
+  }
 });
 
 canvas.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   updateMouse(event);
+  if (state.upgrades.active) {
+    updateUpgradeSelectionFromMouse();
+    buySelectedUpgrade();
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+
   state.mouse.down = true;
   canvas.setPointerCapture(event.pointerId);
 });
@@ -224,6 +246,7 @@ function activateUpgrades() {
   state.upgrades.active = true;
   state.mouse.down = false;
   keys.clear();
+  updateUpgradeSelectionFromMouse();
 }
 
 function closeUpgrades() {
@@ -241,28 +264,6 @@ function handleUpgradeKey(event) {
     }
     closeUpgrades();
     return;
-  }
-
-  if (event.code === "ArrowUp" || event.code === "KeyW") {
-    state.upgrades.selectedIndex =
-      (state.upgrades.selectedIndex + UPGRADE_DEFINITIONS.length - 1) % UPGRADE_DEFINITIONS.length;
-    return;
-  }
-
-  if (event.code === "ArrowDown" || event.code === "KeyS") {
-    state.upgrades.selectedIndex =
-      (state.upgrades.selectedIndex + 1) % UPGRADE_DEFINITIONS.length;
-    return;
-  }
-
-  if (event.code === "Enter" || event.code === "Space") {
-    if (event.repeat) {
-      return;
-    }
-    const definition = UPGRADE_DEFINITIONS[state.upgrades.selectedIndex];
-    if (definition && socket.connected) {
-      socket.emit(CLIENT_EVENTS.upgrade, definition.id);
-    }
   }
 }
 
@@ -366,6 +367,53 @@ function updateMouse(event) {
   state.mouse.x = point.x;
   state.mouse.y = point.y;
   updateAimFromSnapshot();
+}
+
+function updateUpgradeSelectionFromMouse() {
+  const index = upgradeIndexAtPoint(state.mouse.x, state.mouse.y);
+  if (index === null) {
+    return;
+  }
+
+  if (state.upgrades.selectedIndex !== index) {
+    state.upgrades.selectedIndex = index;
+  }
+}
+
+function buySelectedUpgrade() {
+  const player = localPlayerFromSnapshot();
+  const definition = UPGRADE_DEFINITIONS[state.upgrades.selectedIndex];
+  if (!player || !definition) {
+    return;
+  }
+
+  const cost = nextUpgradeCost(player.upgrades, definition.id);
+  if (socket.connected && canAffordUpgrade(player.resources, cost)) {
+    socket.emit(CLIENT_EVENTS.upgrade, definition.id);
+  }
+}
+
+function localPlayerFromSnapshot() {
+  return state.snapshot?.players.find((candidate) => candidate.id === state.playerId) || null;
+}
+
+function upgradeIndexAtPoint(x, y) {
+  const menuX = UPGRADE_MENU_LAYOUT.x;
+  const menuY = UPGRADE_MENU_LAYOUT.y;
+  const rowLeft = menuX + UPGRADE_MENU_LAYOUT.rowInset;
+  const rowRight = menuX + UPGRADE_MENU_LAYOUT.width - UPGRADE_MENU_LAYOUT.rowInset;
+  const rowTop = menuY + UPGRADE_MENU_LAYOUT.rowTopOffset;
+  const rowBottom = rowTop + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
+
+  if (x < rowLeft || x > rowRight || y < rowTop - 6 || y >= rowBottom) {
+    return null;
+  }
+
+  return clamp(
+    Math.floor((y - rowTop + 6) / UPGRADE_MENU_LAYOUT.rowHeight),
+    0,
+    UPGRADE_DEFINITIONS.length - 1
+  );
 }
 
 function updateAimFromSnapshot() {
