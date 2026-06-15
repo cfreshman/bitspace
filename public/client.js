@@ -1067,7 +1067,11 @@ function menuEntities() {
   return [
     menuTitle("menu-title", "BITSPACE", center.x, center.y - 114),
     menuButton("menu-ready", "ready", "READY", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
-    menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH)
+    menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
+    menuHint("menu-controls", [
+      { input: "WASD", action: "MOVE" },
+      { input: "CLICK + HOLD", action: "MINING RAY" }
+    ], center.x, top + MENU_BUTTON_HEIGHT + 30)
   ];
 }
 
@@ -1078,6 +1082,18 @@ function menuTitle(id, label, x, y) {
     label,
     x,
     y
+  };
+}
+
+function menuHint(id, rows, x, y) {
+  return {
+    id,
+    type: "menuHint",
+    rows,
+    x,
+    y,
+    width: 168,
+    height: 22
   };
 }
 

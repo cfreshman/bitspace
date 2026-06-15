@@ -1801,6 +1801,11 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     return;
   }
 
+  if (entity.type === "menuHint") {
+    drawMenuHintEntity(ctx, entity, camera, colors, textRenderer);
+    return;
+  }
+
   const screen = worldToScreen(entity, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -1820,6 +1825,37 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     [1, 1],
     [0, 2]
   ], ENTITY_PIXEL_SIZE);
+}
+
+function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {
+  if (!textRenderer) {
+    return;
+  }
+
+  const screen = worldToScreen(entity, camera);
+  const x = Math.round(screen.x - (entity.width || 168) / 2);
+  const y = Math.round(screen.y);
+  const width = Math.round(entity.width || 168);
+  const rows = Array.isArray(entity.rows) ? entity.rows : [];
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+
+  rows.slice(0, 2).forEach((row, index) => {
+    const input = String(row.input || "").toUpperCase();
+    const action = String(row.action || "").toUpperCase();
+    const rowY = y + index * 11;
+    const actionWidth = textRenderer.measure(action, textOptions);
+    textRenderer.draw(ctx, input, x + 10, rowY, {
+      ...textOptions,
+      width: Math.floor(width / 2) - 16
+    });
+    textRenderer.draw(ctx, action, x + width - actionWidth - 10, rowY, {
+      ...textOptions,
+      width: actionWidth + 2
+    });
+  });
 }
 
 function drawMenuTitleEntity(ctx, entity, camera, colors, textRenderer) {
