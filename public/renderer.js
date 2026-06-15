@@ -324,7 +324,13 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     return;
   }
 
-  const camera = cameraForSnapshot(snapshot, options.cameraPlayerId || options.playerId, options.timeSeconds);
+  const predictedPlayer = options.predictedPlayer?.id === options.playerId ? options.predictedPlayer : null;
+  const camera = cameraForSnapshot(
+    snapshot,
+    options.cameraPlayerId || options.playerId,
+    options.timeSeconds,
+    predictedPlayer
+  );
   const diamondMiningTargets = diamondMiningTargetMap(snapshot);
   drawStars(ctx, snapshot, camera);
   if (options.asteroid) {
@@ -339,11 +345,11 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
   const renderPlayers = snapshot.players.map((player) =>
     player.id === options.playerId
-      ? {
-          ...player,
-          aimAngle: options.aimAngle ?? player.aimAngle,
-          mining: options.mining ?? player.mining
-        }
+      ? predictedPlayer || {
+        ...player,
+        aimAngle: options.aimAngle ?? player.aimAngle,
+        mining: options.mining ?? player.mining
+      }
       : player
   );
   const localPlayer = renderPlayers.find((player) => player.id === options.playerId);
@@ -560,8 +566,9 @@ function formatClock(seconds) {
   return `${minutes}:${remainder}`;
 }
 
-function cameraForSnapshot(snapshot, playerId, timeSeconds = 0) {
+function cameraForSnapshot(snapshot, playerId, timeSeconds = 0, predictedPlayer = null) {
   const target =
+    predictedPlayer?.id === playerId ? predictedPlayer :
     snapshot.players.find((player) => player.id === playerId) ||
     snapshot.players[0] || {
       x: snapshot.world.width / 2,

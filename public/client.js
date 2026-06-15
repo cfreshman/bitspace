@@ -2,6 +2,7 @@ import { ENGINE } from "/shared/constants.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import {
+  aggregateUpgradeEffects,
   canAffordUpgrade,
   nextUpgradeCost,
   UPGRADE_DEFINITIONS
@@ -16,6 +17,9 @@ const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
 const ROOM_ID_PATTERN = /^room-\d+$/;
+const PREDICTION_SNAP_DISTANCE = 96;
+const PREDICTION_POSITION_CORRECTION = 0.08;
+const PREDICTION_VELOCITY_CORRECTION = 0.2;
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -47,6 +51,10 @@ const state = {
   room: null,
   snapshot: null,
   asteroid: null,
+  prediction: {
+    player: null,
+    lastTimeSeconds: 0
+  },
   inputSeq: 0,
   mouse: {
     x: 0,
@@ -110,6 +118,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
   if (!room || room.state === "menu") {
     state.snapshot = null;
     state.asteroid = null;
+    state.prediction.player = null;
     state.upgrades.active = false;
     state.mouse.down = false;
     forgetRegisteredRoom();
@@ -124,6 +133,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   state.snapshot = snapshot;
+  reconcilePrediction(snapshot, performance.now() / 1000);
 });
 
 socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
@@ -316,6 +326,7 @@ requestAnimationFrame(draw);
 function draw(now = 0) {
   const timeSeconds = now / 1000;
 
+  updatePrediction(timeSeconds);
   updateAimFromSnapshot();
   const cameraPlayerId = cameraPlayerIdForRoom();
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
@@ -332,6 +343,7 @@ function draw(now = 0) {
     uiTargetId: state.uiHoverId,
     aimAngle: state.mouse.aimAngle,
     mining: state.mouse.down && !state.chat.active && !state.upgrades.active && !isInputBlocked(),
+    predictedPlayer: predictedLocalPlayer(),
     timeSeconds
   });
   requestAnimationFrame(draw);
@@ -535,6 +547,104 @@ function readMoveVector() {
   return {
     x: x / magnitude,
     y: y / magnitude
+  };
+}
+
+function reconcilePrediction(snapshot, timeSeconds) {
+  const authoritative = snapshot.players.find((candidate) => candidate.id === state.playerId);
+  if (!authoritative || !authoritative.alive) {
+    state.prediction.player = null;
+    state.prediction.lastTimeSeconds = timeSeconds;
+    return;
+  }
+
+  if (!state.prediction.player || state.prediction.player.id !== authoritative.id) {
+    state.prediction.player = { ...authoritative };
+    state.prediction.lastTimeSeconds = timeSeconds;
+    return;
+  }
+
+  const predicted = state.prediction.player;
+  const dx = authoritative.x - predicted.x;
+  const dy = authoritative.y - predicted.y;
+  const distance = Math.hypot(dx, dy);
+
+  if (distance > PREDICTION_SNAP_DISTANCE) {
+    state.prediction.player = { ...authoritative };
+    state.prediction.lastTimeSeconds = timeSeconds;
+    return;
+  }
+
+  state.prediction.player = {
+    ...authoritative,
+    x: predicted.x + dx * PREDICTION_POSITION_CORRECTION,
+    y: predicted.y + dy * PREDICTION_POSITION_CORRECTION,
+    vx: predicted.vx + (authoritative.vx - predicted.vx) * PREDICTION_VELOCITY_CORRECTION,
+    vy: predicted.vy + (authoritative.vy - predicted.vy) * PREDICTION_VELOCITY_CORRECTION,
+    angle: predicted.angle,
+    aimAngle: state.mouse.aimAngle,
+    mining: state.mouse.down && !state.chat.active && !state.upgrades.active && !isInputBlocked()
+  };
+}
+
+function updatePrediction(timeSeconds) {
+  const predicted = state.prediction.player;
+  if (!predicted || !predicted.alive) {
+    state.prediction.lastTimeSeconds = timeSeconds;
+    return;
+  }
+
+  const dtSeconds = clamp(timeSeconds - state.prediction.lastTimeSeconds, 0, 1 / 15);
+  state.prediction.lastTimeSeconds = timeSeconds;
+  if (dtSeconds <= 0) {
+    return;
+  }
+
+  const move = state.chat.active || state.upgrades.active || isInputBlocked()
+    ? { x: 0, y: 0 }
+    : readMoveVector();
+  const effects = aggregateUpgradeEffects(predicted.upgrades);
+  const isMoving = move.x !== 0 || move.y !== 0;
+
+  if (isMoving) {
+    predicted.angle = normalizeAngle(Math.atan2(move.y, move.x));
+    predicted.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+    predicted.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+  }
+
+  predicted.aimAngle = state.mouse.aimAngle;
+  predicted.mining = state.mouse.down && !state.chat.active && !state.upgrades.active && !isInputBlocked();
+  predicted.thrusting = isMoving;
+
+  const fixedStepSeconds = 1 / ENGINE.tickRate;
+  const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
+  predicted.vx *= drag;
+  predicted.vy *= drag;
+
+  const velocity = clampMagnitude(predicted.vx, predicted.vy, ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier);
+  predicted.vx = velocity.x;
+  predicted.vy = velocity.y;
+  predicted.x += predicted.vx * dtSeconds;
+  predicted.y += predicted.vy * dtSeconds;
+}
+
+function predictedLocalPlayer() {
+  const predicted = state.prediction.player;
+  const authoritative = localPlayerFromSnapshot();
+  if (!predicted || !authoritative || !authoritative.alive) {
+    return null;
+  }
+
+  return {
+    ...authoritative,
+    x: predicted.x,
+    y: predicted.y,
+    vx: predicted.vx,
+    vy: predicted.vy,
+    angle: predicted.angle,
+    aimAngle: predicted.aimAngle,
+    mining: predicted.mining,
+    thrusting: predicted.thrusting
   };
 }
 
@@ -812,7 +922,7 @@ function updateAimFromSnapshot() {
     return;
   }
 
-  const player = snapshot.players.find((candidate) => candidate.id === state.playerId);
+  const player = predictedLocalPlayer() || snapshot.players.find((candidate) => candidate.id === state.playerId);
   if (!player) {
     return;
   }
@@ -850,6 +960,24 @@ function cameraForPlayer(snapshot, player) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function clampMagnitude(x, y, maxMagnitude) {
+  const magnitude = Math.hypot(x, y);
+  if (magnitude <= maxMagnitude || magnitude === 0) {
+    return { x, y };
+  }
+
+  const scale = maxMagnitude / magnitude;
+  return {
+    x: x * scale,
+    y: y * scale
+  };
+}
+
+function normalizeAngle(angle) {
+  const fullTurn = Math.PI * 2;
+  return ((angle % fullTurn) + fullTurn) % fullTurn;
 }
 
 function shouldCaptureKey(code) {
