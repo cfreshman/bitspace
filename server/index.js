@@ -9,6 +9,7 @@ import { Server } from "socket.io";
 import { ENGINE, RENDER } from "../shared/constants.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "../shared/protocol.js";
 import {
+  buildPlayerWall,
   purchasePlayerUpgrade,
   sanitizePlayerName,
   setPlayerInput,
@@ -152,6 +153,22 @@ io.on("connection", (socket) => {
       socket.emit(SERVER_EVENTS.notice, {
         code: result.reason,
         upgradeId
+      });
+    }
+  });
+
+  socket.on(CLIENT_EVENTS.buildWall, (payload) => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
+
+    const room = roomManager.clientRoom(clientId);
+    const result = room?.state === ROOM_STATES.active && room?.arena
+      ? buildPlayerWall(room.arena, clientId, payload)
+      : { ok: false, reason: "no_active_room" };
+    if (!result.ok) {
+      socket.emit(SERVER_EVENTS.notice, {
+        code: result.reason
       });
     }
   });

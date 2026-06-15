@@ -15,6 +15,9 @@ const MENU_STAR_SEED = "bitspace-menu";
 const MENU_STAR_SCROLL_SPEED = 12;
 const ASTEROID_DASH_PERIOD = 10;
 const ASTEROID_DASH_ON = 5;
+const BUILD_DASH_PERIOD = 8;
+const BUILD_DASH_ON = 4;
+const BUILD_PREVIEW_GAP = 1;
 const ROCK_OUTER_CORNER_RADIUS = 3;
 const ROCK_INNER_CORNER_RADIUS = 1;
 const SMALL_ORB_RADIUS = 3;
@@ -141,6 +144,10 @@ export function createRenderer(canvas) {
       if (snapshot?.render) {
         colors.foreground = snapshot.render.foreground || colors.foreground;
         colors.background = snapshot.render.background || colors.background;
+      }
+      if (options.theme) {
+        colors.foreground = options.theme.foreground || colors.foreground;
+        colors.background = options.theme.background || colors.background;
       }
 
       drawFrame(surface, snapshot, { ...options, timeSeconds, dtSeconds }, colors, textRenderer, {
@@ -357,6 +364,10 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   );
   const localPlayer = renderPlayers.find((player) => player.id === options.playerId);
 
+  if (options.build?.active && localPlayer?.alive && options.asteroid) {
+    drawBuildPreview(ctx, options.asteroid, localPlayer, renderPlayers, camera, options.build, colors);
+  }
+
   for (const renderPlayer of renderPlayers) {
     if (renderPlayer.thrusting) {
       emitThrusterParticles(particleState, renderPlayer, options.dtSeconds);
@@ -392,6 +403,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       textRenderer
     );
     drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer);
+    drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer);
   }
   drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
   drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
@@ -666,7 +678,7 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
       const index = tileY * asteroid.widthTiles + tileX;
       const tile = asteroid.tiles[index];
-      if (!isRockTile(tile)) {
+      if (!isSolidTile(tile)) {
         continue;
       }
 
@@ -680,13 +692,17 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
       const index = tileY * asteroid.widthTiles + tileX;
       const tile = asteroid.tiles[index];
-      if (!isRockTile(tile)) {
+      if (!isSolidTile(tile)) {
         continue;
       }
 
       const screenX = Math.round(tileX * tileSize - camera.x);
       const screenY = Math.round(tileY * tileSize - camera.y);
-      drawRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+      if (tile === ASTEROID_TILE.wall) {
+        drawWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+      } else {
+        drawRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+      }
     }
   }
 
@@ -716,6 +732,253 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
       }
     }
   }
+}
+
+function drawBuildPreview(ctx, asteroid, player, players, camera, build, colors) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const radiusPixels = ENGINE.build.radiusTiles * tileSize;
+  const minTileX = Math.max(0, Math.floor((player.x - radiusPixels) / tileSize) - 1);
+  const maxTileX = Math.min(
+    asteroid.widthTiles - 1,
+    Math.ceil((player.x + radiusPixels) / tileSize) + 1
+  );
+  const minTileY = Math.max(0, Math.floor((player.y - radiusPixels) / tileSize) - 1);
+  const maxTileY = Math.min(
+    asteroid.heightTiles - 1,
+    Math.ceil((player.y + radiusPixels) / tileSize) + 1
+  );
+
+  ctx.fillStyle = colors.foreground;
+  drawBuildAreaOutline(ctx, asteroid, player, players, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY);
+
+  const target = build?.target;
+  if (!target?.valid) {
+    return;
+  }
+
+  const screenX = Math.round(target.tileX * tileSize - camera.x);
+  const screenY = Math.round(target.tileY * tileSize - camera.y);
+  drawBuildTargetSquare(ctx, screenX, screenY, tileSize);
+}
+
+function isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  if (!isPlayableTile(asteroid, tileX, tileY) || asteroid.tiles[index] !== ASTEROID_TILE.empty) {
+    return false;
+  }
+
+  const centerX = (tileX + 0.5) * tileSize;
+  const centerY = (tileY + 0.5) * tileSize;
+  return Math.hypot(centerX - player.x, centerY - player.y) <= ENGINE.build.radiusTiles * tileSize &&
+    !tileOverlapsPlayers(players, tileX, tileY, tileSize);
+}
+
+function drawBuildAreaOutline(ctx, asteroid, player, players, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY) {
+  const validTiles = new Set();
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize)) {
+        validTiles.add(tileKey(tileX, tileY));
+      }
+    }
+  }
+
+  const filledPixels = buildInsetPixelMask(validTiles, tileSize);
+  const edges = buildPixelBoundaryEdges(filledPixels);
+  const outgoingEdges = new Map();
+
+  for (const edge of edges) {
+    const key = vertexKey(edge.x0, edge.y0);
+    if (!outgoingEdges.has(key)) {
+      outgoingEdges.set(key, []);
+    }
+    outgoingEdges.get(key).push(edge);
+  }
+
+  for (const edge of edges) {
+    if (!edge.used) {
+      drawBuildPixelContour(ctx, edges, outgoingEdges, edge, camera);
+    }
+  }
+}
+
+function buildInsetPixelMask(validTiles, tileSize) {
+  const filledPixels = new Set();
+
+  for (const key of validTiles) {
+    const [tileX, tileY] = key.split(",").map(Number);
+    const west = validTiles.has(tileKey(tileX - 1, tileY));
+    const east = validTiles.has(tileKey(tileX + 1, tileY));
+    const north = validTiles.has(tileKey(tileX, tileY - 1));
+    const south = validTiles.has(tileKey(tileX, tileY + 1));
+    const left = tileX * tileSize + (west ? 0 : BUILD_PREVIEW_GAP);
+    const right = tileX * tileSize + tileSize - 1 - (east ? 0 : BUILD_PREVIEW_GAP);
+    const top = tileY * tileSize + (north ? 0 : BUILD_PREVIEW_GAP);
+    const bottom = tileY * tileSize + tileSize - 1 - (south ? 0 : BUILD_PREVIEW_GAP);
+
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) {
+        filledPixels.add(pixelKey(x, y));
+      }
+    }
+  }
+
+  return filledPixels;
+}
+
+function buildPixelBoundaryEdges(filledPixels) {
+  const edges = [];
+
+  for (const key of filledPixels) {
+    const [x, y] = key.split(",").map(Number);
+
+    if (!filledPixels.has(pixelKey(x, y - 1))) {
+      edges.push(buildPixelEdge(x, y, x + 1, y, 0, x, y));
+    }
+
+    if (!filledPixels.has(pixelKey(x + 1, y))) {
+      edges.push(buildPixelEdge(x + 1, y, x + 1, y + 1, 1, x, y));
+    }
+
+    if (!filledPixels.has(pixelKey(x, y + 1))) {
+      edges.push(buildPixelEdge(x + 1, y + 1, x, y + 1, 2, x, y));
+    }
+
+    if (!filledPixels.has(pixelKey(x - 1, y))) {
+      edges.push(buildPixelEdge(x, y + 1, x, y, 3, x, y));
+    }
+  }
+
+  return edges;
+}
+
+function buildPixelEdge(x0, y0, x1, y1, direction, pixelX, pixelY) {
+  return {
+    x0,
+    y0,
+    x1,
+    y1,
+    direction,
+    pixelX,
+    pixelY,
+    used: false
+  };
+}
+
+function drawBuildPixelContour(ctx, edges, outgoingEdges, startEdge, camera) {
+  const startKey = vertexKey(startEdge.x0, startEdge.y0);
+  let edge = startEdge;
+  const contour = [];
+  let guard = edges.length + 1;
+  let closed = false;
+
+  while (edge && !edge.used && guard > 0) {
+    edge.used = true;
+    contour.push(edge);
+    guard -= 1;
+
+    const endKey = vertexKey(edge.x1, edge.y1);
+    if (endKey === startKey) {
+      closed = true;
+      break;
+    }
+
+    edge = nextBuildContourEdge(edge, outgoingEdges.get(endKey) || []);
+  }
+
+  const perimeter = contour.length;
+  const dashOffset = perimeter > 0
+    ? positiveModulo(Math.floor((BUILD_DASH_PERIOD - (perimeter % BUILD_DASH_PERIOD)) / 2), BUILD_DASH_PERIOD)
+    : 0;
+
+  for (let index = 0; index < contour.length; index += 1) {
+    if (positiveModulo(index + dashOffset, BUILD_DASH_PERIOD) < BUILD_DASH_ON) {
+      drawBuildBoundaryPixel(ctx, contour[index], camera);
+    }
+  }
+}
+
+function nextBuildContourEdge(currentEdge, candidates) {
+  const unused = candidates.filter((edge) => !edge.used);
+  if (unused.length === 0) {
+    return null;
+  }
+
+  const directionOrder = [
+    (currentEdge.direction + 1) % 4,
+    currentEdge.direction,
+    (currentEdge.direction + 3) % 4,
+    (currentEdge.direction + 2) % 4
+  ];
+
+  for (const direction of directionOrder) {
+    const next = unused.find((edge) => edge.direction === direction);
+    if (next) {
+      return next;
+    }
+  }
+
+  return unused[0];
+}
+
+function drawBuildBoundaryPixel(ctx, edge, camera) {
+  ctx.fillRect(
+    Math.round(edge.pixelX - camera.x),
+    Math.round(edge.pixelY - camera.y),
+    1,
+    1
+  );
+}
+
+function tileOverlapsPlayers(players, tileX, tileY, tileSize) {
+  const tile = {
+    x: tileX * tileSize,
+    y: tileY * tileSize,
+    size: tileSize
+  };
+
+  return players.some((player) => player.alive && circleOverlapsTile(player, tile));
+}
+
+function circleOverlapsTile(circle, tile) {
+  const tileRight = tile.x + tile.size;
+  const tileBottom = tile.y + tile.size;
+  const closestX = clamp(circle.x, tile.x, tileRight);
+  const closestY = clamp(circle.y, tile.y, tileBottom);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+
+  return dx * dx + dy * dy < circle.radius * circle.radius;
+}
+
+function tileKey(tileX, tileY) {
+  return `${tileX},${tileY}`;
+}
+
+function pixelKey(x, y) {
+  return `${x},${y}`;
+}
+
+function vertexKey(x, y) {
+  return `${x},${y}`;
+}
+
+function drawBuildTargetSquare(ctx, x, y, size) {
+  const inset = Math.max(4, Math.floor(size * 0.25));
+  const left = x + inset;
+  const top = y + inset;
+  const right = x + size - 1 - inset;
+  const bottom = y + size - 1 - inset;
+
+  drawPixelLine(ctx, left, top, right, top);
+  drawPixelLine(ctx, right, top, right, bottom);
+  drawPixelLine(ctx, right, bottom, left, bottom);
+  drawPixelLine(ctx, left, bottom, left, top);
 }
 
 function drawRockFill(ctx, x, y, size, colors) {
@@ -832,6 +1095,59 @@ function drawOuterRockCorners(ctx, x, y, right, bottom, corners) {
 
   if (corners.outerBottomLeft) {
     drawPixelLine(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom, x, bottom - ROCK_OUTER_CORNER_RADIUS);
+  }
+}
+
+function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
+  ctx.fillStyle = colors.foreground;
+
+  const north = isWallTileAt(asteroid, tileX, tileY - 1);
+  const east = isWallTileAt(asteroid, tileX + 1, tileY);
+  const south = isWallTileAt(asteroid, tileX, tileY + 1);
+  const west = isWallTileAt(asteroid, tileX - 1, tileY);
+  const northWest = isWallTileAt(asteroid, tileX - 1, tileY - 1);
+  const northEast = isWallTileAt(asteroid, tileX + 1, tileY - 1);
+  const southEast = isWallTileAt(asteroid, tileX + 1, tileY + 1);
+  const southWest = isWallTileAt(asteroid, tileX - 1, tileY + 1);
+  const left = x + (west ? 0 : 1);
+  const right = x + size - 1 - (east ? 0 : 1);
+  const top = y + (north ? 0 : 1);
+  const bottom = y + size - 1 - (south ? 0 : 1);
+
+  if (!north) {
+    drawPixelLine(ctx, left, top, right, top);
+  }
+
+  if (!east) {
+    drawPixelLine(ctx, right, top, right, bottom);
+  }
+
+  if (!south) {
+    drawPixelLine(ctx, right, bottom, left, bottom);
+  }
+
+  if (!west) {
+    drawPixelLine(ctx, left, bottom, left, top);
+  }
+
+  if (north && west && !northWest) {
+    drawPixelLine(ctx, x + 1, y, x + 1, y + 1);
+    drawPixelLine(ctx, x, y + 1, x + 1, y + 1);
+  }
+
+  if (north && east && !northEast) {
+    drawPixelLine(ctx, x + size - 2, y, x + size - 2, y + 1);
+    drawPixelLine(ctx, x + size - 2, y + 1, x + size, y + 1);
+  }
+
+  if (south && east && !southEast) {
+    drawPixelLine(ctx, x + size - 2, y + size - 2, x + size - 2, y + size);
+    drawPixelLine(ctx, x + size - 2, y + size - 2, x + size, y + size - 2);
+  }
+
+  if (south && west && !southWest) {
+    drawPixelLine(ctx, x + 1, y + size - 2, x + 1, y + size);
+    drawPixelLine(ctx, x, y + size - 2, x + 1, y + size - 2);
   }
 }
 
@@ -1066,12 +1382,28 @@ function isRockTile(tile) {
   return tile === ASTEROID_TILE.rock || tile === ASTEROID_TILE.ore || tile === ASTEROID_TILE.diamond;
 }
 
+function isWallTile(tile) {
+  return tile === ASTEROID_TILE.wall;
+}
+
+function isSolidTile(tile) {
+  return isRockTile(tile) || isWallTile(tile);
+}
+
 function isRockTileAt(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
     return false;
   }
 
   return isRockTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX]);
+}
+
+function isWallTileAt(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  return isWallTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX]);
 }
 
 function amountAt(asteroid, index) {
@@ -1083,7 +1415,8 @@ function isPlayableTile(asteroid, tileX, tileY) {
     return false;
   }
 
-  return asteroid.playable[tileY * asteroid.widthTiles + tileX] === "1";
+  const value = asteroid.playable[tileY * asteroid.widthTiles + tileX];
+  return value === "1" || value === true;
 }
 
 function drawWorldBounds(ctx, snapshot, camera) {
@@ -1167,9 +1500,9 @@ function drawStarLayer(ctx, seed, starCamera) {
       }
 
       if (hash % 181 === 0) {
-        drawLargeStar(ctx, screen.x, screen.y, hash);
+        drawLargeStar(ctx, screen.x, screen.y);
       } else if (hash % 61 === 0) {
-        drawMediumStar(ctx, screen.x, screen.y, hash);
+        drawMediumStar(ctx, screen.x, screen.y);
       } else if (hash % 13 === 0) {
         ctx.fillRect(screen.x, screen.y, 1, 1);
       }
@@ -1177,29 +1510,19 @@ function drawStarLayer(ctx, seed, starCamera) {
   }
 }
 
-function drawLargeStar(ctx, x, y, hash) {
+function drawLargeStar(ctx, x, y) {
   ctx.fillRect(x, y, 1, 1);
   ctx.fillRect(x - 1, y, 1, 1);
   ctx.fillRect(x + 1, y, 1, 1);
   ctx.fillRect(x, y - 1, 1, 1);
   ctx.fillRect(x, y + 1, 1, 1);
-
-  if (hash & 1) {
-    ctx.fillRect(x - 2, y, 1, 1);
-    ctx.fillRect(x + 2, y, 1, 1);
-  } else {
-    ctx.fillRect(x, y - 2, 1, 1);
-    ctx.fillRect(x, y + 2, 1, 1);
-  }
+  ctx.fillRect(x, y - 2, 1, 1);
+  ctx.fillRect(x, y + 2, 1, 1);
 }
 
-function drawMediumStar(ctx, x, y, hash) {
+function drawMediumStar(ctx, x, y) {
   ctx.fillRect(x, y, 1, 1);
-  if (hash & 1) {
-    ctx.fillRect(x + 1, y, 1, 1);
-  } else {
-    ctx.fillRect(x, y + 1, 1, 1);
-  }
+  ctx.fillRect(x, y + 1, 1, 1);
 }
 
 function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
@@ -1240,15 +1563,25 @@ function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRendere
   const width = Math.round(entity.width || 96);
   const height = Math.round(entity.height || 28);
   const label = String(entity.label || entity.action || "BUTTON").toUpperCase();
+  const selected = entity.selected === true || entity.active === true;
+  const fillColor = entity.fillColor || colors.background;
+  const textColor = entity.textColor || (selected ? colors.background : colors.foreground);
 
   ctx.fillStyle = colors.foreground;
   ctx.fillRect(x, y, width, height);
-  ctx.fillStyle = colors.background;
+  ctx.fillStyle = selected && !entity.fillColor ? colors.foreground : fillColor;
   ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  if (selected && entity.fillColor) {
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(x + 2, y + 2, width - 4, 1);
+    ctx.fillRect(x + 2, y + height - 3, width - 4, 1);
+    ctx.fillRect(x + 2, y + 2, 1, height - 4);
+    ctx.fillRect(x + width - 3, y + 2, 1, height - 4);
+  }
 
   const textOptions = {
-    fontSize: 10,
-    color: colors.foreground
+    fontSize: entity.fillColor ? 8 : 10,
+    color: textColor
   };
   const labelWidth = textRenderer.measure(label, textOptions);
   textRenderer.draw(ctx, label, Math.round(x + (width - labelWidth) / 2), y + Math.floor((height - 14) / 2), {
@@ -1457,7 +1790,7 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer) {
   }
 
   if (!upgradesUi?.active) {
-    textRenderer.draw(ctx, "U - UPGRADES", 10, 62, {
+    textRenderer.draw(ctx, "Q - UPGRADES", 10, 62, {
       fontSize: 8,
       color: colors.foreground
     });
@@ -1465,6 +1798,17 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer) {
   }
 
   drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer);
+}
+
+function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer) {
+  if (!player || upgradesUi?.active) {
+    return;
+  }
+
+  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 72, {
+    fontSize: 8,
+    color: colors.foreground
+  });
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
@@ -1868,6 +2212,11 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
   ctx.fillStyle = colors.foreground;
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const hasFullTip = Number.isFinite(player.miningRay?.fullEndX) && Number.isFinite(player.miningRay?.fullEndY);
+  const rawExtension = hasFullTip || !player.miningRay
+    ? player.rayExtension ?? player.miningRay?.extension ?? 1
+    : 1;
+  const extension = Number.isFinite(rawExtension) ? clamp(rawExtension, 0, 1) : 1;
   const angle = player.aimAngle ?? player.angle;
   const direction = {
     x: Math.cos(angle),
@@ -1877,7 +2226,6 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
     x: -direction.y,
     y: direction.x
   };
-  const center = worldToScreen(player, camera);
   const fallbackStart = {
     x: player.x + direction.x * player.radius,
     y: player.y + direction.y * player.radius
@@ -1885,21 +2233,27 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
   const fallbackHit = !player.miningRay && asteroid
     ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, rayLength)
     : null;
-  const start = player.miningRay
-    ? worldToScreen({ x: player.miningRay.startX, y: player.miningRay.startY }, camera)
-    : {
-        x: center.x + direction.x * player.radius,
-        y: center.y + direction.y * player.radius
-      };
-  const phase = timeSeconds * 10 * effects.raySpinMultiplier + player.number;
-  const tip = player.miningRay
-    ? worldToScreen({ x: player.miningRay.endX, y: player.miningRay.endY }, camera)
+  const startWorld = player.miningRay
+    ? { x: player.miningRay.startX, y: player.miningRay.startY }
+    : fallbackStart;
+  const fullTipWorld = player.miningRay
+    ? {
+        x: hasFullTip ? player.miningRay.fullEndX : player.miningRay.endX,
+        y: hasFullTip ? player.miningRay.fullEndY : player.miningRay.endY
+      }
     : fallbackHit
-      ? worldToScreen(fallbackHit, camera)
+      ? { x: fallbackHit.x, y: fallbackHit.y }
     : {
-        x: Math.round(start.x + direction.x * rayLength),
-        y: Math.round(start.y + direction.y * rayLength)
+        x: fallbackStart.x + direction.x * rayLength,
+        y: fallbackStart.y + direction.y * rayLength
       };
+  const activeTipWorld = player.miningRay
+    ? { x: player.miningRay.endX, y: player.miningRay.endY }
+    : null;
+  const start = worldToScreen(startWorld, camera);
+  const phase = timeSeconds * 10 * effects.raySpinMultiplier + player.number;
+  const fullTip = worldToScreen(fullTipWorld, camera);
+  const activeTip = activeTipWorld ? worldToScreen(activeTipWorld, camera) : null;
 
   for (let index = 0; index < 3; index += 1) {
     const offset = Math.round(Math.sin(phase + (index * Math.PI * 2) / 3) * 2);
@@ -1907,7 +2261,21 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
       x: Math.round(start.x + normal.x * offset),
       y: Math.round(start.y + normal.y * offset)
     };
-    drawPixelLine(ctx, from.x, from.y, tip.x, tip.y);
+    const fullDx = fullTip.x - from.x;
+    const fullDy = fullTip.y - from.y;
+    const fullLength = Math.hypot(fullDx, fullDy);
+    if (fullLength <= 0) {
+      continue;
+    }
+    const activeLength = activeTip
+      ? Math.hypot(activeTip.x - from.x, activeTip.y - from.y)
+      : 0;
+    const visibleLength = clamp(Math.max(fullLength * extension, activeLength), 0, fullLength);
+    const visibleTip = {
+      x: Math.round(from.x + (fullDx / fullLength) * visibleLength),
+      y: Math.round(from.y + (fullDy / fullLength) * visibleLength)
+    };
+    drawPixelLine(ctx, from.x, from.y, visibleTip.x, visibleTip.y);
   }
 }
 

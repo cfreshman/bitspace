@@ -274,7 +274,7 @@ export function createRoomManager(options = {}) {
         }
 
         stepArenaFn(room.arena, dtSeconds);
-        events.push(...processLobbyButtonHits(room));
+        events.push(...processLobbyButtonHits(room, dtSeconds));
       }
 
       if (room.state === ROOM_STATES.active && room.arena) {
@@ -487,7 +487,7 @@ export function createRoomManager(options = {}) {
     return true;
   }
 
-  function processLobbyButtonHits(room) {
+  function processLobbyButtonHits(room, dtSeconds) {
     const events = [];
     if (room.state !== ROOM_STATES.waiting || !room.arena) {
       return events;
@@ -495,18 +495,36 @@ export function createRoomManager(options = {}) {
 
     for (const player of room.arena.players.values()) {
       if (!player.alive || !player.mining || player.miningRay?.hitType !== "entity") {
+        resetLobbyButtonTarget(player);
         continue;
       }
 
       const entity = room.arena.entities.get(player.miningRay.targetId);
       if (entity?.type !== "lobbyButton") {
+        resetLobbyButtonTarget(player);
         continue;
       }
 
       if (entity.hostOnly && room.hostClientId !== player.id) {
+        resetLobbyButtonTarget(player);
         continue;
       }
 
+      if (player.buttonTargetId !== entity.id) {
+        player.buttonTargetId = entity.id;
+        player.buttonTargetSeconds = 0;
+        player.buttonTargetActivated = false;
+      }
+
+      player.buttonTargetSeconds += dtSeconds;
+      if (
+        player.buttonTargetActivated ||
+        player.buttonTargetSeconds < ENGINE.mining.buttonSeconds
+      ) {
+        continue;
+      }
+
+      player.buttonTargetActivated = true;
       if (entity.action === "start") {
         const result = armStartCountdown(room, "host");
         if (result.ok && result.countdownStarted) {
@@ -532,6 +550,12 @@ export function createRoomManager(options = {}) {
     }
 
     return events;
+  }
+
+  function resetLobbyButtonTarget(player) {
+    player.buttonTargetId = null;
+    player.buttonTargetSeconds = 0;
+    player.buttonTargetActivated = false;
   }
 
   return {
@@ -590,7 +614,41 @@ function createLobbyArena(id, seed) {
     height: LOBBY_BUTTON_HEIGHT
   });
 
+  clearLobbyButtonSpawns(arena, center);
+
   return arena;
+}
+
+function clearLobbyButtonSpawns(arena, center) {
+  const buttons = Array.from(arena.entities.values()).filter((entity) => entity.type === "lobbyButton");
+  const radius = ENGINE.ship.radius + 2;
+
+  for (const pocket of arena.asteroid.pockets) {
+    let x = pocket.spawnX;
+    let y = pocket.spawnY;
+    let guard = 32;
+
+    while (guard > 0 && buttons.some((button) => circleOverlapsRect(x, y, radius, button))) {
+      const dx = x - center.x;
+      const dy = y - center.y;
+      const distance = Math.hypot(dx, dy) || 1;
+      x += (dx / distance) * RENDER.tileSize;
+      y += (dy / distance) * RENDER.tileSize;
+      guard -= 1;
+    }
+
+    pocket.spawnX = x;
+    pocket.spawnY = y;
+  }
+}
+
+function circleOverlapsRect(cx, cy, radius, rect) {
+  const closestX = Math.max(rect.x, Math.min(cx, rect.x + rect.width));
+  const closestY = Math.max(rect.y, Math.min(cy, rect.y + rect.height));
+  const dx = cx - closestX;
+  const dy = cy - closestY;
+
+  return dx * dx + dy * dy < radius * radius;
 }
 
 function syncLobbyHosts(room) {

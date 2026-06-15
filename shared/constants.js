@@ -40,10 +40,16 @@ export const ENGINE = Object.freeze({
   },
   mining: {
     rayLength: 28,
+    rayExtendSeconds: 0.25,
+    buttonSeconds: 0.25,
     playerDamagePerSecond: 45,
     rockSeconds: 0.5,
     oreSeconds: 0.5,
     diamondSeconds: 5
+  },
+  build: {
+    wallCostRock: 4,
+    radiusTiles: 4
   },
   collision: {
     boundaryRestitution: 0.42,

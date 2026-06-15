@@ -8,7 +8,8 @@ export const ASTEROID_TILE = Object.freeze({
   empty: ".",
   rock: "r",
   ore: "o",
-  diamond: "d"
+  diamond: "d",
+  wall: "w"
 });
 
 export const RESOURCE_TYPE = Object.freeze({
@@ -228,7 +229,10 @@ export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance) {
 }
 
 export function isAsteroidRockTile(tile) {
-  return tile === ASTEROID_TILE.rock || tile === ASTEROID_TILE.ore || tile === ASTEROID_TILE.diamond;
+  return tile === ASTEROID_TILE.rock ||
+    tile === ASTEROID_TILE.ore ||
+    tile === ASTEROID_TILE.diamond ||
+    tile === ASTEROID_TILE.wall;
 }
 
 function asteroidCollisionAt(asteroid, tileX, tileY) {
