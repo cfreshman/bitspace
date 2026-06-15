@@ -1,5 +1,6 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
-import { ASTEROID_TILE, raycastAsteroid } from "/shared/asteroid.js";
+import { ASTEROID_TILE, STORM_STATE, raycastAsteroid } from "/shared/asteroid.js";
+import { createSimplexNoise3D } from "/shared/math.js";
 import {
   aggregateUpgradeEffects,
   canAffordUpgrade,
@@ -18,6 +19,22 @@ const ASTEROID_DASH_ON = 5;
 const BUILD_DASH_PERIOD = 8;
 const BUILD_DASH_ON = 4;
 const BUILD_PREVIEW_GAP = 1;
+const STORM_NOISE_SCALE = 0.15;
+const STORM_NOISE_THRESHOLD = 0.68;
+const STORM_BOUNDARY_NOISE_THRESHOLD = 0.24;
+const STORM_NOISE_SPEED_X = -2;
+const STORM_NOISE_SPEED_Y = 5;
+const STORM_NOISE_SPEED_Z = 0.1;
+const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
+  { x: -1, y: -1 },
+  { x: 0, y: -1 },
+  { x: 1, y: -1 },
+  { x: -1, y: 0 },
+  { x: 1, y: 0 },
+  { x: -1, y: 1 },
+  { x: 0, y: 1 },
+  { x: 1, y: 1 }
+]);
 const ROCK_OUTER_CORNER_RADIUS = 3;
 const ROCK_INNER_CORNER_RADIUS = 1;
 const SMALL_ORB_RADIUS = 3;
@@ -30,6 +47,7 @@ const THRUSTER_PARTICLE_RATE = 70;
 const MINING_PARTICLE_RATE = 90;
 const MINING_RAY_BASE_SPIN_RATE = 2.5;
 const MAX_PARTICLES = 260;
+const stormNoiseCache = new Map();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -387,7 +405,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     if (renderPlayer.mining) {
       drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
     }
-    drawShip(ctx, renderPlayer, camera, colors, options.timeSeconds ?? snapshot.tick / 60);
+    drawShip(ctx, renderPlayer, camera, colors, options.timeSeconds ?? snapshot.tick / 60, textRenderer);
   }
 
   drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
@@ -659,7 +677,90 @@ function diamondMiningTargetMap(snapshot) {
 
 function drawAsteroid(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets) {
   drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets);
-  drawAsteroidBoundary(ctx, asteroid, camera, colors);
+  drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds);
+  if (asteroid.storm) {
+    drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
+  } else {
+    drawAsteroidBoundary(ctx, asteroid, camera, colors);
+  }
+}
+
+function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
+  if (!asteroid.storm) {
+    return;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const maxTileX = Math.min(
+    asteroid.widthTiles - 1,
+    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+  );
+  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const maxTileY = Math.min(
+    asteroid.heightTiles - 1,
+    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+  );
+
+  ctx.fillStyle = colors.foreground;
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const state = stormTileStateAt(asteroid, tileX, tileY);
+      if (state !== STORM_STATE.storm) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
+      ctx.fillStyle = colors.background;
+      ctx.fillRect(screenX, screenY, tileSize, tileSize);
+      ctx.fillStyle = colors.foreground;
+      drawStormTilePattern(ctx, asteroid, screenX, screenY, tileSize, tileX, tileY, timeSeconds);
+    }
+  }
+}
+
+function drawStormTilePattern(
+  ctx,
+  asteroid,
+  x,
+  y,
+  size,
+  tileX,
+  tileY,
+  timeSeconds,
+  threshold = STORM_NOISE_THRESHOLD
+) {
+  const worldLeft = tileX * size;
+  const worldTop = tileY * size;
+
+  for (let py = 0; py < size; py += 1) {
+    for (let px = 0; px < size; px += 1) {
+      if (stormNoiseAt(asteroid, worldLeft + px, worldTop + py, timeSeconds) >= threshold) {
+        ctx.fillRect(x + px, y + py, 1, 1);
+      }
+    }
+  }
+}
+
+function stormNoiseAt(asteroid, worldX, worldY, timeSeconds) {
+  const noise = stormNoiseForSeed(asteroid.seed);
+  return noise(
+    (worldX + timeSeconds * STORM_NOISE_SPEED_X) * STORM_NOISE_SCALE,
+    (worldY + timeSeconds * STORM_NOISE_SPEED_Y) * STORM_NOISE_SCALE,
+    timeSeconds * STORM_NOISE_SPEED_Z
+  );
+}
+
+function stormNoiseForSeed(seed) {
+  const cacheKey = `${seed || "default"}:storm-visual`;
+  let noise = stormNoiseCache.get(cacheKey);
+  if (!noise) {
+    noise = createSimplexNoise3D(cacheKey);
+    stormNoiseCache.set(cacheKey, noise);
+  }
+
+  return noise;
 }
 
 function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets) {
@@ -1320,6 +1421,85 @@ function projectPoint3D(point, centerX, centerY) {
   };
 }
 
+function drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const maxTileX = Math.min(
+    asteroid.widthTiles - 1,
+    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+  );
+  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const maxTileY = Math.min(
+    asteroid.heightTiles - 1,
+    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+  );
+
+  ctx.fillStyle = colors.foreground;
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (!isBoundarySafeTile(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
+      const worldX = tileX * tileSize;
+      const worldY = tileY * tileSize;
+
+      if (!isBoundarySafeTile(asteroid, tileX - 1, tileY)) {
+        drawStormBoundaryVertical(ctx, asteroid, screenX, screenY, tileSize, worldX, worldY, timeSeconds);
+      }
+
+      if (!isBoundarySafeTile(asteroid, tileX + 1, tileY)) {
+        drawStormBoundaryVertical(
+          ctx,
+          asteroid,
+          screenX + tileSize - 1,
+          screenY,
+          tileSize,
+          worldX + tileSize - 1,
+          worldY,
+          timeSeconds
+        );
+      }
+
+      if (!isBoundarySafeTile(asteroid, tileX, tileY - 1)) {
+        drawStormBoundaryHorizontal(ctx, asteroid, screenX, screenY, tileSize, worldX, worldY, timeSeconds);
+      }
+
+      if (!isBoundarySafeTile(asteroid, tileX, tileY + 1)) {
+        drawStormBoundaryHorizontal(
+          ctx,
+          asteroid,
+          screenX,
+          screenY + tileSize - 1,
+          tileSize,
+          worldX,
+          worldY + tileSize - 1,
+          timeSeconds
+        );
+      }
+    }
+  }
+}
+
+function drawStormBoundaryVertical(ctx, asteroid, x, y, length, worldX, worldY, timeSeconds) {
+  for (let offset = 0; offset < length; offset += 1) {
+    if (stormNoiseAt(asteroid, worldX, worldY + offset, timeSeconds) >= STORM_BOUNDARY_NOISE_THRESHOLD) {
+      ctx.fillRect(x, y + offset, 1, 1);
+    }
+  }
+}
+
+function drawStormBoundaryHorizontal(ctx, asteroid, x, y, length, worldX, worldY, timeSeconds) {
+  for (let offset = 0; offset < length; offset += 1) {
+    if (stormNoiseAt(asteroid, worldX + offset, worldY, timeSeconds) >= STORM_BOUNDARY_NOISE_THRESHOLD) {
+      ctx.fillRect(x + offset, y, 1, 1);
+    }
+  }
+}
+
 function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
@@ -1337,26 +1517,26 @@ function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
 
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      if (!isPlayableTile(asteroid, tileX, tileY)) {
+      if (!isBoundarySafeTile(asteroid, tileX, tileY)) {
         continue;
       }
 
       const screenX = Math.round(tileX * tileSize - camera.x);
       const screenY = Math.round(tileY * tileSize - camera.y);
 
-      if (!isPlayableTile(asteroid, tileX - 1, tileY)) {
+      if (!isBoundarySafeTile(asteroid, tileX - 1, tileY)) {
         drawDashedBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize);
       }
 
-      if (!isPlayableTile(asteroid, tileX + 1, tileY)) {
+      if (!isBoundarySafeTile(asteroid, tileX + 1, tileY)) {
         drawDashedBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize);
       }
 
-      if (!isPlayableTile(asteroid, tileX, tileY - 1)) {
+      if (!isBoundarySafeTile(asteroid, tileX, tileY - 1)) {
         drawDashedBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize);
       }
 
-      if (!isPlayableTile(asteroid, tileX, tileY + 1)) {
+      if (!isBoundarySafeTile(asteroid, tileX, tileY + 1)) {
         drawDashedBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize);
       }
     }
@@ -1418,6 +1598,28 @@ function isPlayableTile(asteroid, tileX, tileY) {
 
   const value = asteroid.playable[tileY * asteroid.widthTiles + tileX];
   return value === "1" || value === true;
+}
+
+function isBoundarySafeTile(asteroid, tileX, tileY) {
+  return isPlayableTile(asteroid, tileX, tileY) &&
+    stormTileStateAt(asteroid, tileX, tileY) !== STORM_STATE.storm;
+}
+
+function stormTileStateAt(asteroid, tileX, tileY) {
+  if (!asteroid.storm) {
+    return isPlayableTile(asteroid, tileX, tileY) ? STORM_STATE.safe : STORM_STATE.storm;
+  }
+
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return STORM_STATE.storm;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  if (!isPlayableTile(asteroid, tileX, tileY)) {
+    return STORM_STATE.storm;
+  }
+
+  return Number(asteroid.storm[index] || STORM_STATE.safe);
 }
 
 function drawWorldBounds(ctx, snapshot, camera) {
@@ -1591,7 +1793,7 @@ function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRendere
   });
 }
 
-function drawShip(ctx, player, camera, colors, timeSeconds) {
+function drawShip(ctx, player, camera, colors, timeSeconds, textRenderer) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -1627,6 +1829,37 @@ function drawShip(ctx, player, camera, colors, timeSeconds) {
   }
 
   drawShipHealthIndicator(ctx, x, y, player, colors);
+  drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+}
+
+function drawShipStormWarning(ctx, x, y, player, colors, textRenderer) {
+  if (!player.stormWarning || !textRenderer) {
+    return;
+  }
+
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+  const warning = String(player.stormWarning).slice(0, 3);
+  const width = textRenderer.measure(warning, textOptions);
+  const hasDownComponent = Math.sin(player.angle ?? 0) > 0;
+  const warningY = hasDownComponent ? y + player.radius + 2 : y - player.radius - 9;
+  const warningX = Math.round(x - width / 2);
+  const drawOptions = {
+    ...textOptions,
+    width: width + 2
+  };
+  for (const offset of STORM_WARNING_BUFFER_OFFSETS) {
+    textRenderer.draw(ctx, warning, warningX + offset.x, warningY + offset.y, {
+      ...drawOptions,
+      color: colors.background
+    });
+  }
+  textRenderer.draw(ctx, warning, warningX, warningY, {
+    ...drawOptions,
+    color: colors.foreground
+  });
 }
 
 function drawShipHealthIndicator(ctx, x, y, player, colors) {
@@ -2232,7 +2465,9 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
     y: player.y + direction.y * player.radius
   };
   const fallbackHit = !player.miningRay && asteroid
-    ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, rayLength)
+    ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, rayLength, {
+        blockNonPlayable: !asteroid.storm
+      })
     : null;
   const startWorld = player.miningRay
     ? { x: player.miningRay.startX, y: player.miningRay.startY }

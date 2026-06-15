@@ -23,6 +23,16 @@ export const ENGINE = Object.freeze({
     autoStartSeconds: 300,
     countdownSeconds: 10
   },
+  storm: {
+    safeSeconds: 300,
+    closeSeconds: 600,
+    warningSeconds: 15,
+    damageTiers: [
+      { afterSeconds: 0, damagePerSecond: 6, warning: "!" },
+      { afterSeconds: 420, damagePerSecond: 14, warning: "!!" },
+      { afterSeconds: 720, damagePerSecond: 28, warning: "!!!" }
+    ]
+  },
   world: {
     width: 4096,
     height: 4096,

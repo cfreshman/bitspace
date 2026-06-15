@@ -1,6 +1,7 @@
 import { ENGINE, RENDER } from "./constants.js";
 import {
   ASTEROID_TILE,
+  STORM_STATE,
   blockingTilesNearCircle,
   createAsteroid,
   raycastAsteroid,
@@ -10,6 +11,7 @@ import { createEmptyInput, normalizeInput } from "./input.js";
 import {
   clamp,
   clampMagnitude,
+  createSeededRandom,
   roundForSnapshot
 } from "./math.js";
 import {
@@ -27,17 +29,22 @@ const INITIAL_SPAWN_ANGLE = Math.PI / 4;
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
+  const asteroid = options.asteroid ?? createAsteroid({ seed: `${seed}:asteroid` });
+  const playerDamage = options.playerDamage ?? true;
+  const stormEnabled = options.storm ?? playerDamage;
 
   return {
     id: options.id ?? DEFAULT_ARENA_ID,
     seed,
     tick: 0,
     players: new Map(),
-    asteroid: options.asteroid ?? createAsteroid({ seed: `${seed}:asteroid` }),
+    asteroid,
     asteroidMining: new Map(),
     asteroidUpdates: [],
+    storm: stormEnabled ? createStormState(asteroid, seed) : null,
+    stormUpdates: [],
     rules: {
-      playerDamage: options.playerDamage ?? true
+      playerDamage
     },
     // Extension channels are intentionally empty until the game design is explicit.
     entities: new Map(),
@@ -90,6 +97,8 @@ export function addPlayer(arena, playerOptions) {
       ore: 0,
       diamond: 0
     },
+    stormWarning: "",
+    stormDamagePerSecond: 0,
     alive: true,
     input: createEmptyInput(),
     inputSessionId: "",
@@ -243,6 +252,10 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
     return { ok: false, reason: "build_too_far" };
   }
 
+  if (stormStateAt(arena, index) !== STORM_STATE.safe) {
+    return { ok: false, reason: "build_storm" };
+  }
+
   if (tileOverlapsAlivePlayer(arena, asteroid, tileX, tileY)) {
     return { ok: false, reason: "build_occupied" };
   }
@@ -265,6 +278,7 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
 
 export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate) {
   arena.tick += 1;
+  stepStorm(arena);
 
   for (const player of arena.players.values()) {
     if (player.alive) {
@@ -291,7 +305,11 @@ export function snapshotArena(arena) {
 }
 
 export function snapshotAsteroid(arena) {
-  return serializeAsteroid(arena.asteroid);
+  return {
+    ...serializeAsteroid(arena.asteroid),
+    storm: arena.storm ? serializeStorm(arena.storm) : null,
+    stormWarnings: arena.storm ? serializeStormWarnings(arena.storm) : []
+  };
 }
 
 function snapshotAsteroidMining(arena) {
@@ -310,8 +328,9 @@ function snapshotAsteroidMining(arena) {
 }
 
 export function takeAsteroidUpdates(arena) {
-  const updates = arena.asteroidUpdates;
+  const updates = arena.asteroidUpdates.concat(arena.stormUpdates);
   arena.asteroidUpdates = [];
+  arena.stormUpdates = [];
   return updates;
 }
 
@@ -379,18 +398,21 @@ function stepPlayer(arena, player, dtSeconds) {
   player.y += player.vy * dtSeconds;
 
   resolveStaticCollisions(arena, player);
+  applyStormDamage(arena, player, dtSeconds);
 }
 
 function resolveStaticCollisions(arena, player) {
-  return arena.asteroid ? resolveAsteroidCollisions(arena.asteroid, player) : 0;
+  return arena.asteroid
+    ? resolveAsteroidCollisions(arena.asteroid, player, { blockNonPlayable: !arena.storm })
+    : 0;
 }
 
-function resolveAsteroidCollisions(asteroid, player) {
+function resolveAsteroidCollisions(asteroid, player, options = {}) {
   let impact = 0;
 
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
-    const blockers = blockingTilesNearCircle(asteroid, player.x, player.y, player.radius);
+    const blockers = blockingTilesNearCircle(asteroid, player.x, player.y, player.radius, options);
 
     for (const blocker of blockers) {
       const hit = circleTileOverlap(player, blocker);
@@ -535,7 +557,9 @@ function processPlayerMining(arena, player, dtSeconds) {
 }
 
 function raycastMiningRay(arena, player, start, angle, maxDistance) {
-  const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, maxDistance);
+  const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, maxDistance, {
+    blockNonPlayable: !arena.storm
+  });
   const entityHit = raycastEntities(arena, player, start, angle, Math.min(hit.distance, maxDistance));
   const playerHit = raycastPlayers(
     arena,
@@ -616,6 +640,322 @@ function addPlayerResource(player, resource, amount) {
     0,
     ENGINE.player.maxResourceAmount
   );
+}
+
+function createStormState(asteroid, seed) {
+  let playableCount = 0;
+  for (let index = 0; index < asteroid.playable.length; index += 1) {
+    if (isPlayableCell(asteroid, index)) {
+      playableCount += 1;
+    }
+  }
+
+  return {
+    state: new Uint8Array(asteroid.tiles.length),
+    warningStartedTick: new Int32Array(asteroid.tiles.length),
+    warningUntilTick: new Int32Array(asteroid.tiles.length),
+    playableCount,
+    claimedCount: 0,
+    random: createSeededRandom(`${seed}:storm`)
+  };
+}
+
+function serializeStorm(storm) {
+  return Array.from(storm.state, (state) => state.toString(36)).join("");
+}
+
+function serializeStormWarnings(storm) {
+  const warnings = [];
+
+  for (let index = 0; index < storm.state.length; index += 1) {
+    if (storm.state[index] === STORM_STATE.warning) {
+      warnings.push({
+        index,
+        startedTick: storm.warningStartedTick[index],
+        untilTick: storm.warningUntilTick[index]
+      });
+    }
+  }
+
+  return warnings;
+}
+
+function stormStateAt(arena, index) {
+  return arena.storm?.state[index] ?? STORM_STATE.safe;
+}
+
+function stepStorm(arena) {
+  if (!arena.storm) {
+    return;
+  }
+
+  const converted = convertExpiredStormWarnings(arena);
+  if (converted > 0) {
+    fillStormEnclosedAreas(arena);
+  }
+
+  addStormWarnings(arena);
+}
+
+function convertExpiredStormWarnings(arena) {
+  const storm = arena.storm;
+  let converted = 0;
+
+  for (let index = 0; index < storm.state.length; index += 1) {
+    if (
+      storm.state[index] !== STORM_STATE.warning ||
+      storm.warningUntilTick[index] > arena.tick
+    ) {
+      continue;
+    }
+
+    setStormState(arena, index, STORM_STATE.storm);
+    converted += 1;
+  }
+
+  return converted;
+}
+
+function addStormWarnings(arena) {
+  const storm = arena.storm;
+  const config = ENGINE.storm;
+  const safeTicks = Math.ceil(config.safeSeconds * ENGINE.tickRate);
+  const closeTicks = Math.ceil(config.closeSeconds * ENGINE.tickRate);
+  const warningTicks = Math.ceil(config.warningSeconds * ENGINE.tickRate);
+  const selectionEndTick = safeTicks + Math.max(1, closeTicks - warningTicks);
+  if (arena.tick <= safeTicks || storm.claimedCount >= storm.playableCount) {
+    return;
+  }
+
+  const totalSelectionTicks = Math.max(1, selectionEndTick - safeTicks);
+  const elapsedSelectionTicks = clamp(arena.tick - safeTicks, 0, totalSelectionTicks);
+  const remainingTargetCount = Math.floor(
+    (storm.playableCount * (totalSelectionTicks - elapsedSelectionTicks)) / totalSelectionTicks
+  );
+  const targetClaimedCount = storm.playableCount - remainingTargetCount;
+  let needed = Math.max(0, targetClaimedCount - storm.claimedCount);
+
+  while (needed > 0) {
+    const candidates = stormBoundaryCandidates(arena);
+    if (candidates.length === 0) {
+      break;
+    }
+
+    const index = candidates[Math.floor(storm.random() * candidates.length)];
+    setStormState(arena, index, STORM_STATE.warning, {
+      warningStartedTick: arena.tick,
+      warningUntilTick: arena.tick + warningTicks
+    });
+    needed -= 1;
+  }
+}
+
+function stormBoundaryCandidates(arena) {
+  const asteroid = arena.asteroid;
+  const storm = arena.storm;
+  const candidates = [];
+
+  for (let index = 0; index < asteroid.tiles.length; index += 1) {
+    if (!isPlayableCell(asteroid, index) || storm.state[index] !== STORM_STATE.safe) {
+      continue;
+    }
+
+    if (hasStormBoundaryNeighbor(arena, index)) {
+      candidates.push(index);
+    }
+  }
+
+  return candidates;
+}
+
+function hasStormBoundaryNeighbor(arena, index) {
+  const asteroid = arena.asteroid;
+  const x = index % asteroid.widthTiles;
+  const y = Math.floor(index / asteroid.widthTiles);
+  const neighbors = [
+    { x: x - 1, y },
+    { x: x + 1, y },
+    { x, y: y - 1 },
+    { x, y: y + 1 }
+  ];
+
+  return neighbors.some((neighbor) => {
+    if (
+      neighbor.x < 0 ||
+      neighbor.y < 0 ||
+      neighbor.x >= asteroid.widthTiles ||
+      neighbor.y >= asteroid.heightTiles
+    ) {
+      return true;
+    }
+
+    const neighborIndex = neighbor.y * asteroid.widthTiles + neighbor.x;
+    return !isPlayableCell(asteroid, neighborIndex) ||
+      arena.storm.state[neighborIndex] !== STORM_STATE.safe;
+  });
+}
+
+function fillStormEnclosedAreas(arena) {
+  const asteroid = arena.asteroid;
+  const storm = arena.storm;
+  const visited = new Uint8Array(storm.state.length);
+  const components = [];
+
+  for (let index = 0; index < storm.state.length; index += 1) {
+    if (
+      visited[index] ||
+      !isPlayableCell(asteroid, index) ||
+      storm.state[index] === STORM_STATE.storm
+    ) {
+      continue;
+    }
+
+    components.push(collectNonStormComponent(arena, index, visited));
+  }
+
+  if (components.length <= 1) {
+    return;
+  }
+
+  let keep = components[0];
+  for (const component of components) {
+    if (component.length > keep.length) {
+      keep = component;
+    }
+  }
+
+  for (const component of components) {
+    if (component === keep) {
+      continue;
+    }
+
+    for (const index of component) {
+      setStormState(arena, index, STORM_STATE.storm);
+    }
+  }
+}
+
+function collectNonStormComponent(arena, startIndex, visited) {
+  const asteroid = arena.asteroid;
+  const storm = arena.storm;
+  const queue = [startIndex];
+  const component = [];
+  visited[startIndex] = 1;
+
+  while (queue.length > 0) {
+    const index = queue.shift();
+    component.push(index);
+
+    for (const neighborIndex of stormNeighborIndexes(index, asteroid.widthTiles, asteroid.heightTiles)) {
+      if (
+        visited[neighborIndex] ||
+        !isPlayableCell(asteroid, neighborIndex) ||
+        storm.state[neighborIndex] === STORM_STATE.storm
+      ) {
+        continue;
+      }
+
+      visited[neighborIndex] = 1;
+      queue.push(neighborIndex);
+    }
+  }
+
+  return component;
+}
+
+function stormNeighborIndexes(index, widthTiles, heightTiles) {
+  const x = index % widthTiles;
+  const y = Math.floor(index / widthTiles);
+  const neighbors = [];
+
+  if (x > 0) {
+    neighbors.push(index - 1);
+  }
+  if (x < widthTiles - 1) {
+    neighbors.push(index + 1);
+  }
+  if (y > 0) {
+    neighbors.push(index - widthTiles);
+  }
+  if (y < heightTiles - 1) {
+    neighbors.push(index + widthTiles);
+  }
+
+  return neighbors;
+}
+
+function setStormState(arena, index, state, options = {}) {
+  const storm = arena.storm;
+  const previous = storm.state[index];
+  if (previous === state) {
+    return;
+  }
+
+  if (previous === STORM_STATE.safe && state !== STORM_STATE.safe) {
+    storm.claimedCount += 1;
+  }
+  if (state === STORM_STATE.warning) {
+    storm.warningStartedTick[index] = options.warningStartedTick ?? arena.tick;
+    storm.warningUntilTick[index] = options.warningUntilTick ?? arena.tick;
+  } else {
+    storm.warningStartedTick[index] = 0;
+    storm.warningUntilTick[index] = 0;
+  }
+
+  storm.state[index] = state;
+  const update = {
+    type: "storm",
+    index,
+    state
+  };
+  if (state === STORM_STATE.warning) {
+    update.warningStartedTick = storm.warningStartedTick[index];
+    update.warningUntilTick = storm.warningUntilTick[index];
+  }
+  arena.stormUpdates.push(update);
+}
+
+function applyStormDamage(arena, player, dtSeconds) {
+  const stormHit = playerStormHit(arena, player);
+  if (!stormHit) {
+    player.stormWarning = "";
+    player.stormDamagePerSecond = 0;
+    return;
+  }
+
+  const tier = stormDamageTier(arena);
+  player.stormWarning = tier.warning;
+  player.stormDamagePerSecond = tier.damagePerSecond;
+  damagePlayer(player, tier.damagePerSecond * dtSeconds, arena.tick, null);
+}
+
+function playerStormHit(arena, player) {
+  if (!arena.storm) {
+    return false;
+  }
+
+  const asteroid = arena.asteroid;
+  const tileX = Math.floor(player.x / asteroid.tileSize);
+  const tileY = Math.floor(player.y / asteroid.tileSize);
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return true;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  return !isPlayableCell(asteroid, index) || arena.storm.state[index] === STORM_STATE.storm;
+}
+
+function stormDamageTier(arena) {
+  const elapsedSeconds = arena.tick / ENGINE.tickRate;
+  let selected = ENGINE.storm.damageTiers[0];
+
+  for (const tier of ENGINE.storm.damageTiers) {
+    if (elapsedSeconds >= tier.afterSeconds) {
+      selected = tier;
+    }
+  }
+
+  return selected;
 }
 
 function spendUpgradeCost(player, cost) {
@@ -1090,6 +1430,8 @@ function snapshotPlayer(player) {
       ore: player.resources.ore,
       diamond: player.resources.diamond
     },
+    stormWarning: player.stormWarning,
+    stormDamagePerSecond: roundForSnapshot(player.stormDamagePerSecond || 0),
     alive: player.alive
   };
 }

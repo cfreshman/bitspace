@@ -1,6 +1,7 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
 import {
   ASTEROID_TILE,
+  STORM_STATE,
   blockingTilesNearCircle,
   createLobbyAsteroid,
   raycastAsteroid
@@ -199,6 +200,9 @@ socket.on(SERVER_EVENTS.room, (room) => {
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   recordEliminations(snapshot, performance.now() / 1000);
   state.snapshot = snapshot;
+  if (state.asteroid) {
+    state.asteroid.tick = snapshot.tick;
+  }
   reconcilePrediction(snapshot, performance.now() / 1000);
 });
 
@@ -206,8 +210,12 @@ socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
   state.asteroid = {
     ...asteroid,
     tiles: asteroid.tiles.split(""),
-    amounts: asteroid.amounts.split("")
+    amounts: asteroid.amounts.split(""),
+    storm: asteroid.storm ? asteroid.storm.split("") : null,
+    stormWarningStarted: asteroid.storm ? new Int32Array(asteroid.tiles.length) : null,
+    stormWarningUntil: asteroid.storm ? new Int32Array(asteroid.tiles.length) : null
   };
+  applyStormWarnings(state.asteroid, asteroid.stormWarnings || []);
 });
 
 socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
@@ -216,10 +224,43 @@ socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
   }
 
   for (const update of updates) {
+    if (update.type === "storm") {
+      if (!state.asteroid.storm) {
+        state.asteroid.storm = new Array(state.asteroid.tiles.length).fill(String(STORM_STATE.safe));
+        state.asteroid.stormWarningStarted = new Int32Array(state.asteroid.tiles.length);
+        state.asteroid.stormWarningUntil = new Int32Array(state.asteroid.tiles.length);
+      }
+      state.asteroid.storm[update.index] = String(update.state);
+      if (Number(update.state) === STORM_STATE.warning) {
+        state.asteroid.stormWarningStarted[update.index] = update.warningStartedTick || state.asteroid.tick || 0;
+        state.asteroid.stormWarningUntil[update.index] = update.warningUntilTick || state.asteroid.tick || 0;
+      } else {
+        state.asteroid.stormWarningStarted[update.index] = 0;
+        state.asteroid.stormWarningUntil[update.index] = 0;
+      }
+      continue;
+    }
+
     state.asteroid.tiles[update.index] = update.tile;
     state.asteroid.amounts[update.index] = update.amount;
   }
 });
+
+function applyStormWarnings(asteroid, warnings) {
+  if (!asteroid.storm || !asteroid.stormWarningStarted || !asteroid.stormWarningUntil) {
+    return;
+  }
+
+  for (const warning of warnings) {
+    const index = Number(warning.index);
+    if (!Number.isInteger(index) || index < 0 || index >= asteroid.storm.length) {
+      continue;
+    }
+
+    asteroid.stormWarningStarted[index] = Number(warning.startedTick) || 0;
+    asteroid.stormWarningUntil[index] = Number(warning.untilTick) || 0;
+  }
+}
 
 socket.on(SERVER_EVENTS.beep, () => {
   requestMechanicalBeep();
@@ -725,7 +766,7 @@ function resetMenuButtonTarget() {
 function resolveMenuAsteroidCollisions(player) {
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
-    const blockers = blockingTilesNearCircle(state.menu.asteroid, player.x, player.y, player.radius);
+  const blockers = blockingTilesNearCircle(state.menu.asteroid, player.x, player.y, player.radius);
 
     for (const blocker of blockers) {
       const hit = circleTileOverlap(player, blocker);
@@ -1404,7 +1445,9 @@ function resolvePredictionAsteroidCollisions(player) {
 
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
-    const blockers = blockingTilesNearCircle(state.asteroid, player.x, player.y, player.radius);
+    const blockers = blockingTilesNearCircle(state.asteroid, player.x, player.y, player.radius, {
+      blockNonPlayable: !state.asteroid.storm
+    });
 
     for (const blocker of blockers) {
       const hit = circleTileOverlap(player, blocker);
@@ -1801,6 +1844,7 @@ function buildTargetFromMouse() {
   const inRange = inBounds && tileWithinBuildRadius(player, tileX, tileY, tileSize);
   const empty = inBounds && state.asteroid.tiles[index] === ASTEROID_TILE.empty;
   const playable = inBounds && isPlayableBuildIndex(index);
+  const stormSafe = inBounds && !isStormBuildIndex(index);
   const clear = inBounds && !tileOverlapsVisiblePlayer(tileX, tileY, tileSize);
   const affordable = (player.resources?.rock || 0) >= ENGINE.build.wallCostRock;
 
@@ -1813,7 +1857,7 @@ function buildTargetFromMouse() {
     playable,
     clear,
     affordable,
-    valid: inRange && empty && playable && clear && affordable
+    valid: inRange && empty && playable && stormSafe && clear && affordable
   };
 }
 
@@ -1825,6 +1869,10 @@ function tileWithinBuildRadius(player, tileX, tileY, tileSize) {
 
 function isPlayableBuildIndex(index) {
   return state.asteroid?.playable?.[index] === "1" || state.asteroid?.playable?.[index] === true;
+}
+
+function isStormBuildIndex(index) {
+  return Number(state.asteroid?.storm?.[index] || STORM_STATE.safe) !== STORM_STATE.safe;
 }
 
 function tileOverlapsVisiblePlayer(tileX, tileY, tileSize) {

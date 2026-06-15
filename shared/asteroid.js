@@ -18,6 +18,12 @@ export const RESOURCE_TYPE = Object.freeze({
   diamond: "DIAMOND"
 });
 
+export const STORM_STATE = Object.freeze({
+  safe: 0,
+  warning: 1,
+  storm: 2
+});
+
 const DEFAULT_GENERATION = Object.freeze({
   playerPocketRadius: 3,
   playerOrbitRadius: 56,
@@ -171,7 +177,7 @@ export function serializeAsteroid(asteroid) {
   };
 }
 
-export function blockingTilesNearCircle(asteroid, x, y, radius) {
+export function blockingTilesNearCircle(asteroid, x, y, radius, options = {}) {
   const minTileX = Math.floor((x - radius) / asteroid.tileSize) - 1;
   const maxTileX = Math.floor((x + radius) / asteroid.tileSize) + 1;
   const minTileY = Math.floor((y - radius) / asteroid.tileSize) - 1;
@@ -180,7 +186,7 @@ export function blockingTilesNearCircle(asteroid, x, y, radius) {
 
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      if (isBlockingTile(asteroid, tileX, tileY)) {
+      if (isBlockingTile(asteroid, tileX, tileY, options)) {
         tiles.push({
           tileX,
           tileY,
@@ -195,7 +201,7 @@ export function blockingTilesNearCircle(asteroid, x, y, radius) {
   return tiles;
 }
 
-export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance) {
+export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance, options = {}) {
   const direction = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -207,7 +213,7 @@ export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance) {
     const y = startY + direction.y * distance;
     const tileX = Math.floor(x / asteroid.tileSize);
     const tileY = Math.floor(y / asteroid.tileSize);
-    const hit = asteroidCollisionAt(asteroid, tileX, tileY);
+    const hit = asteroidCollisionAt(asteroid, tileX, tileY, options);
 
     if (hit) {
       return {
@@ -235,16 +241,18 @@ export function isAsteroidRockTile(tile) {
     tile === ASTEROID_TILE.wall;
 }
 
-function asteroidCollisionAt(asteroid, tileX, tileY) {
+function asteroidCollisionAt(asteroid, tileX, tileY, options = {}) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
-    return {
-      hit: true,
-      mineable: false,
-      tileX,
-      tileY,
-      index: -1,
-      tile: ASTEROID_TILE.empty
-    };
+    return options.blockNonPlayable === false
+      ? null
+      : {
+          hit: true,
+          mineable: false,
+          tileX,
+          tileY,
+          index: -1,
+          tile: ASTEROID_TILE.empty
+        };
   }
 
   const index = tileY * asteroid.widthTiles + tileX;
@@ -261,7 +269,7 @@ function asteroidCollisionAt(asteroid, tileX, tileY) {
     };
   }
 
-  if (!isPlayableCell(asteroid, index)) {
+  if (options.blockNonPlayable !== false && !isPlayableCell(asteroid, index)) {
     return {
       hit: true,
       mineable: false,
@@ -275,13 +283,14 @@ function asteroidCollisionAt(asteroid, tileX, tileY) {
   return null;
 }
 
-function isBlockingTile(asteroid, tileX, tileY) {
+function isBlockingTile(asteroid, tileX, tileY, options = {}) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
-    return true;
+    return options.blockNonPlayable !== false;
   }
 
   const index = tileY * asteroid.widthTiles + tileX;
-  return !isPlayableCell(asteroid, index) || isAsteroidRockTile(asteroid.tiles[index]);
+  return isAsteroidRockTile(asteroid.tiles[index]) ||
+    (options.blockNonPlayable !== false && !isPlayableCell(asteroid, index));
 }
 
 function isPlayableCell(asteroid, index) {
