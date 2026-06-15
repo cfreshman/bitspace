@@ -9,7 +9,7 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: "production",
-        PORT: process.env.BITSPACE_PORT || process.env.PORT || 7023
+        PORT: process.env.BITSPACE_PORT || process.env.PORT || 7024
       }
     }
   ]

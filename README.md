@@ -1,6 +1,6 @@
 # BITSPACE
 
-BITSPACE is a 1-bit, socket-based competitive arena scaffold for up to four players.
+BITSPACE is a 1-bit, socket-based competitive arena scaffold for up to eight players.
 
 ## Local Development
 
@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-The app defaults to port `7023` locally and in production. Set `PORT` or `BITSPACE_PORT` to override it.
+The app defaults to port `7024` locally and in production. Set `PORT` or `BITSPACE_PORT` to override it.
 
 ## Engine Shape
 
@@ -34,7 +34,7 @@ Defaults:
 - SSH target: `cyrus@rain.remote`
 - SSH port: `7006`
 - Remote directory: `/home/cyrus/bitspace`
-- App port: `7023`
+- App port: `7024`
 - PM2 process name: `bitspace`
 
 Override with `BITSPACE_REMOTE_HOST`, `BITSPACE_REMOTE_SSH_PORT`, `BITSPACE_REMOTE_DIR`, `BITSPACE_PORT`, and `BITSPACE_PM2_NAME`.

@@ -3,7 +3,7 @@ import { io } from "socket.io-client";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "../shared/protocol.js";
 import { normalizeInput } from "../shared/input.js";
 
-const url = process.env.BITSPACE_SMOKE_URL || "http://localhost:7023";
+const url = process.env.BITSPACE_SMOKE_URL || "http://localhost:7024";
 const timeoutMs = Number(process.env.BITSPACE_SMOKE_TIMEOUT_MS || 5000);
 
 const socket = io(url, {
@@ -16,6 +16,7 @@ const socket = io(url, {
 
 let playerId = null;
 let completed = false;
+let leaving = false;
 
 const timeout = setTimeout(() => {
   fail(new Error(`Timed out waiting for snapshot from ${url}`));
@@ -28,6 +29,23 @@ socket.on(SERVER_EVENTS.error, (error) => {
 
 socket.on(SERVER_EVENTS.welcome, (payload) => {
   playerId = payload.playerId;
+  socket.emit(CLIENT_EVENTS.ready, { smoke: true });
+});
+
+socket.on(SERVER_EVENTS.room, (room) => {
+  if (leaving && room?.state === "menu") {
+    completed = true;
+    clearTimeout(timeout);
+    socket.close();
+    console.log(`Socket smoke test passed at ${url}`);
+  }
+});
+
+socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
+  if (leaving || !playerId || !snapshot.players.some((player) => player.id === playerId)) {
+    return;
+  }
+
   socket.emit(
     CLIENT_EVENTS.input,
     normalizeInput({
@@ -38,17 +56,8 @@ socket.on(SERVER_EVENTS.welcome, (payload) => {
       mining: true
     })
   );
-});
-
-socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
-  if (!playerId || !snapshot.players.some((player) => player.id === playerId)) {
-    return;
-  }
-
-  completed = true;
-  clearTimeout(timeout);
-  socket.close();
-  console.log(`Socket smoke test passed at tick ${snapshot.tick}`);
+  leaving = true;
+  socket.emit(CLIENT_EVENTS.leave);
 });
 
 socket.on("disconnect", () => {

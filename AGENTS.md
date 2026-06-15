@@ -24,7 +24,7 @@ technical details
 im going to host this on a raspberry pi, and use a reverse proxy app i made to point `bitspace.proj.host` at it, but the domain may change in the future if im able to purchase `bitspace.game`. the important thing is the BITSPACE name
 
 prepare for deployment deploy scripts that run here and manipulate the remote: a raspberry pi on my home 
-the pi can be accessed over ssh from anywhere as `cyrus@rain.remote:7006`, and has port `7023` available for the incoming traffic for this game
+the pi can be accessed over ssh from anywhere as `cyrus@rain.remote:7006`, and has port `7024` available for the incoming traffic for this game
 the pi already has other servers running on it that you need to avoid disturbing
 
 
@@ -39,7 +39,7 @@ LLM instructions
 - Deployment scripts should run locally and use `rsync` over SSH to update the remote app files.
 - Engine design matters because the scaffold will constrain gameplay later. Do not invent the full game design, but do make careful engine architecture choices for a 1-bit, socket-based, competitive arena game.
 - The game render should be square so play is not directionally biased by a wide viewport. Try a `384x384` logical 1-bit framebuffer by default: `24x24` visible tiles at `16px` each.
-- Do not use common default app ports like `3000`. BITSPACE should default to port `7023` locally and in production unless explicitly overridden.
+- Do not use common default app ports like `3000`. BITSPACE should default to port `7024` locally and in production unless explicitly overridden.
 - Do not implement game mechanics such as resource spawning, scoring, upgrades, building, traps, combat, or win conditions unless explicitly asked. Keep the engine scaffold neutral: networking, ticks, input, snapshots, entity/render hooks, and debug movement are acceptable.
 - The visible page should only be an object-fit contained canvas on a black page background unless UI is explicitly requested.
 - The main menu should render the 1-bit starfield behind the menu UI, scrolling left as if the player/camera is moving to the right. Do not show a blank boot mark once menu UI is active.
