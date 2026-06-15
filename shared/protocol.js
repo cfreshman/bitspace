@@ -4,6 +4,7 @@ export const CLIENT_EVENTS = Object.freeze({
   talk: "client:talk",
   upgrade: "client:upgrade",
   buildWall: "client:build-wall",
+  heartbeat: "client:heartbeat",
   ready: "client:ready",
   resume: "client:resume",
   start: "client:start",

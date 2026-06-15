@@ -38,9 +38,15 @@ const MENU_BUTTON_WIDTH = 112;
 const MENU_BUTTON_WIDE_WIDTH = 128;
 const MENU_BUTTON_HEIGHT = 32;
 const MENU_BUTTON_GAP = 24;
-const THEME_CANDIDATE_COUNT = 192;
-const THEME_MIN_RGB_DISTANCE = 118;
-const THEME_MIN_CONTRAST_RATIO = 3.2;
+const THEME_PRESETS = Object.freeze([
+  { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
+  { id: "purple", label: "PURPLE", background: "#3d2945", foreground: "#65ceff" },
+  { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
+  { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" },
+  { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff" },
+  { id: "tan", label: "TAN", background: "#555452", foreground: "#ffc366" },
+  { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" }
+]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -58,6 +64,11 @@ const ROOM_BUTTONS = Object.freeze({
 const canvas = document.querySelector("#scene");
 const renderer = createRenderer(canvas);
 const talkInput = createTalkInput();
+const themeSource = document.querySelector("#bitspace-theme-source");
+const cssDefaultTheme = readThemeSource() || {
+  foreground: RENDER.foreground,
+  background: RENDER.background
+};
 const keys = new Set();
 const storedClientId = getClientId();
 const storedClientSecret = getClientSecret();
@@ -134,7 +145,12 @@ socket.on(SERVER_EVENTS.welcome, (payload) => {
       clientSecret: payload.clientSecret
     };
   }
+  emitHeartbeat();
   requestRoomReattach(0, true);
+});
+
+socket.on("connect", () => {
+  emitHeartbeat();
 });
 
 socket.on(SERVER_EVENTS.room, (room) => {
@@ -394,12 +410,25 @@ setInterval(() => {
   socket.emit(CLIENT_EVENTS.input, readInput());
 }, 1000 / ENGINE.tickRate);
 
+setInterval(() => {
+  emitHeartbeat();
+}, ENGINE.heartbeat.intervalSeconds * 1000);
+
 requestAnimationFrame(draw);
+
+function emitHeartbeat() {
+  if (!socket.connected || !state.clientId) {
+    return;
+  }
+
+  socket.emit(CLIENT_EVENTS.heartbeat);
+}
 
 function draw(now = 0) {
   const timeSeconds = now / 1000;
   const readyMenu = isReadyMenu();
 
+  syncThemeFromCss();
   pruneEliminationNotices(timeSeconds);
   if (readyMenu) {
     updateMenuSimulation(timeSeconds);
@@ -757,8 +786,13 @@ function activateMenuEntity(entity) {
     return;
   }
 
-  if (entity.action === "randomize") {
-    randomizeTheme();
+  if (entity.action === "next-theme") {
+    cycleThemePreset();
+    return;
+  }
+
+  if (entity.action === "previous-theme") {
+    cycleThemePreset(-1);
     return;
   }
 
@@ -846,10 +880,14 @@ function menuEntities() {
   if (state.menu.room === MENU_ROOMS.theme) {
     const commandTop = center.y + 24;
     const backTop = commandTop + MENU_BUTTON_HEIGHT + 20;
+    const themeButtonWidth = 96;
+    const themeButtonGap = 16;
+    const themeButtonLeft = center.x - (themeButtonWidth * 3 + themeButtonGap * 2) / 2;
 
     return [
-      menuButton("menu-randomize", "randomize", "RANDOM", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, commandTop, MENU_BUTTON_WIDTH),
-      menuButton("menu-reset", "reset", "RESET", center.x + MENU_BUTTON_GAP / 2, commandTop, MENU_BUTTON_WIDTH),
+      menuButton("menu-previous-theme", "previous-theme", "PREV", themeButtonLeft, commandTop, themeButtonWidth),
+      menuButton("menu-next-theme", "next-theme", "NEXT", themeButtonLeft + themeButtonWidth + themeButtonGap, commandTop, themeButtonWidth),
+      menuButton("menu-reset", "reset", "RESET", themeButtonLeft + (themeButtonWidth + themeButtonGap) * 2, commandTop, themeButtonWidth),
       menuButton("menu-back", "back", "BACK", center.x - MENU_BUTTON_WIDTH / 2, backTop, MENU_BUTTON_WIDTH)
     ];
   }
@@ -892,364 +930,127 @@ function loadTheme() {
   try {
     const stored = JSON.parse(window.localStorage.getItem(THEME_STORAGE_KEY) || "null");
     if (isValidTheme(stored)) {
+      applyThemeToSource(stored);
       return stored;
     }
   } catch {
     window.localStorage.removeItem(THEME_STORAGE_KEY);
   }
 
-  return defaultTheme();
-}
-
-function randomizeTheme() {
-  state.theme = randomTheme();
-  saveTheme();
+  return readThemeSource() || defaultTheme();
 }
 
 function resetTheme() {
-  state.theme = defaultTheme();
+  setTheme(defaultTheme());
+}
+
+function cycleThemePreset(direction = 1) {
+  setTheme(adjacentThemePreset(state.theme, direction));
+}
+
+function setTheme(theme) {
+  state.theme = {
+    foreground: theme.foreground,
+    background: theme.background
+  };
+  applyThemeToSource(state.theme);
   saveTheme();
 }
 
-function randomTheme() {
-  const generators = [
-    randomComplementaryTheme,
-    randomSplitComplementaryTheme,
-    randomAnalogousTheme,
-    randomTriadicTheme,
-    randomMonochromeTheme,
-    randomWarmCoolTheme,
-    randomMutedTheme,
-    randomAccentTheme
-  ];
-  const primaryGenerator = randomPick(generators);
-
-  return weightedThemePick(themeCandidatePool([primaryGenerator], THEME_CANDIDATE_COUNT)) ||
-    weightedThemePick(themeCandidatePool(generators, THEME_CANDIDATE_COUNT * 2)) ||
-    defaultTheme();
+function adjacentThemePreset(theme, direction) {
+  const currentIndex = THEME_PRESETS.findIndex((preset) => themeMatchesPreset(theme, preset));
+  const step = direction < 0 ? -1 : 1;
+  const nextIndex = currentIndex === -1
+    ? 0
+    : (currentIndex + step + THEME_PRESETS.length) % THEME_PRESETS.length;
+  return THEME_PRESETS[nextIndex];
 }
 
-function themeCandidatePool(generators, count) {
-  const candidates = [];
+function themeMatchesPreset(theme, preset) {
+  return theme?.foreground?.toLowerCase() === preset.foreground &&
+    theme?.background?.toLowerCase() === preset.background;
+}
 
-  for (let attempt = 0; attempt < count; attempt += 1) {
-    const candidate = randomPick(generators)();
-    const metrics = themeMetrics(candidate);
-    if (passesThemeFilters(candidate, metrics)) {
-      candidates.push({
-        theme: candidate.theme,
-        score: scoreThemeCandidate(candidate, metrics)
-      });
-    }
+function syncThemeFromCss() {
+  const cssTheme = readThemeSource();
+  if (!cssTheme) {
+    return;
   }
 
-  return candidates;
-}
-
-function randomComplementaryTheme() {
-  const hue = randomHue();
-  return themeCandidate("complementary", hue, hue + 180, {
-    backgroundSaturation: [14, 58],
-    backgroundLightness: [7, 25],
-    foregroundSaturation: [30, 82],
-    foregroundLightness: [54, 80]
-  });
-}
-
-function randomSplitComplementaryTheme() {
-  const hue = randomHue();
-  return themeCandidate("split-complementary", hue, hue + randomPick([150, 210]), {
-    backgroundSaturation: [12, 52],
-    backgroundLightness: [8, 25],
-    foregroundSaturation: [34, 82],
-    foregroundLightness: [54, 78]
-  });
-}
-
-function randomAnalogousTheme() {
-  const hue = randomHue();
-  return themeCandidate("analogous", hue, hue + randomPick([-45, -30, 30, 45]), {
-    backgroundSaturation: [14, 44],
-    backgroundLightness: [8, 27],
-    foregroundSaturation: [28, 72],
-    foregroundLightness: [58, 82]
-  });
-}
-
-function randomTriadicTheme() {
-  const hue = randomHue();
-  return themeCandidate("triadic", hue, hue + randomPick([120, 240]), {
-    backgroundSaturation: [16, 56],
-    backgroundLightness: [7, 24],
-    foregroundSaturation: [32, 78],
-    foregroundLightness: [54, 80]
-  });
-}
-
-function randomMonochromeTheme() {
-  const hue = randomHue();
-  return themeCandidate("monochrome", hue, hue + randomRange(-8, 8), {
-    backgroundSaturation: [8, 38],
-    backgroundLightness: [6, 22],
-    foregroundSaturation: [22, 64],
-    foregroundLightness: [62, 84]
-  });
-}
-
-function randomWarmCoolTheme() {
-  const warmHue = randomPick([8, 24, 38, 340]) + randomRange(-10, 10);
-  const coolHue = randomPick([178, 202, 224, 258]) + randomRange(-14, 14);
-  const warmBackground = randomFloat() < 0.5;
-  return themeCandidate("warm-cool", warmBackground ? warmHue : coolHue, warmBackground ? coolHue : warmHue, {
-    backgroundSaturation: [16, 54],
-    backgroundLightness: [7, 24],
-    foregroundSaturation: [28, 76],
-    foregroundLightness: [56, 80]
-  });
-}
-
-function randomMutedTheme() {
-  const hue = randomHue();
-  return themeCandidate("muted", hue, hue + randomPick([90, 120, 150, 180, 210, 240, 270]), {
-    backgroundSaturation: [6, 28],
-    backgroundLightness: [10, 30],
-    foregroundSaturation: [16, 46],
-    foregroundLightness: [62, 84]
-  });
-}
-
-function randomAccentTheme() {
-  const hue = randomHue();
-  return themeCandidate("accent", hue, hue + randomPick([105, 135, 180, 225, 255]), {
-    backgroundSaturation: [30, 70],
-    backgroundLightness: [5, 18],
-    foregroundSaturation: [38, 86],
-    foregroundLightness: [50, 74]
-  });
-}
-
-function themeCandidate(strategy, backgroundHue, foregroundHue, options = {}) {
-  const backgroundHsl = {
-    h: normalizeHue(backgroundHue),
-    s: randomRange(...(options.backgroundSaturation || [18, 46])),
-    l: randomRange(...(options.backgroundLightness || [9, 23]))
-  };
-  const foregroundHsl = {
-    h: normalizeHue(foregroundHue),
-    s: randomRange(...(options.foregroundSaturation || [40, 74])),
-    l: randomRange(...(options.foregroundLightness || [60, 80]))
-  };
-  const background = hslToRgb(backgroundHsl.h, backgroundHsl.s, backgroundHsl.l);
-  const foreground = hslToRgb(foregroundHsl.h, foregroundHsl.s, foregroundHsl.l);
-
-  return {
-    strategy,
-    foreground,
-    background,
-    foregroundHsl,
-    backgroundHsl,
-    theme: {
-      foreground: rgbToHex(foreground),
-      background: rgbToHex(background)
-    }
-  };
-}
-
-function themeMetrics(candidate) {
-  const foregroundLuminance = relativeLuminance(candidate.foreground);
-  const backgroundLuminance = relativeLuminance(candidate.background);
-  return {
-    foregroundLuminance,
-    backgroundLuminance,
-    contrastRatio: contrastRatio(foregroundLuminance, backgroundLuminance),
-    luminanceDelta: foregroundLuminance - backgroundLuminance,
-    rgbDistance: rgbDistance(candidate.foreground, candidate.background),
-    hueGap: hueDistance(candidate.foregroundHsl.h, candidate.backgroundHsl.h),
-    foregroundMaxChannel: Math.max(candidate.foreground.r, candidate.foreground.g, candidate.foreground.b),
-    backgroundMaxChannel: Math.max(candidate.background.r, candidate.background.g, candidate.background.b)
-  };
-}
-
-function passesThemeFilters(candidate, metrics) {
-  return metrics.foregroundLuminance > metrics.backgroundLuminance &&
-    metrics.contrastRatio >= THEME_MIN_CONTRAST_RATIO &&
-    metrics.rgbDistance >= THEME_MIN_RGB_DISTANCE &&
-    metrics.luminanceDelta >= 0.20 &&
-    metrics.backgroundLuminance >= 0.006 &&
-    metrics.backgroundLuminance <= 0.24 &&
-    metrics.foregroundLuminance >= 0.24 &&
-    metrics.foregroundLuminance <= 0.76 &&
-    metrics.backgroundMaxChannel <= 158 &&
-    metrics.foregroundMaxChannel <= 246 &&
-    candidate.backgroundHsl.s <= 74 &&
-    candidate.foregroundHsl.s >= 16 &&
-    candidate.foregroundHsl.s <= 88 &&
-    candidate.foregroundHsl.l - candidate.backgroundHsl.l >= 30;
-}
-
-function scoreThemeCandidate(candidate, metrics) {
-  const contrastScore = clamp((metrics.contrastRatio - THEME_MIN_CONTRAST_RATIO) / 3.2, 0, 1);
-  const distanceScore = clamp((metrics.rgbDistance - THEME_MIN_RGB_DISTANCE) / 100, 0, 1);
-  const backgroundScore = softRangeScore(metrics.backgroundLuminance, 0.01, 0.20, 0.03, 0.15);
-  const foregroundScore = softRangeScore(metrics.foregroundLuminance, 0.26, 0.74, 0.34, 0.66);
-  const saturationScore =
-    softRangeScore(candidate.foregroundHsl.s, 18, 84, 30, 76) * 0.65 +
-    softRangeScore(candidate.backgroundHsl.s, 4, 70, 10, 58) * 0.35;
-  const hueScore = candidate.strategy === "monochrome"
-    ? 0.55
-    : clamp(metrics.hueGap / 180, 0, 1);
-  const brightnessPenalty =
-    clamp((metrics.foregroundMaxChannel - 235) / 20, 0, 1) * 0.45 +
-    clamp((metrics.backgroundMaxChannel - 146) / 18, 0, 1) * 0.45;
-
-  return contrastScore * 1.4 +
-    distanceScore +
-    backgroundScore +
-    foregroundScore +
-    saturationScore * 0.8 +
-    hueScore * 0.45 -
-    brightnessPenalty +
-    randomFloat() * 0.08;
-}
-
-function softRangeScore(value, outerMin, outerMax, innerMin, innerMax) {
-  if (value >= innerMin && value <= innerMax) {
-    return 1;
+  if (cssTheme.foreground !== state.theme.foreground || cssTheme.background !== state.theme.background) {
+    state.theme = cssTheme;
   }
-
-  if (value < innerMin) {
-    return clamp((value - outerMin) / (innerMin - outerMin), 0, 1);
-  }
-
-  return clamp((outerMax - value) / (outerMax - innerMax), 0, 1);
 }
 
-function weightedThemePick(candidates) {
-  if (candidates.length === 0) {
+function readThemeSource() {
+  if (!themeSource) {
     return null;
   }
 
-  const minScore = Math.min(...candidates.map((candidate) => candidate.score));
-  const weights = candidates.map((candidate) => Math.pow(Math.max(0.04, candidate.score - minScore + 0.35), 1.15));
-  const totalWeight = weights.reduce((total, weight) => total + weight, 0);
-  let cursor = randomFloat() * totalWeight;
-
-  for (let index = 0; index < candidates.length; index += 1) {
-    cursor -= weights[index];
-    if (cursor <= 0) {
-      return candidates[index].theme;
-    }
-  }
-
-  return candidates[candidates.length - 1].theme;
-}
-
-function contrastRatio(a, b) {
-  const lighter = Math.max(a, b);
-  const darker = Math.min(a, b);
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-function hueDistance(a, b) {
-  const distance = Math.abs(normalizeHue(a) - normalizeHue(b));
-  return Math.min(distance, 360 - distance);
-}
-
-function normalizeHue(hue) {
-  return ((hue % 360) + 360) % 360;
-}
-
-function hslToRgb(hue, saturation, lightness) {
-  const s = clamp(saturation, 0, 100) / 100;
-  const l = clamp(lightness, 0, 100) / 100;
-  const chroma = (1 - Math.abs(2 * l - 1)) * s;
-  const h = normalizeHue(hue) / 60;
-  const x = chroma * (1 - Math.abs((h % 2) - 1));
-  const m = l - chroma / 2;
-  let r = 0;
-  let g = 0;
-  let b = 0;
-
-  if (h < 1) {
-    r = chroma;
-    g = x;
-  } else if (h < 2) {
-    r = x;
-    g = chroma;
-  } else if (h < 3) {
-    g = chroma;
-    b = x;
-  } else if (h < 4) {
-    g = x;
-    b = chroma;
-  } else if (h < 5) {
-    r = x;
-    b = chroma;
-  } else {
-    r = chroma;
-    b = x;
+  const style = window.getComputedStyle(themeSource);
+  const foreground = cssColorToHex(style.color);
+  const background = cssColorToHex(style.backgroundColor);
+  if (!foreground || !background) {
+    return null;
   }
 
   return {
-    r: Math.round((r + m) * 255),
-    g: Math.round((g + m) * 255),
-    b: Math.round((b + m) * 255)
+    foreground,
+    background
   };
 }
 
-function relativeLuminance(color) {
-  return 0.2126 * linearRgb(color.r) +
-    0.7152 * linearRgb(color.g) +
-    0.0722 * linearRgb(color.b);
-}
-
-function linearRgb(value) {
-  const channel = clamp(value, 0, 255) / 255;
-  return channel <= 0.03928
-    ? channel / 12.92
-    : Math.pow((channel + 0.055) / 1.055, 2.4);
-}
-
-function randomHue() {
-  return randomRange(0, 360);
-}
-
-function randomRange(min, max) {
-  return min + randomFloat() * (max - min);
-}
-
-function randomPick(values) {
-  return values[Math.floor(randomFloat() * values.length)];
-}
-
-function randomFloat() {
-  const bytes = new Uint32Array(1);
-  window.crypto?.getRandomValues?.(bytes);
-  if (bytes[0] !== 0) {
-    return bytes[0] / 0x100000000;
+function applyThemeToSource(theme) {
+  if (!themeSource || !isValidTheme(theme)) {
+    return;
   }
 
-  return Math.random();
-}
-
-function rgbDistance(a, b) {
-  const dr = a.r - b.r;
-  const dg = a.g - b.g;
-  const db = a.b - b.b;
-  return Math.hypot(dr, dg, db);
+  themeSource.style.color = theme.foreground;
+  themeSource.style.backgroundColor = theme.background;
 }
 
 function rgbToHex(color) {
   return `#${hexByte(color.r)}${hexByte(color.g)}${hexByte(color.b)}`;
 }
 
-function hexToRgb(value) {
-  const hex = isHexColor(value) ? value.slice(1) : "000000";
-  return {
-    r: Number.parseInt(hex.slice(0, 2), 16),
-    g: Number.parseInt(hex.slice(2, 4), 16),
-    b: Number.parseInt(hex.slice(4, 6), 16)
-  };
+function cssColorToHex(value) {
+  const color = String(value || "").trim();
+  if (isHexColor(color)) {
+    return color.toLowerCase();
+  }
+
+  const rgbMatch = color.match(/^rgba?\((.+)\)$/i);
+  if (!rgbMatch) {
+    return null;
+  }
+
+  const parts = rgbMatch[1]
+    .trim()
+    .split(/[,\s/]+/)
+    .filter(Boolean);
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const channels = parts.slice(0, 3).map(cssColorChannelToByte);
+  if (channels.some((channel) => !Number.isFinite(channel))) {
+    return null;
+  }
+
+  return rgbToHex({
+    r: channels[0],
+    g: channels[1],
+    b: channels[2]
+  });
+}
+
+function cssColorChannelToByte(value) {
+  const text = String(value || "").trim();
+  if (text.endsWith("%")) {
+    return clamp(Number.parseFloat(text) * 2.55, 0, 255);
+  }
+
+  return clamp(Number.parseFloat(text), 0, 255);
 }
 
 function hexByte(value) {
@@ -1257,10 +1058,7 @@ function hexByte(value) {
 }
 
 function defaultTheme() {
-  return {
-    foreground: RENDER.foreground,
-    background: RENDER.background
-  };
+  return cssDefaultTheme;
 }
 
 function saveTheme() {

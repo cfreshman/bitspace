@@ -104,6 +104,8 @@ io.on("connection", (socket) => {
       return;
     }
 
+    roomManager.recordHeartbeat(clientId, socket.id);
+
     const room = roomManager.clientRoom(clientId);
     if (!room?.arena?.players.has(clientId)) {
       return;
@@ -112,6 +114,14 @@ io.on("connection", (socket) => {
     if (room.state === ROOM_STATES.waiting || room.state === ROOM_STATES.active) {
       setPlayerInput(room.arena, clientId, payload);
     }
+  });
+
+  socket.on(CLIENT_EVENTS.heartbeat, () => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
+
+    roomManager.recordHeartbeat(clientId, socket.id);
   });
 
   socket.on(CLIENT_EVENTS.setName, (name) => {

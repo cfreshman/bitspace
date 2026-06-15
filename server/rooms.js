@@ -23,6 +23,7 @@ const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
 const LOBBY_BUTTON_WIDTH = 112;
 const LOBBY_BUTTON_HEIGHT = 32;
 const LOBBY_BUTTON_GAP = 32;
+const HEARTBEAT_TIMEOUT_MS = ENGINE.heartbeat.timeoutSeconds * 1000;
 
 export function createRoomManager(options = {}) {
   const now = options.now ?? (() => Date.now());
@@ -56,13 +57,15 @@ export function createRoomManager(options = {}) {
       clientSecret: normalizedClientSecret,
       name: sanitizePlayerName(name || ""),
       socketId: null,
-      connected: false
+      connected: false,
+      lastHeartbeatAtMs: 0
     };
 
     client.clientSecret ||= normalizedClientSecret;
     client.name = sanitizePlayerName(name || client.name);
     client.socketId = socketId;
     client.connected = true;
+    client.lastHeartbeatAtMs = now();
     clients.set(client.clientId, client);
 
     const room = roomForClient(client.clientId);
@@ -71,6 +74,7 @@ export function createRoomManager(options = {}) {
       participant.name = client.name;
       participant.socketId = socketId;
       participant.connected = true;
+      participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs;
       ensureWaitingPlayer(room, client);
       clearParticipantInput(room, client.clientId);
     }
@@ -95,6 +99,26 @@ export function createRoomManager(options = {}) {
       participant.socketId = null;
       clearParticipantInput(room, clientId);
     }
+  }
+
+  function recordHeartbeat(clientId, socketId) {
+    const client = clients.get(clientId);
+    if (!client || client.socketId !== socketId) {
+      return false;
+    }
+
+    const heartbeatAtMs = now();
+    client.connected = true;
+    client.lastHeartbeatAtMs = heartbeatAtMs;
+
+    const room = roomForClient(clientId);
+    const participant = room?.participants.get(clientId) || null;
+    if (participant && participant.socketId === socketId) {
+      participant.connected = true;
+      participant.lastHeartbeatAtMs = heartbeatAtMs;
+    }
+
+    return true;
   }
 
   function isCurrentSocket(clientId, socketId) {
@@ -134,6 +158,7 @@ export function createRoomManager(options = {}) {
       participant.connected = client.connected;
       participant.socketId = client.socketId;
       participant.name = client.name;
+      participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs || now();
       ensureWaitingPlayer(existingRoom, client);
       syncLobbyHosts(existingRoom);
       return { ok: true, room: existingRoom, rejoined: true };
@@ -154,7 +179,8 @@ export function createRoomManager(options = {}) {
       name: client.name,
       socketId: client.socketId,
       connected: client.connected,
-      joinedAtMs
+      joinedAtMs,
+      lastHeartbeatAtMs: client.lastHeartbeatAtMs || joinedAtMs
     });
     clientRooms.set(clientId, room.id);
     addPlayer(room.arena, {
@@ -192,6 +218,7 @@ export function createRoomManager(options = {}) {
     participant.connected = client.connected;
     participant.socketId = client.socketId;
     participant.name = client.name;
+    participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs || now();
     clientRooms.set(clientId, room.id);
     ensureWaitingPlayer(room, client);
     clearParticipantInput(room, clientId);
@@ -278,6 +305,12 @@ export function createRoomManager(options = {}) {
       }
 
       if (room.state === ROOM_STATES.active && room.arena) {
+        const timeoutEvents = expireActiveHeartbeatTimeouts(room);
+        events.push(...timeoutEvents);
+        if (room.state !== ROOM_STATES.active) {
+          continue;
+        }
+
         stepArenaFn(room.arena, dtSeconds);
         if (maybeEndActiveRoom(room, "last_alive")) {
           events.push({ type: "ended", room });
@@ -487,6 +520,47 @@ export function createRoomManager(options = {}) {
     return true;
   }
 
+  function expireActiveHeartbeatTimeouts(room) {
+    const events = [];
+    if (room.state !== ROOM_STATES.active || !room.arena) {
+      return events;
+    }
+
+    const cutoffMs = now() - HEARTBEAT_TIMEOUT_MS;
+    for (const participant of room.participants.values()) {
+      const player = room.arena.players.get(participant.clientId);
+      if (!player?.alive) {
+        continue;
+      }
+
+      const heartbeatAtMs = participant.lastHeartbeatAtMs ??
+        participant.joinedAtMs ??
+        room.startedAtMs ??
+        room.createdAtMs;
+      if (heartbeatAtMs > cutoffMs) {
+        continue;
+      }
+
+      participant.connected = false;
+      clearParticipantInput(room, participant.clientId);
+      eliminatePlayer(room.arena, participant.clientId, {
+        tick: room.arena.tick,
+        killedById: null
+      });
+      events.push({
+        type: "heartbeat-timeout",
+        room,
+        clientId: participant.clientId
+      });
+    }
+
+    if (events.length > 0 && maybeEndActiveRoom(room, "heartbeat_timeout")) {
+      events.push({ type: "ended", room });
+    }
+
+    return events;
+  }
+
   function processLobbyButtonHits(room, dtSeconds) {
     const events = [];
     if (room.state !== ROOM_STATES.waiting || !room.arena) {
@@ -565,6 +639,7 @@ export function createRoomManager(options = {}) {
     readyClient,
     startRoom,
     leaveClient,
+    recordHeartbeat,
     stepActiveArena,
     roomSnapshot,
     genericRoomSnapshot,

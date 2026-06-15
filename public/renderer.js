@@ -28,6 +28,7 @@ const REAR_ORBS = Object.freeze([
 ]);
 const THRUSTER_PARTICLE_RATE = 70;
 const MINING_PARTICLE_RATE = 90;
+const MINING_RAY_BASE_SPIN_RATE = 2.5;
 const MAX_PARTICLES = 260;
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -2251,7 +2252,7 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
     ? { x: player.miningRay.endX, y: player.miningRay.endY }
     : null;
   const start = worldToScreen(startWorld, camera);
-  const phase = timeSeconds * 10 * effects.raySpinMultiplier + player.number;
+  const phase = timeSeconds * MINING_RAY_BASE_SPIN_RATE * effects.raySpinMultiplier + player.number;
   const fullTip = worldToScreen(fullTipWorld, camera);
   const activeTip = activeTipWorld ? worldToScreen(activeTipWorld, camera) : null;
 

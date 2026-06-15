@@ -15,6 +15,10 @@ export const ENGINE = Object.freeze({
   tickRate: 60,
   snapshotRate: 60,
   maxPlayers: 8,
+  heartbeat: {
+    intervalSeconds: 5,
+    timeoutSeconds: 15
+  },
   lobby: {
     autoStartSeconds: 300,
     countdownSeconds: 10
