@@ -198,12 +198,14 @@ socket.on(SERVER_EVENTS.room, (room) => {
 });
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
-  recordEliminations(snapshot, performance.now() / 1000);
+  const receivedAtSeconds = performance.now() / 1000;
+  snapshot.receivedAtSeconds = receivedAtSeconds;
+  recordEliminations(snapshot, receivedAtSeconds);
   state.snapshot = snapshot;
   if (state.asteroid) {
     state.asteroid.tick = snapshot.tick;
   }
-  reconcilePrediction(snapshot, performance.now() / 1000);
+  reconcilePrediction(snapshot, receivedAtSeconds);
 });
 
 socket.on(SERVER_EVENTS.asteroid, (asteroid) => {

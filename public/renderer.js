@@ -20,8 +20,10 @@ const BUILD_DASH_PERIOD = 8;
 const BUILD_DASH_ON = 4;
 const BUILD_PREVIEW_GAP = 1;
 const STORM_NOISE_SCALE = 0.15;
-const STORM_NOISE_THRESHOLD = 0.68;
-const STORM_BOUNDARY_NOISE_THRESHOLD = 0.24;
+const STORM_NOISE_THRESHOLD = 0.34;
+const STORM_BOUNDARY_NOISE_THRESHOLD = 0;
+const STORM_NOISE_BROAD_SCALE = 0.43;
+const STORM_NOISE_FINE_SCALE = 2.35;
 const STORM_NOISE_SPEED_X = -2;
 const STORM_NOISE_SPEED_Y = 5;
 const STORM_NOISE_SPEED_Z = 0.1;
@@ -47,6 +49,8 @@ const THRUSTER_PARTICLE_RATE = 70;
 const MINING_PARTICLE_RATE = 90;
 const MINING_RAY_BASE_SPIN_RATE = 2.5;
 const MAX_PARTICLES = 260;
+const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
+const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
 const stormNoiseCache = new Map();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -354,11 +358,23 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   }
 
   const predictedPlayer = options.predictedPlayer?.id === options.playerId ? options.predictedPlayer : null;
+  const renderPlayers = snapshot.players.map((player) => {
+    if (player.id === options.playerId) {
+      return predictedPlayer || {
+        ...player,
+        aimAngle: options.aimAngle ?? player.aimAngle,
+        mining: options.mining ?? player.mining
+      };
+    }
+
+    return extrapolateRemotePlayer(player, snapshot, options.timeSeconds);
+  });
   const camera = cameraForSnapshot(
     snapshot,
     options.cameraPlayerId || options.playerId,
     options.timeSeconds,
-    predictedPlayer
+    predictedPlayer,
+    renderPlayers
   );
   const diamondMiningTargets = diamondMiningTargetMap(snapshot);
   drawStars(ctx, snapshot, camera);
@@ -372,15 +388,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawEntity(ctx, entity, camera, options, colors, textRenderer);
   }
 
-  const renderPlayers = snapshot.players.map((player) =>
-    player.id === options.playerId
-      ? predictedPlayer || {
-        ...player,
-        aimAngle: options.aimAngle ?? player.aimAngle,
-        mining: options.mining ?? player.mining
-      }
-      : player
-  );
   const localPlayer = renderPlayers.find((player) => player.id === options.playerId);
 
   if (options.build?.active && localPlayer?.alive && options.asteroid) {
@@ -629,11 +636,12 @@ function formatClock(seconds) {
   return `${minutes}:${remainder}`;
 }
 
-function cameraForSnapshot(snapshot, playerId, timeSeconds = 0, predictedPlayer = null) {
+function cameraForSnapshot(snapshot, playerId, timeSeconds = 0, predictedPlayer = null, renderedPlayers = null) {
+  const players = renderedPlayers || snapshot.players;
   const target =
     predictedPlayer?.id === playerId ? predictedPlayer :
-    snapshot.players.find((player) => player.id === playerId) ||
-    snapshot.players[0] || {
+    players.find((player) => player.id === playerId) ||
+    players[0] || {
       x: snapshot.world.width / 2,
       y: snapshot.world.height / 2,
       shake: 0
@@ -720,6 +728,48 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
   }
 }
 
+function extrapolateRemotePlayer(player, snapshot, timeSeconds) {
+  if (!player.alive) {
+    return player;
+  }
+
+  const receivedAtSeconds = snapshot.receivedAtSeconds ?? timeSeconds;
+  const snapshotAgeSeconds = clamp(timeSeconds - receivedAtSeconds, 0, REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS);
+  const leadSeconds = clamp(
+    snapshotAgeSeconds + REMOTE_PLAYER_LOOKAHEAD_SECONDS,
+    0,
+    REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS
+  );
+  const dx = (player.vx || 0) * leadSeconds;
+  const dy = (player.vy || 0) * leadSeconds;
+  if (dx === 0 && dy === 0) {
+    return player;
+  }
+
+  return {
+    ...player,
+    x: player.x + dx,
+    y: player.y + dy,
+    miningRay: offsetMiningRay(player.miningRay, dx, dy)
+  };
+}
+
+function offsetMiningRay(miningRay, dx, dy) {
+  if (!miningRay) {
+    return miningRay;
+  }
+
+  return {
+    ...miningRay,
+    startX: Number.isFinite(miningRay.startX) ? miningRay.startX + dx : miningRay.startX,
+    startY: Number.isFinite(miningRay.startY) ? miningRay.startY + dy : miningRay.startY,
+    endX: Number.isFinite(miningRay.endX) ? miningRay.endX + dx : miningRay.endX,
+    endY: Number.isFinite(miningRay.endY) ? miningRay.endY + dy : miningRay.endY,
+    fullEndX: Number.isFinite(miningRay.fullEndX) ? miningRay.fullEndX + dx : miningRay.fullEndX,
+    fullEndY: Number.isFinite(miningRay.fullEndY) ? miningRay.fullEndY + dy : miningRay.fullEndY
+  };
+}
+
 function drawStormTilePattern(
   ctx,
   asteroid,
@@ -745,11 +795,21 @@ function drawStormTilePattern(
 
 function stormNoiseAt(asteroid, worldX, worldY, timeSeconds) {
   const noise = stormNoiseForSeed(asteroid.seed);
-  return noise(
-    (worldX + timeSeconds * STORM_NOISE_SPEED_X) * STORM_NOISE_SCALE,
-    (worldY + timeSeconds * STORM_NOISE_SPEED_Y) * STORM_NOISE_SCALE,
-    timeSeconds * STORM_NOISE_SPEED_Z
+  const sampleX = (worldX + timeSeconds * STORM_NOISE_SPEED_X) * STORM_NOISE_SCALE;
+  const sampleY = (worldY + timeSeconds * STORM_NOISE_SPEED_Y) * STORM_NOISE_SCALE;
+  const sampleZ = timeSeconds * STORM_NOISE_SPEED_Z;
+  const medium = noise(sampleX, sampleY, sampleZ);
+  const broad = noise(
+    sampleX * STORM_NOISE_BROAD_SCALE + 17.3,
+    sampleY * STORM_NOISE_BROAD_SCALE - 29.1,
+    sampleZ * 0.7 + 5.7
   );
+  const fine = noise(
+    sampleX * STORM_NOISE_FINE_SCALE - 41.6,
+    sampleY * STORM_NOISE_FINE_SCALE + 13.4,
+    sampleZ * 1.6 - 9.2
+  );
+  return medium * 0.68 + broad * 0.22 + fine * 0.10;
 }
 
 function stormNoiseForSeed(seed) {
