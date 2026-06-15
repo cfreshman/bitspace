@@ -11,6 +11,8 @@ import {
 const ENTITY_PIXEL_SIZE = 1;
 const STAR_CELL_SIZE = 16;
 const STAR_PARALLAX = 0.22;
+const MENU_STAR_SEED = "bitspace-menu";
+const MENU_STAR_SCROLL_SPEED = 12;
 const ASTEROID_DASH_PERIOD = 10;
 const ASTEROID_DASH_ON = 5;
 const ROCK_OUTER_CORNER_RADIUS = 3;
@@ -311,11 +313,18 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   ctx.fillStyle = colors.foreground;
 
   if (!snapshot) {
-    drawBootMark(ctx);
+    if (options.room || Object.keys(options.roomButtons || {}).length > 0) {
+      if ((options.room?.state || "menu") === "menu") {
+        drawMenuStars(ctx, options.timeSeconds || 0);
+      }
+      drawRoomOverlay(ctx, options, null, colors, textRenderer);
+    } else {
+      drawBootMark(ctx);
+    }
     return;
   }
 
-  const camera = cameraForSnapshot(snapshot, options.playerId, options.timeSeconds);
+  const camera = cameraForSnapshot(snapshot, options.cameraPlayerId || options.playerId, options.timeSeconds);
   const diamondMiningTargets = diamondMiningTargetMap(snapshot);
   drawStars(ctx, snapshot, camera);
   if (options.asteroid) {
@@ -325,7 +334,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   }
 
   for (const entity of snapshot.entities || []) {
-    drawEntity(ctx, entity, camera);
+    drawEntity(ctx, entity, camera, options, colors, textRenderer);
   }
 
   const renderPlayers = snapshot.players.map((player) =>
@@ -363,14 +372,192 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
   }
 
-  drawPlayerHud(
-    ctx,
-    localPlayer,
-    colors,
-    textRenderer
-  );
-  drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer);
+  if (options.room?.state === "active") {
+    drawPlayerHud(
+      ctx,
+      localPlayer,
+      colors,
+      textRenderer
+    );
+    drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer);
+  }
+  drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
   drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
+}
+
+function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
+  const room = options.room || { state: "menu", maxPlayers: ENGINE.maxPlayers, players: [] };
+  const state = room.state || "menu";
+
+  if (state === "menu") {
+    drawMenuOverlay(ctx, options, colors, textRenderer);
+    return;
+  }
+
+  if (state === "waiting") {
+    drawWaitingOverlay(ctx, room, options, colors, textRenderer);
+    return;
+  }
+
+  if (state === "active" && localPlayer && !localPlayer.alive) {
+    drawSpectatorOverlay(ctx, options, localPlayer, colors, textRenderer);
+    return;
+  }
+
+  if (state === "ended") {
+    drawEndedOverlay(ctx, room, options, colors, textRenderer);
+  }
+}
+
+function drawMenuOverlay(ctx, options, colors, textRenderer) {
+  drawCenteredText(ctx, textRenderer, "BITSPACE", RENDER.width / 2, 78, {
+    fontSize: 10,
+    color: colors.foreground
+  });
+  drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
+  const count = room.players?.length || 0;
+  const maxPlayers = room.maxPlayers || ENGINE.maxPlayers;
+  const secondsLeft = Math.max(0, Math.ceil(((room.autoStartAtMs || 0) - Date.now()) / 1000));
+
+  if (room.countdownArmed) {
+    drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer);
+    return;
+  }
+
+  const panel = { x: 86, y: 20, width: 212, height: 35 };
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, `WAITING ${count}/${maxPlayers}`, RENDER.width / 2, panel.y + 8, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  drawCenteredText(ctx, textRenderer, `START ${formatClock(secondsLeft)}`, RENDER.width / 2, panel.y + 21, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
+  const label = `STARTING ${formatClock(secondsLeft)}`;
+  const textOptions = {
+    scale: 3,
+    color: colors.foreground
+  };
+  const textWidth = textRenderer.measure(label, textOptions);
+  const panelWidth = Math.min(RENDER.width - 24, textWidth + 24);
+  const panel = {
+    x: Math.round((RENDER.width - panelWidth) / 2),
+    y: 18,
+    width: panelWidth,
+    height: 39
+  };
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, label, RENDER.width / 2, panel.y + 9, textOptions);
+  drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function drawSpectatorOverlay(ctx, options, localPlayer, colors, textRenderer) {
+  const watchedId = localPlayer.killedById || options.cameraPlayerId;
+  const watched = options.snapshot?.players?.find((player) => player.id === watchedId);
+  const label = watched?.name ? `WATCHING ${watched.name}` : "WATCHING";
+  const panel = { x: 88, y: 122, width: 208, height: 70 };
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, "ELIMINATED", RENDER.width / 2, panel.y + 13, {
+    fontSize: 10,
+    color: colors.foreground
+  });
+  drawCenteredText(ctx, textRenderer, label, RENDER.width / 2, panel.y + 36, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: panel.width - 12
+  });
+  drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function drawEndedOverlay(ctx, room, options, colors, textRenderer) {
+  const won = room.winnerId && room.winnerId === options.playerId;
+  const title = won ? "YOU WON!" : "GAME OVER";
+  const panel = { x: 96, y: 128, width: 192, height: 54 };
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, title, RENDER.width / 2, panel.y + 19, {
+    fontSize: 10,
+    color: colors.foreground
+  });
+  drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function drawRoomButtons(ctx, options, colors, textRenderer) {
+  const buttons = options.roomButtons || {};
+
+  for (const [buttonId, rect] of Object.entries(buttons)) {
+    drawRoomButton(
+      ctx,
+      buttonLabel(buttonId),
+      rect,
+      buttonId === options.uiTargetId,
+      colors,
+      textRenderer
+    );
+  }
+}
+
+function drawRoomButton(ctx, label, rect, selected, colors, textRenderer) {
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.fillStyle = selected ? colors.foreground : colors.background;
+  ctx.fillRect(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
+
+  const textOptions = {
+    fontSize: 10,
+    color: selected ? colors.background : colors.foreground
+  };
+  const labelWidth = textRenderer.measure(label, textOptions);
+  textRenderer.draw(ctx, label, Math.round(rect.x + (rect.width - labelWidth) / 2), rect.y + 7, {
+    ...textOptions,
+    width: rect.width - 4
+  });
+}
+
+function buttonLabel(buttonId) {
+  if (buttonId === "ready") {
+    return "READY";
+  }
+
+  if (buttonId === "start") {
+    return "START";
+  }
+
+  return "LEAVE";
+}
+
+function drawPanel(ctx, x, y, width, height, colors) {
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+}
+
+function drawCenteredText(ctx, textRenderer, text, centerX, y, options = {}) {
+  const width = options.width || RENDER.width;
+  const textWidth = textRenderer.measure(text, options);
+  textRenderer.draw(ctx, text, Math.round(centerX - textWidth / 2), y, {
+    ...options,
+    width
+  });
+}
+
+function formatClock(seconds) {
+  const clamped = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(clamped / 60);
+  const remainder = String(clamped % 60).padStart(2, "0");
+  return `${minutes}:${remainder}`;
 }
 
 function cameraForSnapshot(snapshot, playerId, timeSeconds = 0) {
@@ -779,6 +966,7 @@ function projectPoint3D(point, centerX, centerY) {
 
 function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const solidBoundary = asteroid.generation?.mode === "lobby";
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
@@ -802,22 +990,40 @@ function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
       const screenY = Math.round(tileY * tileSize - camera.y);
 
       if (!isPlayableTile(asteroid, tileX - 1, tileY)) {
-        drawDashedBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize);
+        drawBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize, solidBoundary);
       }
 
       if (!isPlayableTile(asteroid, tileX + 1, tileY)) {
-        drawDashedBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize);
+        drawBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize, solidBoundary);
       }
 
       if (!isPlayableTile(asteroid, tileX, tileY - 1)) {
-        drawDashedBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize);
+        drawBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize, solidBoundary);
       }
 
       if (!isPlayableTile(asteroid, tileX, tileY + 1)) {
-        drawDashedBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize);
+        drawBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize, solidBoundary);
       }
     }
   }
+}
+
+function drawBoundaryVertical(ctx, x, y, length, worldY, solid) {
+  if (solid) {
+    ctx.fillRect(x, y, 1, length);
+    return;
+  }
+
+  drawDashedBoundaryVertical(ctx, x, y, length, worldY);
+}
+
+function drawBoundaryHorizontal(ctx, x, y, length, worldX, solid) {
+  if (solid) {
+    ctx.fillRect(x, y, length, 1);
+    return;
+  }
+
+  drawDashedBoundaryHorizontal(ctx, x, y, length, worldX);
 }
 
 function drawDashedBoundaryVertical(ctx, x, y, length, worldY) {
@@ -910,10 +1116,20 @@ function positiveModulo(value, divisor) {
 }
 
 function drawStars(ctx, snapshot, camera) {
-  const starCamera = {
+  drawStarLayer(ctx, snapshot.arenaId, {
     x: camera.x * STAR_PARALLAX,
     y: camera.y * STAR_PARALLAX
-  };
+  });
+}
+
+function drawMenuStars(ctx, timeSeconds) {
+  drawStarLayer(ctx, MENU_STAR_SEED, {
+    x: timeSeconds * MENU_STAR_SCROLL_SPEED,
+    y: 0
+  });
+}
+
+function drawStarLayer(ctx, seed, starCamera) {
   const minCellX = Math.floor(starCamera.x / STAR_CELL_SIZE) - 1;
   const maxCellX = Math.ceil((starCamera.x + RENDER.width) / STAR_CELL_SIZE) + 1;
   const minCellY = Math.floor(starCamera.y / STAR_CELL_SIZE) - 1;
@@ -921,7 +1137,7 @@ function drawStars(ctx, snapshot, camera) {
 
   for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
     for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
-      const hash = hashCell(snapshot.arenaId, cellX, cellY);
+      const hash = hashCell(seed, cellX, cellY);
       const x = cellX * STAR_CELL_SIZE + (hash % STAR_CELL_SIZE);
       const y = cellY * STAR_CELL_SIZE + ((hash >>> 8) % STAR_CELL_SIZE);
       const screen = worldToScreen({ x, y }, starCamera);
@@ -966,7 +1182,12 @@ function drawMediumStar(ctx, x, y, hash) {
   }
 }
 
-function drawEntity(ctx, entity, camera) {
+function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
+  if (entity.type === "lobbyButton") {
+    drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRenderer);
+    return;
+  }
+
   const screen = worldToScreen(entity, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -986,6 +1207,34 @@ function drawEntity(ctx, entity, camera) {
     [1, 1],
     [0, 2]
   ], ENTITY_PIXEL_SIZE);
+}
+
+function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRenderer) {
+  if (entity.hostOnly && options.room?.hostClientId !== options.clientId) {
+    return;
+  }
+
+  const screen = worldToScreen(entity, camera);
+  const x = Math.round(screen.x);
+  const y = Math.round(screen.y);
+  const width = Math.round(entity.width || 96);
+  const height = Math.round(entity.height || 28);
+  const label = String(entity.label || entity.action || "BUTTON").toUpperCase();
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+
+  const textOptions = {
+    fontSize: 10,
+    color: colors.foreground
+  };
+  const labelWidth = textRenderer.measure(label, textOptions);
+  textRenderer.draw(ctx, label, Math.round(x + (width - labelWidth) / 2), y + Math.floor((height - 14) / 2), {
+    ...textOptions,
+    width: width - 4
+  });
 }
 
 function drawShip(ctx, player, camera, colors, timeSeconds) {
@@ -1021,6 +1270,53 @@ function drawShip(ctx, player, camera, colors, timeSeconds) {
     const orbX = Math.round(x + rear.x * orb.rear + side.x * orb.side);
     const orbY = Math.round(y + rear.y * orb.rear + side.y * orb.side);
     drawSphere(ctx, orbX, orbY, SMALL_ORB_RADIUS, player.angle, colors);
+  }
+
+  drawShipHealthIndicator(ctx, x, y, player, colors);
+}
+
+function drawShipHealthIndicator(ctx, x, y, player, colors) {
+  const maxHealth = Math.max(1, player.maxHealth || ENGINE.player.maxHealth);
+  const health = clamp(player.health ?? maxHealth, 0, maxHealth);
+  if (health <= 0) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+
+  const healthRatio = clamp(health / maxHealth, 0, 1);
+  const radius = Math.max(2, Math.floor(player.radius * 0.45));
+  const bottomAngle = Math.PI / 2;
+  const halfSpan = healthRatio * Math.PI;
+  const minX = x - radius - 1;
+  const maxX = x + radius + 1;
+  const minY = y - radius - 1;
+  const maxY = y + radius + 1;
+  let drewPoint = false;
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - x;
+      const dy = py - y;
+      if (Math.abs(Math.hypot(dx, dy) - radius) > 0.5) {
+        continue;
+      }
+
+      const angle = Math.atan2(dy, dx);
+      const distanceFromBottom = Math.abs(
+        Math.atan2(Math.sin(angle - bottomAngle), Math.cos(angle - bottomAngle))
+      );
+      if (distanceFromBottom > halfSpan) {
+        continue;
+      }
+
+      drawPoint(ctx, px, py);
+      drewPoint = true;
+    }
+  }
+
+  if (!drewPoint) {
+    drawPoint(ctx, x, y + radius);
   }
 }
 

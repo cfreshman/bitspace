@@ -1,0 +1,723 @@
+import { randomBytes } from "node:crypto";
+
+import { ENGINE, RENDER } from "../shared/constants.js";
+import { createLobbyAsteroid } from "../shared/asteroid.js";
+import { createSeededRandom } from "../shared/math.js";
+import {
+  addPlayer,
+  clearPlayerInput,
+  createArena,
+  eliminatePlayer,
+  sanitizePlayerName
+} from "../shared/arena.js";
+
+export const ROOM_STATES = Object.freeze({
+  menu: "menu",
+  waiting: "waiting",
+  active: "active",
+  ended: "ended"
+});
+
+const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
+const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
+const LOBBY_BUTTON_WIDTH = 112;
+const LOBBY_BUTTON_HEIGHT = 32;
+const LOBBY_BUTTON_GAP = 32;
+
+export function createRoomManager(options = {}) {
+  const now = options.now ?? (() => Date.now());
+  const seedFactory = options.seedFactory ?? createRoomSeed;
+  const clients = new Map();
+  const rooms = new Map();
+  const clientRooms = new Map();
+  let nextRoomNumber = 1;
+
+  function connectClient({ clientId, clientSecret, name, socketId }) {
+    let normalizedClientId = sanitizeClientId(clientId);
+    let normalizedClientSecret = sanitizeClientSecret(clientSecret);
+    let client = normalizedClientId ? clients.get(normalizedClientId) : null;
+
+    if (client?.clientSecret && client.clientSecret !== normalizedClientSecret) {
+      client = null;
+      normalizedClientId = "";
+      normalizedClientSecret = "";
+    }
+
+    if (!client && normalizedClientId && roomForClient(normalizedClientId)) {
+      normalizedClientId = "";
+      normalizedClientSecret = "";
+    }
+
+    normalizedClientId ||= createClientId();
+    normalizedClientSecret ||= createClientSecret();
+
+    client ||= {
+      clientId: normalizedClientId,
+      clientSecret: normalizedClientSecret,
+      name: sanitizePlayerName(name || ""),
+      socketId: null,
+      connected: false
+    };
+
+    client.clientSecret ||= normalizedClientSecret;
+    client.name = sanitizePlayerName(name || client.name);
+    client.socketId = socketId;
+    client.connected = true;
+    clients.set(client.clientId, client);
+
+    const room = roomForClient(client.clientId);
+    const participant = room?.participants.get(client.clientId) || null;
+    if (participant) {
+      participant.name = client.name;
+      participant.socketId = socketId;
+      participant.connected = true;
+      ensureWaitingPlayer(room, client);
+      clearParticipantInput(room, client.clientId);
+    }
+
+    return {
+      client,
+      room: participant ? room : null
+    };
+  }
+
+  function disconnectClient(clientId, socketId) {
+    const client = clients.get(clientId);
+    if (client && client.socketId === socketId) {
+      client.connected = false;
+      client.socketId = null;
+    }
+
+    const room = roomForClient(clientId);
+    const participant = room?.participants.get(clientId) || null;
+    if (participant && participant.socketId === socketId) {
+      participant.connected = false;
+      participant.socketId = null;
+      clearParticipantInput(room, clientId);
+    }
+  }
+
+  function isCurrentSocket(clientId, socketId) {
+    return clients.get(clientId)?.socketId === socketId;
+  }
+
+  function renameClient(clientId, name) {
+    const nextName = sanitizePlayerName(name || "");
+    const client = clients.get(clientId);
+    if (client) {
+      client.name = nextName;
+    }
+
+    const room = roomForClient(clientId);
+    const participant = room?.participants.get(clientId) || null;
+    if (participant) {
+      participant.name = nextName;
+    }
+
+    const player = room?.arena?.players.get(clientId);
+    if (player) {
+      player.name = nextName;
+    }
+
+    return { ok: Boolean(client), room };
+  }
+
+  function readyClient(clientId) {
+    const client = clients.get(clientId);
+    if (!client) {
+      return { ok: false, reason: "unknown_client" };
+    }
+
+    const existingRoom = roomForClient(clientId);
+    if (existingRoom) {
+      const participant = existingRoom.participants.get(clientId);
+      participant.connected = client.connected;
+      participant.socketId = client.socketId;
+      participant.name = client.name;
+      ensureWaitingPlayer(existingRoom, client);
+      syncLobbyHosts(existingRoom);
+      return { ok: true, room: existingRoom, rejoined: true };
+    }
+
+    const room = availableWaitingRoom();
+    if (!room) {
+      return { ok: false, reason: "no_waiting_room" };
+    }
+
+    if (room.participants.size >= ENGINE.maxPlayers) {
+      return { ok: false, reason: "room_full" };
+    }
+
+    const joinedAtMs = now();
+    room.participants.set(clientId, {
+      clientId,
+      name: client.name,
+      socketId: client.socketId,
+      connected: client.connected,
+      joinedAtMs
+    });
+    clientRooms.set(clientId, room.id);
+    addPlayer(room.arena, {
+      id: clientId,
+      name: client.name,
+      spawnNumber: nextLobbySpawnNumber(room)
+    });
+
+    if (!room.hostClientId) {
+      room.hostClientId = clientId;
+      room.waitingStartedAtMs = joinedAtMs;
+      room.autoStartAtMs = joinedAtMs + ENGINE.lobby.autoStartSeconds * 1000;
+    }
+    syncLobbyHosts(room);
+
+    if (room.participants.size >= ENGINE.maxPlayers) {
+      armStartCountdown(room, "full");
+    }
+
+    return { ok: true, room, joined: true };
+  }
+
+  function resumeClient(clientId, roomId) {
+    const client = clients.get(clientId);
+    if (!client) {
+      return { ok: false, reason: "unknown_client" };
+    }
+
+    const room = roomId ? rooms.get(String(roomId)) : roomForClient(clientId);
+    if (!room?.participants.has(clientId)) {
+      return { ok: false, reason: "not_registered" };
+    }
+
+    const participant = room.participants.get(clientId);
+    participant.connected = client.connected;
+    participant.socketId = client.socketId;
+    participant.name = client.name;
+    clientRooms.set(clientId, room.id);
+    ensureWaitingPlayer(room, client);
+    clearParticipantInput(room, clientId);
+    syncLobbyHosts(room);
+
+    return { ok: true, room, rejoined: true };
+  }
+
+  function startRoom(clientId) {
+    const room = roomForClient(clientId);
+    if (!room || room.state !== ROOM_STATES.waiting) {
+      return { ok: false, reason: "no_waiting_room" };
+    }
+
+    if (room.hostClientId !== clientId) {
+      return { ok: false, reason: "not_host" };
+    }
+
+    return armStartCountdown(room, "host");
+  }
+
+  function leaveClient(clientId) {
+    const room = roomForClient(clientId);
+    if (!room || !room.participants.has(clientId)) {
+      return { ok: true, room: null };
+    }
+
+    if (room.state === ROOM_STATES.active && room.arena) {
+      eliminatePlayer(room.arena, clientId, {
+        tick: room.arena.tick,
+        killedById: null
+      });
+    } else if (room.state === ROOM_STATES.waiting && room.arena) {
+      room.arena.players.delete(clientId);
+    }
+
+    room.participants.delete(clientId);
+    clientRooms.delete(clientId);
+    if (room.hostClientId === clientId) {
+      room.hostClientId = firstParticipantId(room);
+      syncLobbyHosts(room);
+    }
+
+    if (room.state === ROOM_STATES.active) {
+      maybeEndActiveRoom(room, "leave");
+    }
+
+    if (
+      (room.state === ROOM_STATES.waiting || room.state === ROOM_STATES.ended) &&
+      room.participants.size === 0
+    ) {
+      destroyRoom(room);
+      return { ok: true, room: null, previousRoom: room, emptied: true };
+    }
+
+    return { ok: true, room };
+  }
+
+  function stepActiveArena(dtSeconds, stepArenaFn) {
+    const events = [];
+
+    for (const room of Array.from(rooms.values())) {
+      if (room.state === ROOM_STATES.waiting && room.arena) {
+        if (room.participants.size > 0 && !room.countdownArmed) {
+          const remainingMs = room.autoStartAtMs - now();
+          if (remainingMs <= ENGINE.lobby.countdownSeconds * 1000) {
+            const result = armStartCountdown(room, "timer");
+            if (result.ok && result.countdownStarted) {
+              events.push({ type: "countdown", room });
+            }
+          }
+        }
+
+        if (room.participants.size > 0 && now() >= room.autoStartAtMs) {
+          const result = startWaitingRoom(room, room.countdownReason || "timer");
+          if (result.ok) {
+            events.push({ type: "started", room });
+          }
+          continue;
+        }
+
+        stepArenaFn(room.arena, dtSeconds);
+        events.push(...processLobbyButtonHits(room));
+      }
+
+      if (room.state === ROOM_STATES.active && room.arena) {
+        stepArenaFn(room.arena, dtSeconds);
+        if (maybeEndActiveRoom(room, "last_alive")) {
+          events.push({ type: "ended", room });
+        }
+      }
+    }
+
+    return events;
+  }
+
+  function roomSnapshot(clientId) {
+    const room = roomForClient(clientId);
+    if (!room || !room.participants.has(clientId)) {
+      return {
+        state: ROOM_STATES.menu,
+        clientId,
+        maxPlayers: ENGINE.maxPlayers,
+        autoStartSeconds: ENGINE.lobby.autoStartSeconds,
+        activeGame: Array.from(rooms.values()).some((candidate) => candidate.state === ROOM_STATES.active)
+      };
+    }
+
+    return snapshotRoom(room, clientId);
+  }
+
+  function genericRoomSnapshot(room = primaryRoom()) {
+    return room ? snapshotRoom(room, null) : null;
+  }
+
+  function activeRoom() {
+    return primaryRoom();
+  }
+
+  function clientRoom(clientId) {
+    return roomForClient(clientId);
+  }
+
+  function allRooms() {
+    return Array.from(rooms.values());
+  }
+
+  function availableWaitingRoom() {
+    return Array.from(rooms.values())
+      .filter((room) =>
+        room.state === ROOM_STATES.waiting &&
+        !room.countdownArmed &&
+        room.participants.size < ENGINE.maxPlayers
+      )
+      .sort((a, b) => a.createdAtMs - b.createdAtMs)[0] || createWaitingRoom();
+  }
+
+  function roomForClient(clientId) {
+    const roomId = clientRooms.get(clientId);
+    const mappedRoom = roomId ? rooms.get(roomId) : null;
+    if (mappedRoom?.participants.has(clientId)) {
+      return mappedRoom;
+    }
+
+    for (const room of rooms.values()) {
+      if (room.participants.has(clientId)) {
+        clientRooms.set(clientId, room.id);
+        return room;
+      }
+    }
+
+    return null;
+  }
+
+  function primaryRoom() {
+    return Array.from(rooms.values())
+      .sort((a, b) => {
+        if (a.state === ROOM_STATES.waiting && b.state !== ROOM_STATES.waiting) {
+          return -1;
+        }
+        if (b.state === ROOM_STATES.waiting && a.state !== ROOM_STATES.waiting) {
+          return 1;
+        }
+        return b.createdAtMs - a.createdAtMs;
+      })[0] || null;
+  }
+
+  function destroyRoom(room) {
+    rooms.delete(room.id);
+
+    for (const clientId of room.participants.keys()) {
+      clientRooms.delete(clientId);
+    }
+  }
+
+  function createWaitingRoom() {
+    const createdAtMs = now();
+    const roomNumber = nextRoomNumber;
+    const seed = seedFactory(roomNumber);
+    nextRoomNumber += 1;
+
+    const room = {
+      id: `room-${roomNumber}`,
+      state: ROOM_STATES.waiting,
+      seed,
+      createdAtMs,
+      waitingStartedAtMs: createdAtMs,
+      autoStartAtMs: createdAtMs + ENGINE.lobby.autoStartSeconds * 1000,
+      hostClientId: null,
+      participants: new Map(),
+      lobbySpawnNumbers: randomizedSpawnNumbers(`${seed}:lobby`, ENGINE.maxPlayers),
+      arena: createLobbyArena(`room-${roomNumber}:waiting`, `${seed}:waiting`),
+      startedAtMs: null,
+      endedAtMs: null,
+      startReason: null,
+      endReason: null,
+      winnerId: null,
+      winnerName: null,
+      countdownArmed: false,
+      countdownReason: null,
+      countdownStartedAtMs: null,
+      countdownBeepSeq: 0
+    };
+    rooms.set(room.id, room);
+    return room;
+  }
+
+  function armStartCountdown(room, reason) {
+    if (!room || room.state !== ROOM_STATES.waiting) {
+      return { ok: false, reason: "no_waiting_room" };
+    }
+
+    if (room.participants.size === 0) {
+      return { ok: false, reason: "empty_room" };
+    }
+
+    if (room.countdownArmed) {
+      return {
+        ok: true,
+        room,
+        countdown: true,
+        countdownStarted: false
+      };
+    }
+
+    const deadlineMs = now() + ENGINE.lobby.countdownSeconds * 1000;
+    const countdownStarted = true;
+    room.countdownArmed = true;
+    room.countdownReason = reason;
+    room.countdownStartedAtMs = now();
+    room.autoStartAtMs = deadlineMs;
+
+    if (countdownStarted) {
+      room.countdownBeepSeq += 1;
+    }
+
+    return {
+      ok: true,
+      room,
+      countdown: true,
+      countdownStarted
+    };
+  }
+
+  function startWaitingRoom(room, reason) {
+    if (!room || room.state !== ROOM_STATES.waiting) {
+      return { ok: false, reason: "no_waiting_room" };
+    }
+
+    if (room.participants.size === 0) {
+      return { ok: false, reason: "empty_room" };
+    }
+
+    room.state = ROOM_STATES.active;
+    room.startedAtMs = now();
+    room.startReason = reason;
+    room.arena = createArena({
+      id: room.id,
+      seed: room.seed
+    });
+
+    const participants = sortedParticipants(room);
+    const spawnNumbers = randomizedSpawnNumbers(room.seed, participants.length);
+    for (let index = 0; index < participants.length; index += 1) {
+      const participant = participants[index];
+      addPlayer(room.arena, {
+        id: participant.clientId,
+        name: participant.name,
+        spawnNumber: spawnNumbers[index]
+      });
+    }
+
+    maybeEndActiveRoom(room, "last_alive");
+    return { ok: true, room };
+  }
+
+  function maybeEndActiveRoom(room, reason) {
+    if (!room || room.state !== ROOM_STATES.active || !room.arena) {
+      return false;
+    }
+
+    const alivePlayers = Array.from(room.arena.players.values()).filter((player) => player.alive);
+    if (alivePlayers.length > 1) {
+      return false;
+    }
+
+    const winner = alivePlayers[0] || null;
+    room.state = ROOM_STATES.ended;
+    room.endedAtMs = now();
+    room.endReason = reason;
+    room.winnerId = winner?.id ?? null;
+    room.winnerName = winner?.name ?? null;
+    return true;
+  }
+
+  function processLobbyButtonHits(room) {
+    const events = [];
+    if (room.state !== ROOM_STATES.waiting || !room.arena) {
+      return events;
+    }
+
+    for (const player of room.arena.players.values()) {
+      if (!player.alive || !player.mining || player.miningRay?.hitType !== "entity") {
+        continue;
+      }
+
+      const entity = room.arena.entities.get(player.miningRay.targetId);
+      if (entity?.type !== "lobbyButton") {
+        continue;
+      }
+
+      if (entity.hostOnly && room.hostClientId !== player.id) {
+        continue;
+      }
+
+      if (entity.action === "start") {
+        const result = armStartCountdown(room, "host");
+        if (result.ok && result.countdownStarted) {
+          events.push({ type: "countdown", room: result.room });
+        }
+        return events;
+      }
+
+      if (entity.action === "leave") {
+        const participant = room.participants.get(player.id);
+        const socketId = participant?.socketId ?? null;
+        const result = leaveClient(player.id);
+        events.push({
+          type: "left",
+          room,
+          clientId: player.id,
+          socketId,
+          emptied: result.emptied === true,
+          beep: true
+        });
+        return events;
+      }
+    }
+
+    return events;
+  }
+
+  return {
+    connectClient,
+    disconnectClient,
+    renameClient,
+    readyClient,
+    startRoom,
+    leaveClient,
+    stepActiveArena,
+    roomSnapshot,
+    genericRoomSnapshot,
+    activeRoom,
+    clientRoom,
+    allRooms,
+    resumeClient,
+    isCurrentSocket
+  };
+}
+
+function createLobbyArena(id, seed) {
+  const asteroid = createLobbyAsteroid({ seed: `${seed}:box` });
+  const arena = createArena({
+    id,
+    seed,
+    asteroid,
+    playerDamage: false
+  });
+  const center = {
+    x: (asteroid.widthTiles * asteroid.tileSize) / 2,
+    y: (asteroid.heightTiles * asteroid.tileSize) / 2
+  };
+  const startX = center.x - LOBBY_BUTTON_WIDTH - LOBBY_BUTTON_GAP / 2;
+  const leaveX = center.x + LOBBY_BUTTON_GAP / 2;
+  const buttonY = center.y - LOBBY_BUTTON_HEIGHT / 2;
+
+  arena.entities.set("lobby-start", {
+    id: "lobby-start",
+    type: "lobbyButton",
+    action: "start",
+    label: "START",
+    x: startX,
+    y: buttonY,
+    width: LOBBY_BUTTON_WIDTH,
+    height: LOBBY_BUTTON_HEIGHT,
+    hostOnly: true
+  });
+  arena.entities.set("lobby-leave", {
+    id: "lobby-leave",
+    type: "lobbyButton",
+    action: "leave",
+    label: "LEAVE",
+    x: leaveX,
+    y: buttonY,
+    width: LOBBY_BUTTON_WIDTH,
+    height: LOBBY_BUTTON_HEIGHT
+  });
+
+  return arena;
+}
+
+function syncLobbyHosts(room) {
+  if (room.state !== ROOM_STATES.waiting || !room.arena) {
+    return;
+  }
+
+  for (const player of room.arena.players.values()) {
+    player.lobbyHost = player.id === room.hostClientId;
+  }
+}
+
+function ensureWaitingPlayer(room, client) {
+  if (room?.state !== ROOM_STATES.waiting || !room.arena || room.arena.players.has(client.clientId)) {
+    return;
+  }
+
+  addPlayer(room.arena, {
+    id: client.clientId,
+    name: client.name,
+    spawnNumber: nextLobbySpawnNumber(room)
+  });
+  syncLobbyHosts(room);
+}
+
+function clearParticipantInput(room, clientId) {
+  if (room?.arena) {
+    clearPlayerInput(room.arena, clientId);
+  }
+}
+
+function nextLobbySpawnNumber(room) {
+  const used = new Set(Array.from(room.arena.players.values()).map((player) => player.spawnNumber));
+  return room.lobbySpawnNumbers.find((spawnNumber) => !used.has(spawnNumber)) || room.arena.players.size + 1;
+}
+
+export function sanitizeClientId(value) {
+  const text = String(value || "").trim();
+  return CLIENT_ID_PATTERN.test(text) ? text : "";
+}
+
+export function createClientId() {
+  return randomBytes(12).toString("base64url");
+}
+
+export function sanitizeClientSecret(value) {
+  const text = String(value || "").trim();
+  return CLIENT_SECRET_PATTERN.test(text) ? text : "";
+}
+
+export function createClientSecret() {
+  return randomBytes(24).toString("base64url");
+}
+
+function createRoomSeed(roomNumber) {
+  return `${randomBytes(5).toString("hex")}-${roomNumber}`;
+}
+
+function snapshotRoom(room, clientId) {
+  return {
+    state: room.state,
+    roomId: room.id,
+    clientId,
+    maxPlayers: ENGINE.maxPlayers,
+    autoStartSeconds: ENGINE.lobby.autoStartSeconds,
+    countdownSeconds: ENGINE.lobby.countdownSeconds,
+    hostClientId: room.hostClientId,
+    isHost: clientId ? room.hostClientId === clientId : false,
+    seed: room.seed,
+    waitingStartedAtMs: room.waitingStartedAtMs,
+    autoStartAtMs: room.autoStartAtMs,
+    startedAtMs: room.startedAtMs,
+    endedAtMs: room.endedAtMs,
+    startReason: room.startReason,
+    endReason: room.endReason,
+    winnerId: room.winnerId,
+    winnerName: room.winnerName,
+    countdownArmed: room.countdownArmed,
+    countdownStartedAtMs: room.countdownStartedAtMs,
+    countdownBeepSeq: room.countdownBeepSeq,
+    players: sortedParticipants(room).map((participant) => ({
+      clientId: participant.clientId,
+      name: participant.name,
+      connected: participant.connected,
+      host: participant.clientId === room.hostClientId
+    })),
+    render: RENDER
+  };
+}
+
+function sortedParticipants(room) {
+  return Array.from(room.participants.values())
+    .sort((a, b) => a.joinedAtMs - b.joinedAtMs || a.clientId.localeCompare(b.clientId));
+}
+
+function firstParticipantId(room) {
+  return sortedParticipants(room)[0]?.clientId ?? null;
+}
+
+function randomizedSpawnNumbers(seed, count) {
+  const playerCount = clampInteger(count, 1, ENGINE.maxPlayers);
+  const random = createSeededRandom(`${seed}:spawn-order:${playerCount}`);
+  const offset = Math.floor(random() * ENGINE.maxPlayers);
+  const step = ENGINE.maxPlayers / playerCount;
+  const used = new Set();
+  const spawnNumbers = [];
+
+  for (let index = 0; index < playerCount; index += 1) {
+    let zeroBased = (offset + Math.round(index * step)) % ENGINE.maxPlayers;
+    while (used.has(zeroBased)) {
+      zeroBased = (zeroBased + 1) % ENGINE.maxPlayers;
+    }
+
+    used.add(zeroBased);
+    spawnNumbers.push(zeroBased + 1);
+  }
+
+  for (let index = spawnNumbers.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const value = spawnNumbers[index];
+    spawnNumbers[index] = spawnNumbers[swapIndex];
+    spawnNumbers[swapIndex] = value;
+  }
+
+  return spawnNumbers;
+}
+
+function clampInteger(value, min, max) {
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}

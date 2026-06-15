@@ -9,6 +9,13 @@ import {
 import { createRenderer } from "/renderer.js";
 
 const TALK_MAX_CHARS = 36;
+const CLIENT_ID_STORAGE_KEY = "bitspace.clientId";
+const CLIENT_SECRET_STORAGE_KEY = "bitspace.clientSecret";
+const ROOM_ID_STORAGE_KEY = "bitspace.roomId";
+const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
+const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
+const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
+const ROOM_ID_PATTERN = /^room-\d+$/;
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -17,12 +24,27 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
   rowHeight: 24,
   rowInset: 12
 });
+const ROOM_BUTTONS = Object.freeze({
+  ready: { x: 132, y: 216, width: 120, height: 28 },
+  leaveSpectating: { x: 132, y: 330, width: 120, height: 28 },
+  leaveEnded: { x: 132, y: 330, width: 120, height: 28 }
+});
 const canvas = document.querySelector("#scene");
 const renderer = createRenderer(canvas);
 const talkInput = createTalkInput();
 const keys = new Set();
+const storedClientId = getClientId();
+const storedClientSecret = getClientSecret();
+const inputSessionId = randomClientSecret();
+const audio = {
+  context: null,
+  unlocked: false,
+  pendingBeeps: 0
+};
 const state = {
+  clientId: storedClientId,
   playerId: null,
+  room: null,
   snapshot: null,
   asteroid: null,
   inputSeq: 0,
@@ -42,17 +64,62 @@ const state = {
   upgrades: {
     active: false,
     selectedIndex: 0
-  }
+  },
+  uiHoverId: null,
+  lastReattachRequestAt: 0
 };
 
 const socket = window.io({
   auth: {
-    name: getPlayerName()
+    name: getPlayerName(),
+    clientId: storedClientId,
+    clientSecret: storedClientSecret
   }
 });
 
 socket.on(SERVER_EVENTS.welcome, (payload) => {
+  state.clientId = payload.clientId;
   state.playerId = payload.playerId;
+  if (payload.clientId) {
+    window.localStorage.setItem(CLIENT_ID_STORAGE_KEY, payload.clientId);
+    socket.auth = {
+      ...socket.auth,
+      clientId: payload.clientId
+    };
+  }
+  if (payload.clientSecret) {
+    window.localStorage.setItem(CLIENT_SECRET_STORAGE_KEY, payload.clientSecret);
+    socket.auth = {
+      ...socket.auth,
+      clientSecret: payload.clientSecret
+    };
+  }
+  requestRoomReattach(0, true);
+});
+
+socket.on(SERVER_EVENTS.room, (room) => {
+  const previousState = state.room?.state;
+  if (room?.clientId) {
+    state.clientId = room.clientId;
+    state.playerId = room.clientId;
+    window.localStorage.setItem(CLIENT_ID_STORAGE_KEY, room.clientId);
+  }
+  state.room = room;
+  state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+
+  if (!room || room.state === "menu") {
+    state.snapshot = null;
+    state.asteroid = null;
+    state.upgrades.active = false;
+    state.mouse.down = false;
+    forgetRegisteredRoom();
+    return;
+  }
+
+  rememberRegisteredRoom(room.roomId);
+  if (previousState !== room.state) {
+    state.upgrades.active = false;
+  }
 });
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
@@ -78,8 +145,21 @@ socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
   }
 });
 
+socket.on(SERVER_EVENTS.beep, () => {
+  requestMechanicalBeep();
+});
+
 window.addEventListener("keydown", (event) => {
+  unlockAudio();
   if (state.chat.active) {
+    return;
+  }
+
+  if (isRoomUiBlocking()) {
+    if (shouldCaptureKey(event.code) || event.code === "Enter" || event.code === "Escape") {
+      event.preventDefault();
+    }
+    keys.add(event.code);
     return;
   }
 
@@ -111,6 +191,14 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("keyup", (event) => {
   if (state.chat.active) {
+    return;
+  }
+
+  if (isRoomUiBlocking()) {
+    if (shouldCaptureKey(event.code) || event.code === "Enter" || event.code === "Escape") {
+      event.preventDefault();
+    }
+    keys.delete(event.code);
     return;
   }
 
@@ -157,6 +245,7 @@ talkInput.addEventListener("keydown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   updateMouse(event);
+  state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   if (state.upgrades.active) {
     updateUpgradeSelectionFromMouse();
   }
@@ -164,7 +253,21 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerdown", (event) => {
   event.preventDefault();
+  unlockAudio();
   updateMouse(event);
+  const screenButton = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  if (screenButton) {
+    handleRoomUiClick(screenButton);
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+
+  if (isRoomUiBlocking()) {
+    state.mouse.down = false;
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+
   if (state.upgrades.active) {
     updateUpgradeSelectionFromMouse();
     buySelectedUpgrade();
@@ -200,21 +303,36 @@ setInterval(() => {
     return;
   }
 
+  const now = performance.now();
+  if (needsReattachRepair()) {
+    requestRoomReattach(now, true);
+  }
+
   socket.emit(CLIENT_EVENTS.input, readInput());
 }, 1000 / ENGINE.tickRate);
 
 requestAnimationFrame(draw);
 
 function draw(now = 0) {
+  const timeSeconds = now / 1000;
+
   updateAimFromSnapshot();
+  const cameraPlayerId = cameraPlayerIdForRoom();
+  state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   renderer.draw(state.snapshot, {
     playerId: state.playerId,
+    cameraPlayerId,
     asteroid: state.asteroid,
     chat: state.chat,
     upgrades: state.upgrades,
+    room: state.room,
+    clientId: state.clientId,
+    roomButtons: activeRoomButtons(),
+    uiRayActive: state.mouse.down,
+    uiTargetId: state.uiHoverId,
     aimAngle: state.mouse.aimAngle,
-    mining: state.mouse.down && !state.chat.active && !state.upgrades.active,
-    timeSeconds: now / 1000
+    mining: state.mouse.down && !state.chat.active && !state.upgrades.active && !isInputBlocked(),
+    timeSeconds
   });
   requestAnimationFrame(draw);
 }
@@ -233,6 +351,10 @@ function createTalkInput() {
 }
 
 function activateTalk() {
+  if (isInputBlocked()) {
+    return;
+  }
+
   state.chat.active = true;
   state.upgrades.active = false;
   state.mouse.down = false;
@@ -243,6 +365,10 @@ function activateTalk() {
 }
 
 function activateUpgrades() {
+  if (isInputBlocked() || state.room?.state !== "active") {
+    return;
+  }
+
   state.upgrades.active = true;
   state.mouse.down = false;
   keys.clear();
@@ -290,10 +416,89 @@ function syncTalkDraft() {
   state.chat.selectionEnd = talkInput.selectionEnd ?? state.chat.caret;
 }
 
+function unlockAudio() {
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    context.resume()
+      .then(flushPendingBeeps)
+      .catch(() => {});
+  } else {
+    flushPendingBeeps();
+  }
+  audio.unlocked = true;
+}
+
+function createAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    return null;
+  }
+
+  return new AudioContextClass();
+}
+
+function requestMechanicalBeep() {
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    audio.pendingBeeps = Math.min(audio.pendingBeeps + 1, 3);
+    context.resume()
+      .then(flushPendingBeeps)
+      .catch(() => {});
+    return;
+  }
+
+  playMechanicalBeep(context);
+}
+
+function flushPendingBeeps() {
+  const context = audio.context;
+  if (!context || context.state !== "running" || audio.pendingBeeps <= 0) {
+    return;
+  }
+
+  const beeps = audio.pendingBeeps;
+  audio.pendingBeeps = 0;
+  for (let index = 0; index < beeps; index += 1) {
+    playMechanicalBeep(context, index * 0.18);
+  }
+}
+
+function playMechanicalBeep(context, delay = 0) {
+  const start = context.currentTime + 0.01;
+  playMechanicalTone(context, 760, start + delay, 0.075, 0.065);
+  playMechanicalTone(context, 520, start + delay + 0.092, 0.07, 0.055);
+}
+
+function playMechanicalTone(context, frequency, start, duration, volume) {
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+
+  oscillator.type = "square";
+  oscillator.frequency.setValueAtTime(frequency, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.02);
+}
+
 function readInput() {
   state.inputSeq += 1;
-  if (state.chat.active || state.upgrades.active) {
+  if (state.chat.active || state.upgrades.active || isInputBlocked()) {
     return normalizeInput({
+      sessionId: inputSessionId,
       seq: state.inputSeq,
       moveX: 0,
       moveY: 0,
@@ -307,6 +512,7 @@ function readInput() {
   const move = readMoveVector();
 
   return normalizeInput({
+    sessionId: inputSessionId,
     seq: state.inputSeq,
     moveX: move.x,
     moveY: move.y,
@@ -362,11 +568,177 @@ function getPlayerName() {
   return name;
 }
 
+function getClientId() {
+  const stored = window.localStorage.getItem(CLIENT_ID_STORAGE_KEY);
+  if (stored && CLIENT_ID_PATTERN.test(stored)) {
+    return stored;
+  }
+
+  const generated = randomClientId();
+  window.localStorage.setItem(CLIENT_ID_STORAGE_KEY, generated);
+  return generated;
+}
+
+function getClientSecret() {
+  const stored = window.localStorage.getItem(CLIENT_SECRET_STORAGE_KEY);
+  if (stored && CLIENT_SECRET_PATTERN.test(stored)) {
+    return stored;
+  }
+
+  const generated = randomClientSecret();
+  window.localStorage.setItem(CLIENT_SECRET_STORAGE_KEY, generated);
+  return generated;
+}
+
+function randomClientId() {
+  const bytes = new Uint8Array(16);
+  window.crypto?.getRandomValues?.(bytes);
+  if (bytes.some((value) => value !== 0)) {
+    return Array.from(bytes, (byte) => byte.toString(36).padStart(2, "0")).join("").slice(0, 32);
+  }
+
+  return Math.random().toString(36).slice(2, 18) + Date.now().toString(36);
+}
+
+function randomClientSecret() {
+  const bytes = new Uint8Array(32);
+  window.crypto?.getRandomValues?.(bytes);
+  if (bytes.some((value) => value !== 0)) {
+    return btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+  }
+
+  return `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+}
+
 function updateMouse(event) {
   const point = eventToFramebufferPoint(event);
   state.mouse.x = point.x;
   state.mouse.y = point.y;
   updateAimFromSnapshot();
+}
+
+function handleRoomUiClick(buttonId) {
+  if (!buttonId || !socket.connected) {
+    return;
+  }
+
+  if (buttonId === "ready") {
+    socket.emit(CLIENT_EVENTS.ready, { button: true });
+    return;
+  }
+
+  if (buttonId === "start") {
+    socket.emit(CLIENT_EVENTS.start);
+    return;
+  }
+
+  if (buttonId === "leaveSpectating" || buttonId === "leaveEnded") {
+    forgetRegisteredRoom();
+    socket.emit(CLIENT_EVENTS.leave);
+  }
+}
+
+function requestRoomReattach(now = performance.now(), silent = true) {
+  const roomId = storedRoomId();
+  if (!roomId) {
+    return;
+  }
+
+  if (state.lastReattachRequestAt > 0 && now - state.lastReattachRequestAt < 900) {
+    return;
+  }
+
+  state.lastReattachRequestAt = now;
+  socket.emit(CLIENT_EVENTS.resume, { roomId, silent });
+}
+
+function needsReattachRepair() {
+  if (!storedRoomId()) {
+    return false;
+  }
+
+  if (state.room?.state !== "waiting" && state.room?.state !== "active") {
+    return false;
+  }
+
+  return !localPlayerFromSnapshot();
+}
+
+function storedRoomId() {
+  const roomId = window.localStorage.getItem(ROOM_ID_STORAGE_KEY);
+  if (roomId && ROOM_ID_PATTERN.test(roomId)) {
+    return roomId;
+  }
+
+  window.localStorage.removeItem(ROOM_ID_STORAGE_KEY);
+  window.localStorage.removeItem(LEGACY_REGISTERED_ROOM_STORAGE_KEY);
+  return "";
+}
+
+function rememberRegisteredRoom(roomId) {
+  if (!roomId || !ROOM_ID_PATTERN.test(roomId)) {
+    return;
+  }
+
+  window.localStorage.setItem(ROOM_ID_STORAGE_KEY, roomId);
+  window.localStorage.removeItem(LEGACY_REGISTERED_ROOM_STORAGE_KEY);
+}
+
+function forgetRegisteredRoom() {
+  window.localStorage.removeItem(ROOM_ID_STORAGE_KEY);
+  window.localStorage.removeItem(LEGACY_REGISTERED_ROOM_STORAGE_KEY);
+}
+
+function activeRoomButtons() {
+  const room = state.room;
+  if (!room || room.state === "menu") {
+    return { ready: ROOM_BUTTONS.ready };
+  }
+
+  if (room.state === "active" && isLocalPlayerEliminated()) {
+    return { leaveSpectating: ROOM_BUTTONS.leaveSpectating };
+  }
+
+  if (room.state === "ended") {
+    return { leaveEnded: ROOM_BUTTONS.leaveEnded };
+  }
+
+  return {};
+}
+
+function screenRoomButtonAtPoint(x, y) {
+  for (const [buttonId, rect] of Object.entries(activeRoomButtons())) {
+    if (x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height) {
+      return buttonId;
+    }
+  }
+
+  return null;
+}
+
+function isRoomUiBlocking() {
+  const room = state.room;
+  if (!room || room.state === "menu" || room.state === "ended") {
+    return true;
+  }
+
+  if (room.state === "waiting") {
+    return false;
+  }
+
+  return room.state === "active" && isLocalPlayerEliminated();
+}
+
+function isInputBlocked() {
+  return isRoomUiBlocking();
+}
+
+function isLocalPlayerEliminated() {
+  const player = localPlayerFromSnapshot();
+  return Boolean(state.snapshot && (!player || !player.alive));
 }
 
 function updateUpgradeSelectionFromMouse() {
@@ -395,6 +767,24 @@ function buySelectedUpgrade() {
 
 function localPlayerFromSnapshot() {
   return state.snapshot?.players.find((candidate) => candidate.id === state.playerId) || null;
+}
+
+function cameraPlayerIdForRoom() {
+  const room = state.room;
+  const player = localPlayerFromSnapshot();
+  if (room?.state === "ended" && room.winnerId) {
+    return room.winnerId;
+  }
+
+  if (!player || player.alive) {
+    return state.playerId;
+  }
+
+  if (player.killedById) {
+    return player.killedById;
+  }
+
+  return state.snapshot?.players.find((candidate) => candidate.alive)?.id || state.playerId;
 }
 
 function upgradeIndexAtPoint(x, y) {

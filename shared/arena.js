@@ -36,6 +36,9 @@ export function createArena(options = {}) {
     asteroid: options.asteroid ?? createAsteroid({ seed: `${seed}:asteroid` }),
     asteroidMining: new Map(),
     asteroidUpdates: [],
+    rules: {
+      playerDamage: options.playerDamage ?? true
+    },
     // Extension channels are intentionally empty until the game design is explicit.
     entities: new Map(),
     effects: []
@@ -48,10 +51,12 @@ export function addPlayer(arena, playerOptions) {
   }
 
   const number = nextPlayerNumber(arena);
-  const spawn = spawnForPlayerNumber(number, arena.asteroid);
+  const spawnNumber = playerOptions.spawnNumber ?? number;
+  const spawn = spawnForPlayerNumber(spawnNumber, arena.asteroid);
   const player = {
     id: playerOptions.id,
     number,
+    spawnNumber,
     name: sanitizePlayerName(playerOptions.name || `Pilot ${number}`),
     talk: "",
     x: spawn.x,
@@ -73,6 +78,8 @@ export function addPlayer(arena, playerOptions) {
     health: playerMaxHealth(ENGINE.player.startingHealthBars),
     maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars),
     lastDamageTick: Number.NEGATIVE_INFINITY,
+    killedById: null,
+    eliminatedAtTick: null,
     resources: {
       rock: 0,
       ore: 0,
@@ -80,6 +87,7 @@ export function addPlayer(arena, playerOptions) {
     },
     alive: true,
     input: createEmptyInput(),
+    inputSessionId: "",
     lastInputSeq: 0,
     joinedAtTick: arena.tick
   };
@@ -92,6 +100,19 @@ export function removePlayer(arena, playerId) {
   return arena.players.delete(playerId);
 }
 
+export function eliminatePlayer(arena, playerId, options = {}) {
+  const player = arena.players.get(playerId);
+  if (!player || !player.alive) {
+    return false;
+  }
+
+  killPlayer(player, {
+    tick: options.tick ?? arena.tick,
+    killedById: options.killedById ?? null
+  });
+  return true;
+}
+
 export function setPlayerInput(arena, playerId, payload) {
   const player = arena.players.get(playerId);
   if (!player) {
@@ -99,12 +120,33 @@ export function setPlayerInput(arena, playerId, payload) {
   }
 
   const input = normalizeInput(payload);
+  if (input.sessionId && input.sessionId !== player.inputSessionId) {
+    player.inputSessionId = input.sessionId;
+    player.lastInputSeq = 0;
+  }
+
   if (input.seq !== 0 && input.seq < player.lastInputSeq) {
     return false;
   }
 
   player.input = input;
   player.lastInputSeq = Math.max(player.lastInputSeq, input.seq);
+  return true;
+}
+
+export function clearPlayerInput(arena, playerId) {
+  const player = arena.players.get(playerId);
+  if (!player) {
+    return false;
+  }
+
+  player.input = {
+    ...createEmptyInput(),
+    sessionId: player.inputSessionId,
+    aimAngle: player.input?.aimAngle ?? player.aimAngle
+  };
+  player.mining = false;
+  player.thrusting = false;
   return true;
 }
 
@@ -345,8 +387,15 @@ function processPlayerMining(arena, player, dtSeconds) {
     y: player.y + direction.y * player.radius
   };
   const hit = raycastAsteroid(arena.asteroid, start.x, start.y, angle, rayLength);
-  const playerHit = raycastPlayers(arena, player, start, angle, Math.min(hit.distance, rayLength));
-  const hitResult = playerHit || hit;
+  const entityHit = raycastEntities(arena, player, start, angle, Math.min(hit.distance, rayLength));
+  const playerHit = raycastPlayers(
+    arena,
+    player,
+    start,
+    angle,
+    Math.min(entityHit?.distance ?? hit.distance, hit.distance, rayLength)
+  );
+  const hitResult = playerHit || entityHit || hit;
   const end = {
     x: hitResult.x,
     y: hitResult.y
@@ -358,23 +407,32 @@ function processPlayerMining(arena, player, dtSeconds) {
     endX: roundForSnapshot(end.x),
     endY: roundForSnapshot(end.y),
     hit: hitResult.hit,
-    hitType: playerHit ? "player" : hit.hit ? "asteroid" : null,
-    mineable: !playerHit && hit.mineable,
-    tileX: playerHit ? null : hit.tileX,
-    tileY: playerHit ? null : hit.tileY,
-    index: playerHit ? null : hit.index,
-    tile: playerHit ? null : hit.tile,
-    targetId: playerHit?.target.id ?? null,
+    hitType: playerHit ? "player" : entityHit ? "entity" : hit.hit ? "asteroid" : null,
+    mineable: !playerHit && !entityHit && hit.mineable,
+    tileX: playerHit || entityHit ? null : hit.tileX,
+    tileY: playerHit || entityHit ? null : hit.tileY,
+    index: playerHit || entityHit ? null : hit.index,
+    tile: playerHit || entityHit ? null : hit.tile,
+    targetId: playerHit?.target.id ?? entityHit?.target.id ?? null,
     targetNumber: playerHit?.target.number ?? null,
+    targetAction: entityHit?.target.action ?? null,
     progress: 0
   };
 
   if (playerHit) {
-    damagePlayer(
-      playerHit.target,
-      ENGINE.mining.playerDamagePerSecond * effects.rayDamageMultiplier * dtSeconds,
-      arena.tick
-    );
+    if (arena.rules.playerDamage) {
+      damagePlayer(
+        playerHit.target,
+        ENGINE.mining.playerDamagePerSecond * effects.rayDamageMultiplier * dtSeconds,
+        arena.tick,
+        player.id
+      );
+    }
+    resetPlayerMiningTarget(player);
+    return;
+  }
+
+  if (entityHit) {
     resetPlayerMiningTarget(player);
     return;
   }
@@ -536,6 +594,82 @@ function raycastPlayers(arena, attacker, start, angle, maxDistance) {
   return nearest;
 }
 
+function raycastEntities(arena, player, start, angle, maxDistance) {
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  let nearest = null;
+
+  for (const entity of arena.entities.values()) {
+    if (!entityBlocksRayForPlayer(entity, player)) {
+      continue;
+    }
+
+    const hit = rayRectIntersection(start, direction, entity, maxDistance);
+    if (!hit || (nearest && hit.distance >= nearest.distance)) {
+      continue;
+    }
+
+    nearest = {
+      hit: true,
+      mineable: false,
+      x: hit.x,
+      y: hit.y,
+      distance: hit.distance,
+      target: entity
+    };
+  }
+
+  return nearest;
+}
+
+function entityBlocksRayForPlayer(entity, player) {
+  if (entity.type !== "lobbyButton") {
+    return false;
+  }
+
+  return !entity.hostOnly || player.lobbyHost === true;
+}
+
+function rayRectIntersection(start, direction, rect, maxDistance) {
+  let near = 0;
+  let far = maxDistance;
+
+  if (Math.abs(direction.x) < 0.00001) {
+    if (start.x < rect.x || start.x > rect.x + rect.width) {
+      return null;
+    }
+  } else {
+    const tx1 = (rect.x - start.x) / direction.x;
+    const tx2 = (rect.x + rect.width - start.x) / direction.x;
+    near = Math.max(near, Math.min(tx1, tx2));
+    far = Math.min(far, Math.max(tx1, tx2));
+  }
+
+  if (Math.abs(direction.y) < 0.00001) {
+    if (start.y < rect.y || start.y > rect.y + rect.height) {
+      return null;
+    }
+  } else {
+    const ty1 = (rect.y - start.y) / direction.y;
+    const ty2 = (rect.y + rect.height - start.y) / direction.y;
+    near = Math.max(near, Math.min(ty1, ty2));
+    far = Math.min(far, Math.max(ty1, ty2));
+  }
+
+  if (far < near || far < 0 || near > maxDistance) {
+    return null;
+  }
+
+  const distance = Math.max(0, near);
+  return {
+    distance,
+    x: start.x + direction.x * distance,
+    y: start.y + direction.y * distance
+  };
+}
+
 function rayCircleIntersection(start, direction, circle, radius, maxDistance) {
   const toCircleX = circle.x - start.x;
   const toCircleY = circle.y - start.y;
@@ -563,7 +697,7 @@ function rayCircleIntersection(start, direction, circle, radius, maxDistance) {
   };
 }
 
-function damagePlayer(player, amount, tick = 0) {
+function damagePlayer(player, amount, tick = 0, attackerId = null) {
   const effects = aggregateUpgradeEffects(player.upgrades);
   const damage = Math.max(0, amount * effects.damageTakenMultiplier);
 
@@ -573,7 +707,14 @@ function damagePlayer(player, amount, tick = 0) {
     return;
   }
 
+  killPlayer(player, { tick, killedById: attackerId });
+}
+
+function killPlayer(player, options = {}) {
   player.alive = false;
+  player.health = 0;
+  player.killedById = options.killedById ?? null;
+  player.eliminatedAtTick = options.tick ?? null;
   player.mining = false;
   player.miningRay = null;
   player.thrusting = false;
@@ -775,11 +916,15 @@ function spawnForPlayerNumber(number, asteroid) {
   const maxX = ENGINE.world.width - margin;
   const maxY = ENGINE.world.height - margin;
   const spawns = [
-    { x: margin, y: margin, angle: INITIAL_SPAWN_ANGLE },
-    { x: maxX, y: margin, angle: INITIAL_SPAWN_ANGLE },
-    { x: maxX, y: maxY, angle: INITIAL_SPAWN_ANGLE },
-    { x: margin, y: maxY, angle: INITIAL_SPAWN_ANGLE }
-  ];
+    { x: margin, y: margin },
+    { x: (margin + maxX) / 2, y: margin },
+    { x: maxX, y: margin },
+    { x: maxX, y: (margin + maxY) / 2 },
+    { x: maxX, y: maxY },
+    { x: (margin + maxX) / 2, y: maxY },
+    { x: margin, y: maxY },
+    { x: margin, y: (margin + maxY) / 2 }
+  ].map((spawn) => ({ ...spawn, angle: INITIAL_SPAWN_ANGLE }));
 
   return spawns[(number - 1) % spawns.length];
 }
@@ -805,6 +950,8 @@ function snapshotPlayer(player) {
     healthBars: player.healthBars,
     health: roundForSnapshot(player.health),
     maxHealth: player.maxHealth,
+    killedById: player.killedById,
+    eliminatedAtTick: player.eliminatedAtTick,
     resources: {
       rock: player.resources.rock,
       ore: player.resources.ore,

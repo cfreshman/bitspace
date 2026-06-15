@@ -14,7 +14,11 @@ export const RENDER = Object.freeze({
 export const ENGINE = Object.freeze({
   tickRate: 60,
   snapshotRate: 60,
-  maxPlayers: 4,
+  maxPlayers: 8,
+  lobby: {
+    autoStartSeconds: 300,
+    countdownSeconds: 10
+  },
   world: {
     width: 4096,
     height: 4096,

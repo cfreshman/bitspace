@@ -1,5 +1,6 @@
 export function createEmptyInput() {
   return {
+    sessionId: "",
     seq: 0,
     moveX: 0,
     moveY: 0,
@@ -14,6 +15,7 @@ export function normalizeInput(payload = {}) {
   const move = normalizeMoveVector(payload.moveX, payload.moveY);
 
   return {
+    sessionId: normalizeSessionId(payload.sessionId),
     seq: normalizeSequence(payload.seq),
     moveX: move.x,
     moveY: move.y,
@@ -22,6 +24,11 @@ export function normalizeInput(payload = {}) {
     interact: Boolean(payload.interact),
     build: Boolean(payload.build)
   };
+}
+
+function normalizeSessionId(value) {
+  const text = String(value || "").trim();
+  return /^[a-zA-Z0-9_-]{8,64}$/.test(text) ? text : "";
 }
 
 function normalizeAxis(value) {

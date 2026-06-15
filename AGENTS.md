@@ -1,6 +1,6 @@
 we are building BITSPACE:
 - 1-bit space game
-- socket-based competitive arena gameplay for up to 4 players
+- socket-based competitive arena gameplay for up to 8 players
 - out-compete your opponents at collecting resources, upgrading your ship, building structures & traps, and fighting to the death
 - basically minecraft hunger games set in a 1-bit space environment
 
@@ -42,6 +42,7 @@ LLM instructions
 - Do not use common default app ports like `3000`. BITSPACE should default to port `7023` locally and in production unless explicitly overridden.
 - Do not implement game mechanics such as resource spawning, scoring, upgrades, building, traps, combat, or win conditions unless explicitly asked. Keep the engine scaffold neutral: networking, ticks, input, snapshots, entity/render hooks, and debug movement are acceptable.
 - The visible page should only be an object-fit contained canvas on a black page background unless UI is explicitly requested.
+- The main menu should render the 1-bit starfield behind the menu UI, scrolling left as if the player/camera is moving to the right. Do not show a blank boot mark once menu UI is active.
 - Default rendering colors should use the configured 1-bit pixel art palette: foreground `#74cbef`, framebuffer background `#1f2433`, and black page background.
 - Canvas sizing should fill the actual browser viewport without `vh` or percentage height. Use `visualViewport`/`innerHeight` based JS sizing for the full-page canvas box, keep the canvas backing store at the logical framebuffer size, and rely on literal CSS `object-fit: contain` for the square game view with black along the sides/letterbox area. Do not manually contain-scale the framebuffer in the renderer.
 - Player movement uses a normalized WASD combined vector. Diagonal input must not double velocity. The ship points toward the movement vector while thrusting and keeps its previous facing direction while idle.
@@ -65,6 +66,7 @@ LLM instructions
 - Mining priority is resource before rock: plain rock takes `0.5s` and removes the tile, each ore takes `0.5s` and decrements ore amount before the underlying rock can be mined, and diamond takes `5s` before converting the tile back to plain rock.
 - Mining rays should collide with other players before farther asteroid hits. Ship hits should stop the ray, emit impact particles from the renderer using the authoritative ray endpoint, and apply server-authoritative health damage over time.
 - Players start with `3` health bars and can eventually upgrade up to `7`; the HUD should render health as segmented bars, not a single continuous bar.
+- Ship-local health indicators should be inside the main orb. Use a small inner circle/arc: full health is a full inner circle, damage pulls the arc back symmetrically from both sides, and near-death leaves only the bottom dot. Do not draw external rings, gauges, or bars around the ship.
 - One health bar is currently `100` HP. Player-facing health upgrade text should use bars, such as `1 HP BAR PER 20S`, not raw HP numbers unless raw combat math is being debugged.
 - Player resource counts should allow up to `999` of each resource type and clamp there.
 - Mining progress belongs to the tile/resource phase, not just the player input hold. If a player mines a diamond for `3s`, stops, then returns later, the remaining mine time should be about `2s`; progress should clear only when that phase completes or the tile phase changes.
@@ -79,3 +81,14 @@ LLM instructions
 - Upgrade visuals should remain procedural and 1-bit: RANGE changes actual ray length, POWER increases ray rotation and impact particle density, SPEED increases the shared thruster plume, and HEALTH increases segmented HP bars.
 - Pressing `t` should open a talk input without clearing the existing talk bubble. The hidden input exists only for browser text editing behavior; visible chat UI and persistent talk bubbles should render into the canvas with crisp 1-bit bitmap text, including selection/highlight state.
 - Active asteroid boundary generation should avoid world-edge clipping. Generate asteroid mass with an edge margin inside a tile field large enough for the morphology radius, then derive the playable mask with padded dilate/shrink morphology so the final visible boundary is organic and not a hidden square world bound.
+- The core room loop is now explicitly part of the game design: browser clients keep a stable local client id, refresh should reattach them to their active room unless they intentionally leave, rooms move through MENU/WAITING/ACTIVE/ENDED, and the ended state must expose a clear winner.
+- Client room identity must use a persisted private `clientSecret` paired with the visible client id. Refresh/reconnect should preserve that secret, stale sockets must not be allowed to keep sending input, and each page load should use a fresh input session so reset sequence numbers are accepted.
+- The server must support many simultaneous rooms, not a singleton current room. Socket events, snapshots, asteroid updates, countdowns, starts, leaves, and reconnects must route by the client room membership. `READY` may join an available non-counting-down waiting room or create another; it must not be blocked by unrelated active matches.
+- Refresh/reconnect must resume by a stored `roomId` through a resume-only event. It must not call `READY`, because `READY` is allowed to create/join waiting rooms and would incorrectly move menu clients into a lobby.
+- The waiting room should feel like a pregame arena: ready joins the active waiting room, players can fly around together while waiting, the first joined client can start early, the game starts at 8 players, early start, or 5 minutes after the first join.
+- Waiting-room combat should not damage players. Pregame interaction can be disposable because the actual match starts from a fresh seeded arena with fresh spawns/resources.
+- Player spawn positions should be seed-randomized and spread across available spawn slots, not assigned directly from join order. Lobby spawns and active-match spawns should both avoid deterministic player-one/player-two compass positions.
+- READY on the initial menu is a normal instant screen button with hover state. The waiting lobby is not the asteroid field; it is a small boxed-in arena with physical START/LEAVE button objects. Those physical lobby buttons should not show hover state or loading bars; they trigger instantly from the actual authoritative mining ray collision.
+- Starting the match from the lobby should not immediately begin the active game. START arms the same 10-second countdown used by the natural timer, emits one mechanical beep for everyone, and then starts when the countdown reaches zero. The natural five-minute timer should emit that same beep when it reaches 10 seconds remaining.
+- Do not expose implementation details like host names in the waiting lobby UI unless explicitly requested.
+- Eliminated players should continue spectating the player who killed them when possible, otherwise another surviving player, until the game ends or they leave. The ended overlay is player-relative: winners see `YOU WON!`; losers see `GAME OVER`.

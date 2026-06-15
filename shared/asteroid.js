@@ -100,6 +100,55 @@ export function createAsteroid(options = {}) {
   };
 }
 
+export function createLobbyAsteroid(options = {}) {
+  const seed = options.seed || "bitspace-lobby";
+  const widthTiles = options.widthTiles || 48;
+  const heightTiles = options.heightTiles || 48;
+  const tiles = new Array(widthTiles * heightTiles).fill(ASTEROID_TILE.empty);
+  const amounts = new Uint8Array(widthTiles * heightTiles);
+  const playable = new Array(widthTiles * heightTiles).fill(false);
+  const margin = options.marginTiles || 4;
+  const minTileX = margin;
+  const minTileY = margin;
+  const maxTileX = widthTiles - margin - 1;
+  const maxTileY = heightTiles - margin - 1;
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      playable[tileY * widthTiles + tileX] = true;
+    }
+  }
+
+  const centerX = ((minTileX + maxTileX + 1) / 2) * RENDER.tileSize;
+  const centerY = ((minTileY + maxTileY + 1) / 2) * RENDER.tileSize;
+  const orbitRadius = options.spawnRadius || 92;
+  const pockets = Array.from({ length: ENGINE.maxPlayers }, (_unused, index) => {
+    const angle = Math.PI / 4 + (index * Math.PI * 2) / ENGINE.maxPlayers;
+    return {
+      playerNumber: index + 1,
+      tileX: Math.round(centerX / RENDER.tileSize),
+      tileY: Math.round(centerY / RENDER.tileSize),
+      radius: 0,
+      spawnX: centerX + Math.cos(angle) * orbitRadius,
+      spawnY: centerY + Math.sin(angle) * orbitRadius
+    };
+  });
+
+  return {
+    seed,
+    widthTiles,
+    heightTiles,
+    tileSize: RENDER.tileSize,
+    generation: {
+      mode: "lobby"
+    },
+    tiles,
+    amounts,
+    playable,
+    pockets
+  };
+}
+
 export function serializeAsteroid(asteroid) {
   return {
     seed: asteroid.seed,
