@@ -93,3 +93,4 @@ LLM instructions
 - Starting the match from the lobby should not immediately begin the active game. START arms the same 10-second countdown used by the natural timer, emits one mechanical beep for everyone, and then starts when the countdown reaches zero. The natural five-minute timer should emit that same beep when it reaches 10 seconds remaining.
 - Do not expose implementation details like host names in the waiting lobby UI unless explicitly requested.
 - Eliminated players should continue spectating the player who killed them when possible, otherwise another surviving player, until the game ends or they leave. The ended overlay is player-relative: winners see `YOU WON!`; losers see `GAME OVER`.
+- When a player is eliminated, show a brief authoritative 1-bit canvas notification at the top right: `A PLAYER HAS BEEN ELIMINATED`. Drive it from snapshot alive-state transitions, not local prediction.

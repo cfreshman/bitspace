@@ -20,6 +20,8 @@ const ROOM_ID_PATTERN = /^room-\d+$/;
 const PREDICTION_SNAP_DISTANCE = 96;
 const PREDICTION_POSITION_CORRECTION = 0.08;
 const PREDICTION_VELOCITY_CORRECTION = 0.2;
+const ELIMINATION_NOTICE_SECONDS = 4;
+const ELIMINATION_NOTICE_MAX = 3;
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -55,6 +57,9 @@ const state = {
     player: null,
     lastTimeSeconds: 0
   },
+  eliminationNotices: [],
+  playerAliveById: new Map(),
+  lastRoomId: null,
   inputSeq: 0,
   mouse: {
     x: 0,
@@ -114,11 +119,18 @@ socket.on(SERVER_EVENTS.room, (room) => {
   }
   state.room = room;
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  if (state.lastRoomId !== (room?.roomId || null)) {
+    state.lastRoomId = room?.roomId || null;
+    state.eliminationNotices = [];
+    state.playerAliveById.clear();
+  }
 
   if (!room || room.state === "menu") {
     state.snapshot = null;
     state.asteroid = null;
     state.prediction.player = null;
+    state.eliminationNotices = [];
+    state.playerAliveById.clear();
     state.upgrades.active = false;
     state.mouse.down = false;
     forgetRegisteredRoom();
@@ -132,6 +144,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
 });
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
+  recordEliminations(snapshot, performance.now() / 1000);
   state.snapshot = snapshot;
   reconcilePrediction(snapshot, performance.now() / 1000);
 });
@@ -326,6 +339,7 @@ requestAnimationFrame(draw);
 function draw(now = 0) {
   const timeSeconds = now / 1000;
 
+  pruneEliminationNotices(timeSeconds);
   updatePrediction(timeSeconds);
   updateAimFromSnapshot();
   const cameraPlayerId = cameraPlayerIdForRoom();
@@ -344,6 +358,7 @@ function draw(now = 0) {
     aimAngle: state.mouse.aimAngle,
     mining: state.mouse.down && !state.chat.active && !state.upgrades.active && !isInputBlocked(),
     predictedPlayer: predictedLocalPlayer(),
+    eliminationNotices: state.eliminationNotices,
     timeSeconds
   });
   requestAnimationFrame(draw);
@@ -646,6 +661,38 @@ function predictedLocalPlayer() {
     mining: predicted.mining,
     thrusting: predicted.thrusting
   };
+}
+
+function recordEliminations(snapshot, timeSeconds) {
+  if (state.room?.state !== "active" && state.room?.state !== "ended") {
+    for (const player of snapshot.players || []) {
+      state.playerAliveById.set(player.id, player.alive === true);
+    }
+    return;
+  }
+
+  for (const player of snapshot.players || []) {
+    const wasAlive = state.playerAliveById.get(player.id);
+    if (wasAlive === true && player.alive === false) {
+      state.eliminationNotices.push({
+        id: `${player.id}:${player.eliminatedAtTick ?? snapshot.tick}:${timeSeconds}`,
+        text: "A PLAYER HAS BEEN ELIMINATED",
+        createdAt: timeSeconds,
+        expiresAt: timeSeconds + ELIMINATION_NOTICE_SECONDS
+      });
+      state.eliminationNotices = state.eliminationNotices.slice(-ELIMINATION_NOTICE_MAX);
+    }
+
+    state.playerAliveById.set(player.id, player.alive === true);
+  }
+}
+
+function pruneEliminationNotices(timeSeconds) {
+  if (state.eliminationNotices.length === 0) {
+    return;
+  }
+
+  state.eliminationNotices = state.eliminationNotices.filter((notice) => notice.expiresAt > timeSeconds);
 }
 
 function axis(positiveKeyA, positiveKeyB, negativeKeyA, negativeKeyB) {

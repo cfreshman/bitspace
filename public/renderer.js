@@ -388,6 +388,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer);
   }
   drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
+  drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
   drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
 }
 
@@ -497,6 +498,31 @@ function drawEndedOverlay(ctx, room, options, colors, textRenderer) {
     color: colors.foreground
   });
   drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds = 0) {
+  const activeNotices = notices
+    .filter((notice) => notice.expiresAt > timeSeconds)
+    .slice(-3)
+    .reverse();
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+
+  activeNotices.forEach((notice, index) => {
+    const textWidth = textRenderer.measure(notice.text, textOptions);
+    const panelWidth = Math.min(RENDER.width - 16, textWidth + 10);
+    const panelHeight = 15;
+    const x = RENDER.width - panelWidth - 8;
+    const y = 8 + index * (panelHeight + 3);
+
+    drawPanel(ctx, x, y, panelWidth, panelHeight, colors);
+    textRenderer.draw(ctx, notice.text, x + 5, y + 4, {
+      ...textOptions,
+      width: panelWidth - 10
+    });
+  });
 }
 
 function drawRoomButtons(ctx, options, colors, textRenderer) {
