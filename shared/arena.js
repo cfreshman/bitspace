@@ -363,7 +363,7 @@ function stepPlayer(arena, player, dtSeconds) {
   } else {
     player.miningHoldSeconds = 0;
   }
-  player.rayExtension = clamp(player.miningHoldSeconds / ENGINE.mining.rayExtendSeconds, 0, 1);
+  player.rayExtension = miningRayExtension(player.mining, player.miningHoldSeconds);
   rechargePlayerHealth(arena, player, dtSeconds, effects);
 
   const fixedStepSeconds = 1 / ENGINE.tickRate;
@@ -865,6 +865,15 @@ function playerMaxSpeed(player, effects = aggregateUpgradeEffects(player.upgrade
 
 function playerMiningRayLength(player, effects = aggregateUpgradeEffects(player.upgrades)) {
   return ENGINE.mining.rayLength + effects.rayLengthBonus;
+}
+
+function miningRayExtension(mining, holdSeconds) {
+  if (!mining) {
+    return 0;
+  }
+
+  const extendSeconds = ENGINE.mining.rayExtendSeconds;
+  return extendSeconds <= 0 ? 1 : clamp(holdSeconds / extendSeconds, 0, 1);
 }
 
 function syncPlayerDerivedStats(player) {

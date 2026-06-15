@@ -611,7 +611,7 @@ function updateMenuSimulation(timeSeconds) {
   } else {
     player.miningHoldSeconds = 0;
   }
-  player.rayExtension = clamp(player.miningHoldSeconds / ENGINE.mining.rayExtendSeconds, 0, 1);
+  player.rayExtension = miningRayExtension(player.mining, player.miningHoldSeconds);
 
   const fixedStepSeconds = 1 / ENGINE.tickRate;
   const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
@@ -1351,7 +1351,7 @@ function updatePrediction(timeSeconds) {
   } else {
     predicted.miningHoldSeconds = 0;
   }
-  predicted.rayExtension = clamp(predicted.miningHoldSeconds / ENGINE.mining.rayExtendSeconds, 0, 1);
+  predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
   predicted.thrusting = isMoving;
 
   const fixedStepSeconds = 1 / ENGINE.tickRate;
@@ -1943,6 +1943,15 @@ function clampMagnitude(x, y, maxMagnitude) {
     x: x * scale,
     y: y * scale
   };
+}
+
+function miningRayExtension(mining, holdSeconds) {
+  if (!mining) {
+    return 0;
+  }
+
+  const extendSeconds = ENGINE.mining.rayExtendSeconds;
+  return extendSeconds <= 0 ? 1 : clamp(holdSeconds / extendSeconds, 0, 1);
 }
 
 function normalizeAngle(angle) {

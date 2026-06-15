@@ -282,6 +282,14 @@ export function createRoomManager(options = {}) {
 
     for (const room of Array.from(rooms.values())) {
       if (room.state === ROOM_STATES.waiting && room.arena) {
+        const expiryEvent = expireWaitingRoomParticipants(room);
+        if (expiryEvent) {
+          events.push(expiryEvent);
+          if (expiryEvent.emptied) {
+            continue;
+          }
+        }
+
         if (room.participants.size > 0 && !room.countdownArmed) {
           const remainingMs = room.autoStartAtMs - now();
           if (remainingMs <= ENGINE.lobby.countdownSeconds * 1000) {
@@ -518,6 +526,52 @@ export function createRoomManager(options = {}) {
     room.winnerId = winner?.id ?? null;
     room.winnerName = winner?.name ?? null;
     return true;
+  }
+
+  function expireWaitingRoomParticipants(room) {
+    if (room.state !== ROOM_STATES.waiting || !room.arena || room.participants.size === 0) {
+      return null;
+    }
+
+    const cutoffMs = now() - HEARTBEAT_TIMEOUT_MS;
+    const removed = [];
+    for (const participant of Array.from(room.participants.values())) {
+      const heartbeatAtMs = participant.lastHeartbeatAtMs ??
+        participant.joinedAtMs ??
+        room.createdAtMs;
+      if (heartbeatAtMs > cutoffMs) {
+        continue;
+      }
+
+      removed.push({
+        clientId: participant.clientId,
+        socketId: participant.socketId
+      });
+      room.participants.delete(participant.clientId);
+      room.arena.players.delete(participant.clientId);
+      clientRooms.delete(participant.clientId);
+    }
+
+    if (removed.length === 0) {
+      return null;
+    }
+
+    if (!room.participants.has(room.hostClientId)) {
+      room.hostClientId = firstParticipantId(room);
+    }
+    syncLobbyHosts(room);
+
+    const emptied = room.participants.size === 0;
+    if (emptied) {
+      destroyRoom(room);
+    }
+
+    return {
+      type: "waiting-expired",
+      room,
+      removed,
+      emptied
+    };
   }
 
   function expireActiveHeartbeatTimeouts(room) {

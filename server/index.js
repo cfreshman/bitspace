@@ -282,6 +282,19 @@ setInterval(() => {
 
   const events = roomManager.stepActiveArena(dtSeconds, stepArena);
   for (const event of events) {
+    if (event.type === "waiting-expired") {
+      for (const removed of event.removed || []) {
+        const staleSocket = removed.socketId ? io.sockets.sockets.get(removed.socketId) : null;
+        staleSocket?.leave(roomChannel(event.room));
+        staleSocket && emitRoom(staleSocket);
+      }
+      if (!event.emptied) {
+        broadcastRoom(event.room);
+        broadcastGameState(event.room);
+      }
+      continue;
+    }
+
     if (event.type === "left") {
       const leavingSocket = event.socketId ? io.sockets.sockets.get(event.socketId) : null;
       if (event.beep) {

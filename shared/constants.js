@@ -44,7 +44,7 @@ export const ENGINE = Object.freeze({
   },
   mining: {
     rayLength: 28,
-    rayExtendSeconds: 0.25,
+    rayExtendSeconds: 0,
     buttonSeconds: 0.25,
     playerDamagePerSecond: 45,
     rockSeconds: 0.5,
