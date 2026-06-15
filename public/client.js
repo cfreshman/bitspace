@@ -31,6 +31,10 @@ const PREDICTION_POSITION_CORRECTION = 0.08;
 const PREDICTION_VELOCITY_CORRECTION = 0.2;
 const ELIMINATION_NOTICE_SECONDS = 4;
 const ELIMINATION_NOTICE_MAX = 3;
+const ENGINE_AUDIO_MAX_GAIN = 0.032;
+const MINING_AUDIO_MAX_GAIN = 0.034;
+const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
+const AUDIO_COLLISION_CLUNK_SPEED = 18;
 const MENU_PLAYER_ID = "menu-player";
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
@@ -81,7 +85,12 @@ const inputSessionId = randomClientSecret();
 const audio = {
   context: null,
   unlocked: false,
-  pendingBeeps: 0
+  pendingBeeps: 0,
+  ship: null,
+  lastHealth: null,
+  lastShake: 0,
+  lastClunkAtSeconds: 0,
+  pendingDamage: 0
 };
 const state = {
   clientId: storedClientId,
@@ -185,6 +194,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
     state.build.active = false;
     state.menu.readySent = false;
     state.menu.activeTargetId = null;
+    resetLocalDamageAudioState();
     enterMenuRoom(MENU_ROOMS.ready);
     forgetRegisteredRoom();
     return;
@@ -194,6 +204,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
   if (previousState !== room.state || previousRoomId !== nextRoomId) {
     state.upgrades.active = false;
     state.build.active = false;
+    resetLocalDamageAudioState();
     cancelMiningRay();
   }
   if (room?.state === "menu") {
@@ -204,6 +215,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   const receivedAtSeconds = performance.now() / 1000;
   snapshot.receivedAtSeconds = receivedAtSeconds;
+  updateLocalDamageAudio(snapshot, receivedAtSeconds);
   recordEliminations(snapshot, receivedAtSeconds);
   state.snapshot = snapshot;
   if (state.asteroid) {
@@ -489,6 +501,10 @@ function draw(now = 0) {
   const snapshot = readyMenu ? menuSnapshot() : state.snapshot;
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
+  const audioPlayer = readyMenu
+    ? menuPlayer
+    : predictedLocalPlayer() || localPlayerFromSnapshot();
+  updateLocalShipAudio(audioPlayer, timeSeconds);
   renderer.draw(snapshot, {
     playerId,
     cameraPlayerId: readyMenu ? MENU_PLAYER_ID : cameraPlayerId,
@@ -879,6 +895,7 @@ function resolveMenuAsteroidCollisions(player) {
 
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       if (normalSpeed < 0) {
+        requestCollisionClunk(-normalSpeed);
         player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
         player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
       }
@@ -1492,6 +1509,228 @@ function playMechanicalTone(context, frequency, start, duration, volume) {
   oscillator.stop(start + duration + 0.02);
 }
 
+function updateLocalShipAudio(player, timeSeconds) {
+  const context = audio.context;
+  if (!audio.unlocked || !context || context.state !== "running") {
+    return;
+  }
+
+  ensureShipAudio(context);
+  const alive = player && player.alive !== false;
+  const speed = alive ? Math.hypot(player.vx || 0, player.vy || 0) : 0;
+  const speedLevel = clamp(speed / Math.max(1, ENGINE.ship.maxSpeed), 0, 1);
+  const engineLevel = alive && player.thrusting ? Math.max(0.28, speedLevel) : 0;
+  const miningActive = alive && player.mining === true;
+  const miningContact = miningActive && player.miningRay?.hit === true;
+
+  updateEngineAudio(context, engineLevel, speedLevel, timeSeconds);
+  updateMiningAudio(context, miningActive, miningContact, timeSeconds);
+  flushPendingDamageClunk(timeSeconds);
+}
+
+function updateLocalDamageAudio(snapshot, timeSeconds) {
+  const player = snapshot.players.find((candidate) => candidate.id === state.playerId);
+  if (!player) {
+    return;
+  }
+
+  if (audio.lastHealth !== null) {
+    const damage = audio.lastHealth - player.health;
+    if (damage > 0.01) {
+      audio.pendingDamage = Math.min(
+        audio.pendingDamage + damage,
+        ENGINE.player.healthPerBar * 2
+      );
+      flushPendingDamageClunk(timeSeconds);
+    }
+  }
+
+  if (audio.lastShake !== null && player.shake > audio.lastShake + 0.04) {
+    requestLocalClunk(0.45 + player.shake * 0.25, timeSeconds);
+  }
+
+  audio.lastHealth = player.health;
+  audio.lastShake = player.shake || 0;
+}
+
+function flushPendingDamageClunk(timeSeconds = performance.now() / 1000) {
+  if (audio.pendingDamage <= 0) {
+    return;
+  }
+
+  const intensity = 0.38 + audio.pendingDamage / 36;
+  if (requestLocalClunk(intensity, timeSeconds)) {
+    audio.pendingDamage = 0;
+  }
+}
+
+function resetLocalDamageAudioState() {
+  audio.lastHealth = null;
+  audio.lastShake = 0;
+  audio.pendingDamage = 0;
+}
+
+function ensureShipAudio(context) {
+  if (audio.ship) {
+    return;
+  }
+
+  const engineGain = context.createGain();
+  const engineFilter = context.createBiquadFilter();
+  const engineNoise = context.createBufferSource();
+  const engineOscillator = context.createOscillator();
+  const engineOscillatorGain = context.createGain();
+  const miningGain = context.createGain();
+  const miningOscillators = [1, 1.52, 2.01].map((ratio, index) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = 260 * ratio;
+    gain.gain.value = index === 0 ? 0.62 : index === 1 ? 0.28 : 0.16;
+    oscillator.connect(gain);
+    gain.connect(miningGain);
+    oscillator.start();
+    return { oscillator, ratio };
+  });
+
+  engineNoise.buffer = createNoiseBuffer(context, 1);
+  engineNoise.loop = true;
+  engineFilter.type = "lowpass";
+  engineFilter.frequency.value = 95;
+  engineFilter.Q.value = 0.85;
+  engineGain.gain.value = 0.0001;
+
+  engineOscillator.type = "sawtooth";
+  engineOscillator.frequency.value = 44;
+  engineOscillatorGain.gain.value = 0.006;
+
+  engineNoise.connect(engineFilter);
+  engineOscillator.connect(engineOscillatorGain);
+  engineOscillatorGain.connect(engineFilter);
+  engineFilter.connect(engineGain);
+  engineGain.connect(context.destination);
+
+  miningGain.gain.value = 0.0001;
+  miningGain.connect(context.destination);
+
+  engineNoise.start();
+  engineOscillator.start();
+
+  audio.ship = {
+    engineGain,
+    engineFilter,
+    engineOscillator,
+    engineOscillatorGain,
+    miningGain,
+    miningOscillators
+  };
+}
+
+function updateEngineAudio(context, engineLevel, speedLevel, timeSeconds) {
+  const shipAudio = audio.ship;
+  const now = context.currentTime;
+  const targetGain = engineLevel > 0
+    ? ENGINE_AUDIO_MAX_GAIN * (0.45 + engineLevel * 0.55)
+    : 0.0001;
+  const filterFrequency = 80 + speedLevel * 210 + Math.sin(timeSeconds * 18) * 7;
+  const oscillatorFrequency = 38 + speedLevel * 27 + Math.sin(timeSeconds * 9) * 2;
+
+  setAudioTarget(shipAudio.engineGain.gain, targetGain, now, 0.045);
+  setAudioTarget(shipAudio.engineFilter.frequency, filterFrequency, now, 0.055);
+  setAudioTarget(shipAudio.engineOscillator.frequency, oscillatorFrequency, now, 0.06);
+  setAudioTarget(shipAudio.engineOscillatorGain.gain, engineLevel > 0 ? 0.006 : 0.0001, now, 0.05);
+}
+
+function updateMiningAudio(context, active, contact, timeSeconds) {
+  const shipAudio = audio.ship;
+  const now = context.currentTime;
+  const targetGain = active
+    ? MINING_AUDIO_MAX_GAIN * (contact ? 1 : 0.74)
+    : 0.0001;
+  const baseFrequency = 310 + Math.sin(timeSeconds * 7.5) * 18 + (contact ? 32 : 0);
+
+  setAudioTarget(shipAudio.miningGain.gain, targetGain, now, 0.025);
+  shipAudio.miningOscillators.forEach(({ oscillator, ratio }, index) => {
+    const wobble = Math.sin(timeSeconds * (5 + index * 1.7) + index * 2.1) * (4 + index * 3);
+    setAudioTarget(oscillator.frequency, baseFrequency * ratio + wobble, now, 0.035);
+  });
+}
+
+function requestCollisionClunk(speed) {
+  if (speed < AUDIO_COLLISION_CLUNK_SPEED) {
+    return;
+  }
+
+  requestLocalClunk(0.45 + (speed - AUDIO_COLLISION_CLUNK_SPEED) / 55);
+}
+
+function requestLocalClunk(intensity = 1, timeSeconds = performance.now() / 1000) {
+  const context = audio.context;
+  if (!audio.unlocked || !context || context.state !== "running") {
+    return false;
+  }
+
+  if (timeSeconds - audio.lastClunkAtSeconds < AUDIO_CLUNK_COOLDOWN_SECONDS) {
+    return false;
+  }
+
+  audio.lastClunkAtSeconds = timeSeconds;
+  playLocalClunk(context, clamp(intensity, 0.25, 1.6));
+  return true;
+}
+
+function playLocalClunk(context, intensity) {
+  const start = context.currentTime + 0.004;
+  const noise = context.createBufferSource();
+  const noiseFilter = context.createBiquadFilter();
+  const noiseGain = context.createGain();
+  const oscillator = context.createOscillator();
+  const oscillatorGain = context.createGain();
+
+  noise.buffer = audio.clunkBuffer || createNoiseBuffer(context, 0.14);
+  audio.clunkBuffer = noise.buffer;
+  noiseFilter.type = "bandpass";
+  noiseFilter.frequency.setValueAtTime(260, start);
+  noiseFilter.frequency.exponentialRampToValueAtTime(110, start + 0.11);
+  noiseFilter.Q.value = 0.9;
+  noiseGain.gain.setValueAtTime(0.0001, start);
+  noiseGain.gain.exponentialRampToValueAtTime(0.055 * intensity, start + 0.006);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
+
+  oscillator.type = "square";
+  oscillator.frequency.setValueAtTime(155 + intensity * 18, start);
+  oscillator.frequency.exponentialRampToValueAtTime(72, start + 0.13);
+  oscillatorGain.gain.setValueAtTime(0.0001, start);
+  oscillatorGain.gain.exponentialRampToValueAtTime(0.04 * intensity, start + 0.006);
+  oscillatorGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.14);
+
+  noise.connect(noiseFilter);
+  noiseFilter.connect(noiseGain);
+  noiseGain.connect(context.destination);
+  oscillator.connect(oscillatorGain);
+  oscillatorGain.connect(context.destination);
+  noise.start(start);
+  noise.stop(start + 0.15);
+  oscillator.start(start);
+  oscillator.stop(start + 0.16);
+}
+
+function createNoiseBuffer(context, seconds) {
+  const frameCount = Math.max(1, Math.floor(context.sampleRate * seconds));
+  const buffer = context.createBuffer(1, frameCount, context.sampleRate);
+  const channel = buffer.getChannelData(0);
+
+  for (let index = 0; index < frameCount; index += 1) {
+    channel[index] = Math.random() * 2 - 1;
+  }
+
+  return buffer;
+}
+
+function setAudioTarget(param, value, time, timeConstant) {
+  param.setTargetAtTime(Math.max(0.0001, value), time, timeConstant);
+}
+
 function readInput() {
   state.inputSeq += 1;
   if (state.chat.active || isInputBlocked()) {
@@ -1677,6 +1916,7 @@ function resolvePredictionAsteroidCollisions(player) {
 
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       if (normalSpeed < 0) {
+        requestCollisionClunk(-normalSpeed);
         player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
         player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
       }
@@ -1716,6 +1956,7 @@ function resolvePredictionPlayerCollisions(player) {
 
     const normalSpeed = player.vx * normalX + player.vy * normalY;
     if (normalSpeed < 0) {
+      requestCollisionClunk(-normalSpeed);
       player.vx -= (1 + ENGINE.collision.shipRestitution) * normalSpeed * normalX;
       player.vy -= (1 + ENGINE.collision.shipRestitution) * normalSpeed * normalY;
     }
