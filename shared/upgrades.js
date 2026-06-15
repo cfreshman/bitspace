@@ -1,3 +1,11 @@
+const CORE_UPGRADE_COSTS = Object.freeze([
+  Object.freeze({ ore: 12 }),
+  Object.freeze({ ore: 26, diamond: 1 }),
+  Object.freeze({ ore: 45, diamond: 2 }),
+  Object.freeze({ ore: 70, diamond: 3 }),
+  Object.freeze({ ore: 100, diamond: 4 })
+]);
+
 export const UPGRADE_DEFINITIONS = Object.freeze([
   {
     id: "speed",
@@ -9,27 +17,27 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     visual: "Longer shared thruster plume.",
     levels: Object.freeze([
       {
-        cost: { ore: 4 },
+        cost: CORE_UPGRADE_COSTS[0],
         effectText: "+45% THRUST / +32% SPEED",
         effects: { thrustMultiplier: 1.45, maxSpeedMultiplier: 1.32, thrusterParticleMultiplier: 1.35 }
       },
       {
-        cost: { ore: 9 },
+        cost: CORE_UPGRADE_COSTS[1],
         effectText: "+75% THRUST / +58% SPEED",
         effects: { thrustMultiplier: 1.75, maxSpeedMultiplier: 1.58, thrusterParticleMultiplier: 1.55 }
       },
       {
-        cost: { ore: 18, diamond: 1 },
+        cost: CORE_UPGRADE_COSTS[2],
         effectText: "+105% THRUST / +82% SPEED",
         effects: { thrustMultiplier: 2.05, maxSpeedMultiplier: 1.82, thrusterParticleMultiplier: 1.75 }
       },
       {
-        cost: { ore: 30, diamond: 2 },
+        cost: CORE_UPGRADE_COSTS[3],
         effectText: "+135% THRUST / +105% SPEED",
         effects: { thrustMultiplier: 2.35, maxSpeedMultiplier: 2.05, thrusterParticleMultiplier: 1.95 }
       },
       {
-        cost: { ore: 45, diamond: 4 },
+        cost: CORE_UPGRADE_COSTS[4],
         effectText: "+170% THRUST / +128% SPEED",
         effects: { thrustMultiplier: 2.7, maxSpeedMultiplier: 2.28, thrusterParticleMultiplier: 2.2 }
       }
@@ -44,11 +52,11 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     baseStatText: "100% RAY RANGE",
     visual: "Mining ray endpoint reaches farther.",
     levels: Object.freeze([
-      { cost: { ore: 6 }, effectText: "+18% RAY RANGE", effects: { rayLengthBonus: 5 } },
-      { cost: { ore: 12 }, effectText: "+36% RAY RANGE", effects: { rayLengthBonus: 10 } },
-      { cost: { ore: 22, diamond: 1 }, effectText: "+57% RAY RANGE", effects: { rayLengthBonus: 16 } },
-      { cost: { ore: 36, diamond: 2 }, effectText: "+82% RAY RANGE", effects: { rayLengthBonus: 23 } },
-      { cost: { ore: 55, diamond: 4 }, effectText: "+111% RAY RANGE", effects: { rayLengthBonus: 31 } }
+      { cost: CORE_UPGRADE_COSTS[0], effectText: "+25% RAY RANGE", effects: { rayLengthBonus: 7 } },
+      { cost: CORE_UPGRADE_COSTS[1], effectText: "+61% RAY RANGE", effects: { rayLengthBonus: 17 } },
+      { cost: CORE_UPGRADE_COSTS[2], effectText: "+100% RAY RANGE", effects: { rayLengthBonus: 28 } },
+      { cost: CORE_UPGRADE_COSTS[3], effectText: "+150% RAY RANGE", effects: { rayLengthBonus: 42 } },
+      { cost: CORE_UPGRADE_COSTS[4], effectText: "+221% RAY RANGE", effects: { rayLengthBonus: 62 } }
     ])
   },
   {
@@ -61,53 +69,53 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     visual: "Mining ray rotates faster and hits harder.",
     levels: Object.freeze([
       {
-        cost: { ore: 10 },
-        effectText: "+15% RAY POWER",
+        cost: CORE_UPGRADE_COSTS[0],
+        effectText: "+30% RAY POWER",
         effects: {
-          miningPowerMultiplier: 1.15,
-          rayDamageMultiplier: 1.15,
-          raySpinMultiplier: 1.18,
-          miningParticleMultiplier: 1.1
+          miningPowerMultiplier: 1.3,
+          rayDamageMultiplier: 1.3,
+          raySpinMultiplier: 1.32,
+          miningParticleMultiplier: 1.18
         }
       },
       {
-        cost: { ore: 22, diamond: 1 },
-        effectText: "+32% RAY POWER",
+        cost: CORE_UPGRADE_COSTS[1],
+        effectText: "+70% RAY POWER",
         effects: {
-          miningPowerMultiplier: 1.32,
-          rayDamageMultiplier: 1.32,
-          raySpinMultiplier: 1.4,
-          miningParticleMultiplier: 1.22
-        }
-      },
-      {
-        cost: { ore: 40, diamond: 2 },
-        effectText: "+52% RAY POWER",
-        effects: {
-          miningPowerMultiplier: 1.52,
-          rayDamageMultiplier: 1.52,
-          raySpinMultiplier: 1.68,
+          miningPowerMultiplier: 1.7,
+          rayDamageMultiplier: 1.7,
+          raySpinMultiplier: 1.72,
           miningParticleMultiplier: 1.36
         }
       },
       {
-        cost: { ore: 62, diamond: 4 },
-        effectText: "+75% RAY POWER",
+        cost: CORE_UPGRADE_COSTS[2],
+        effectText: "+125% RAY POWER",
         effects: {
-          miningPowerMultiplier: 1.75,
-          rayDamageMultiplier: 1.75,
-          raySpinMultiplier: 2,
-          miningParticleMultiplier: 1.52
+          miningPowerMultiplier: 2.25,
+          rayDamageMultiplier: 2.25,
+          raySpinMultiplier: 2.2,
+          miningParticleMultiplier: 1.58
         }
       },
       {
-        cost: { ore: 90, diamond: 7 },
-        effectText: "+105% RAY POWER",
+        cost: CORE_UPGRADE_COSTS[3],
+        effectText: "+200% RAY POWER",
         effects: {
-          miningPowerMultiplier: 2.05,
-          rayDamageMultiplier: 2.05,
-          raySpinMultiplier: 2.38,
-          miningParticleMultiplier: 1.72
+          miningPowerMultiplier: 3,
+          rayDamageMultiplier: 3,
+          raySpinMultiplier: 2.8,
+          miningParticleMultiplier: 1.82
+        }
+      },
+      {
+        cost: CORE_UPGRADE_COSTS[4],
+        effectText: "+300% RAY POWER",
+        effects: {
+          miningPowerMultiplier: 4,
+          rayDamageMultiplier: 4,
+          raySpinMultiplier: 3.6,
+          miningParticleMultiplier: 2.15
         }
       }
     ])
@@ -121,10 +129,10 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     baseStatText: "3 HP BARS",
     visual: "HUD health bar count increases up to seven.",
     levels: Object.freeze([
-      { cost: { ore: 12 }, effectText: "4 HP BARS", effects: { healthBarsBonus: 1 } },
-      { cost: { ore: 26, diamond: 1 }, effectText: "5 HP BARS", effects: { healthBarsBonus: 2 } },
-      { cost: { ore: 45, diamond: 3 }, effectText: "6 HP BARS", effects: { healthBarsBonus: 3 } },
-      { cost: { ore: 70, diamond: 6 }, effectText: "7 HP BARS", effects: { healthBarsBonus: 4 } }
+      { cost: CORE_UPGRADE_COSTS[1], effectText: "4 HP BARS", effects: { healthBarsBonus: 1 } },
+      { cost: CORE_UPGRADE_COSTS[2], effectText: "5 HP BARS", effects: { healthBarsBonus: 2 } },
+      { cost: CORE_UPGRADE_COSTS[3], effectText: "6 HP BARS", effects: { healthBarsBonus: 3 } },
+      { cost: CORE_UPGRADE_COSTS[4], effectText: "7 HP BARS", effects: { healthBarsBonus: 4 } }
     ])
   },
   {
@@ -136,10 +144,10 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     baseStatText: "NO REPAIR",
     visual: "Health returns slowly after a quiet window.",
     levels: Object.freeze([
-      { cost: { ore: 16, diamond: 1 }, effectText: "1 HP BAR PER 60S AFTER 5S", effects: { healthRechargePerSecond: 100 / 60 } },
-      { cost: { ore: 32, diamond: 2 }, effectText: "1 HP BAR PER 30S AFTER 5S", effects: { healthRechargePerSecond: 100 / 30 } },
-      { cost: { ore: 55, diamond: 4 }, effectText: "1 HP BAR PER 20S AFTER 5S", effects: { healthRechargePerSecond: 5 } },
-      { cost: { ore: 85, diamond: 7 }, effectText: "1 HP BAR PER 15S AFTER 5S", effects: { healthRechargePerSecond: 100 / 15 } }
+      { cost: CORE_UPGRADE_COSTS[1], effectText: "1 HP BAR PER 60S AFTER 5S", effects: { healthRechargePerSecond: 100 / 60 } },
+      { cost: CORE_UPGRADE_COSTS[2], effectText: "1 HP BAR PER 30S AFTER 5S", effects: { healthRechargePerSecond: 100 / 30 } },
+      { cost: CORE_UPGRADE_COSTS[3], effectText: "1 HP BAR PER 20S AFTER 5S", effects: { healthRechargePerSecond: 5 } },
+      { cost: CORE_UPGRADE_COSTS[4], effectText: "1 HP BAR PER 15S AFTER 5S", effects: { healthRechargePerSecond: 100 / 15 } }
     ])
   }
 ]);

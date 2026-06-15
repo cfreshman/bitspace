@@ -1,4 +1,5 @@
 import { ENGINE } from "/shared/constants.js";
+import { blockingTilesNearCircle } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import {
@@ -25,10 +26,11 @@ const ELIMINATION_NOTICE_MAX = 3;
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
-  width: 330,
-  rowTopOffset: 38,
-  rowHeight: 24,
-  rowInset: 12
+  width: 260,
+  rowTopOffset: 24,
+  rowHeight: 14,
+  rowInset: 8,
+  rowHitPadding: 2
 });
 const ROOM_BUTTONS = Object.freeze({
   ready: { x: 132, y: 216, width: 120, height: 28 },
@@ -641,6 +643,7 @@ function updatePrediction(timeSeconds) {
   predicted.vy = velocity.y;
   predicted.x += predicted.vx * dtSeconds;
   predicted.y += predicted.vy * dtSeconds;
+  resolvePredictionCollisions(predicted, effects);
 }
 
 function predictedLocalPlayer() {
@@ -661,6 +664,122 @@ function predictedLocalPlayer() {
     mining: predicted.mining,
     thrusting: predicted.thrusting
   };
+}
+
+function resolvePredictionCollisions(player, effects) {
+  resolvePredictionAsteroidCollisions(player);
+  resolvePredictionPlayerCollisions(player);
+  const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier);
+  player.vx = velocity.x;
+  player.vy = velocity.y;
+}
+
+function resolvePredictionAsteroidCollisions(player) {
+  if (!state.asteroid) {
+    return;
+  }
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    let resolved = false;
+    const blockers = blockingTilesNearCircle(state.asteroid, player.x, player.y, player.radius);
+
+    for (const blocker of blockers) {
+      const hit = circleTileOverlap(player, blocker);
+      if (!hit) {
+        continue;
+      }
+
+      player.x += hit.normalX * hit.overlap;
+      player.y += hit.normalY * hit.overlap;
+
+      const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
+      if (normalSpeed < 0) {
+        player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
+        player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
+      }
+
+      resolved = true;
+    }
+
+    if (!resolved) {
+      break;
+    }
+  }
+}
+
+function resolvePredictionPlayerCollisions(player) {
+  if (!state.snapshot) {
+    return;
+  }
+
+  for (const other of state.snapshot.players) {
+    if (!other.alive || other.id === player.id) {
+      continue;
+    }
+
+    const dx = player.x - other.x;
+    const dy = player.y - other.y;
+    const minDistance = (player.radius || ENGINE.ship.radius) + (other.radius || ENGINE.ship.radius);
+    const distance = Math.hypot(dx, dy);
+    if (distance >= minDistance) {
+      continue;
+    }
+
+    const normalX = distance > 0 ? dx / distance : Math.cos((player.number || 1) * 2.399);
+    const normalY = distance > 0 ? dy / distance : Math.sin((player.number || 1) * 2.399);
+    const overlap = minDistance - distance;
+    player.x += normalX * overlap;
+    player.y += normalY * overlap;
+
+    const normalSpeed = player.vx * normalX + player.vy * normalY;
+    if (normalSpeed < 0) {
+      player.vx -= (1 + ENGINE.collision.shipRestitution) * normalSpeed * normalX;
+      player.vy -= (1 + ENGINE.collision.shipRestitution) * normalSpeed * normalY;
+    }
+  }
+}
+
+function circleTileOverlap(circle, tile) {
+  const tileRight = tile.x + tile.size;
+  const tileBottom = tile.y + tile.size;
+  const closestX = clamp(circle.x, tile.x, tileRight);
+  const closestY = clamp(circle.y, tile.y, tileBottom);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+  const distanceSq = dx * dx + dy * dy;
+
+  if (distanceSq > 0) {
+    if (distanceSq >= circle.radius * circle.radius) {
+      return null;
+    }
+
+    const distance = Math.sqrt(distanceSq);
+    return {
+      normalX: dx / distance,
+      normalY: dy / distance,
+      overlap: circle.radius - distance
+    };
+  }
+
+  const left = circle.x - tile.x;
+  const right = tileRight - circle.x;
+  const top = circle.y - tile.y;
+  const bottom = tileBottom - circle.y;
+  const nearest = Math.min(left, right, top, bottom);
+
+  if (nearest === left) {
+    return { normalX: -1, normalY: 0, overlap: circle.radius + left };
+  }
+
+  if (nearest === right) {
+    return { normalX: 1, normalY: 0, overlap: circle.radius + right };
+  }
+
+  if (nearest === top) {
+    return { normalX: 0, normalY: -1, overlap: circle.radius + top };
+  }
+
+  return { normalX: 0, normalY: 1, overlap: circle.radius + bottom };
 }
 
 function recordEliminations(snapshot, timeSeconds) {
@@ -952,12 +1071,12 @@ function upgradeIndexAtPoint(x, y) {
   const rowTop = menuY + UPGRADE_MENU_LAYOUT.rowTopOffset;
   const rowBottom = rowTop + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
 
-  if (x < rowLeft || x > rowRight || y < rowTop - 6 || y >= rowBottom) {
+  if (x < rowLeft || x > rowRight || y < rowTop - UPGRADE_MENU_LAYOUT.rowHitPadding || y >= rowBottom) {
     return null;
   }
 
   return clamp(
-    Math.floor((y - rowTop + 6) / UPGRADE_MENU_LAYOUT.rowHeight),
+    Math.floor((y - rowTop + UPGRADE_MENU_LAYOUT.rowHitPadding) / UPGRADE_MENU_LAYOUT.rowHeight),
     0,
     UPGRADE_DEFINITIONS.length - 1
   );

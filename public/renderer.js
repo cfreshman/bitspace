@@ -29,18 +29,19 @@ const MAX_PARTICLES = 260;
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
-  width: 330,
-  padding: 12,
-  titleTop: 12,
-  rowTopOffset: 38,
-  rowHeight: 24,
-  rowInset: 12,
-  rowHighlightPadding: 4,
-  separatorGap: 10,
-  detailTopGap: 10,
-  detailLineHeight: 12,
+  width: 260,
+  padding: 8,
+  titleTop: 8,
+  rowTopOffset: 24,
+  rowHeight: 14,
+  rowInset: 8,
+  rowHighlightPadding: 2,
+  rowTextHeight: 7,
+  separatorGap: 6,
+  detailTopGap: 7,
+  detailLineHeight: 10,
   detailLineCount: 4,
-  bottomPadding: 12
+  bottomPadding: 8
 });
 const BITMAP_GLYPHS = Object.freeze({
   " ": ["000", "000", "000", "000", "000", "000", "000"],
@@ -1484,7 +1485,7 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
   ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
 
   textRenderer.draw(ctx, "UPGRADES", x + UPGRADE_MENU_LAYOUT.padding, y + UPGRADE_MENU_LAYOUT.titleTop, {
-    fontSize: 10,
+    fontSize: 8,
     color: colors.foreground
   });
 
@@ -1501,7 +1502,7 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
     const selected = index === selectedIndex;
     const rowY = rowTop + index * rowHeight;
     const levelText = `${level}/${definition.maxLevel}`;
-    const levelWidth = textRenderer.measure(levelText, { fontSize: 10 });
+    const levelWidth = textRenderer.measure(levelText, { fontSize: 8 });
     const labelX = rowX + 14;
 
     if (selected) {
@@ -1510,25 +1511,25 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
         rowX - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
         rowY - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
         rowRight - rowX + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2,
-        14 + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2
+        UPGRADE_MENU_LAYOUT.rowTextHeight + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2
       );
     }
 
     if (affordable) {
       textRenderer.draw(ctx, "+", rowX, rowY, {
-        fontSize: 10,
+        fontSize: 8,
         color: selected ? colors.background : colors.foreground,
         width: 10
       });
     }
 
     textRenderer.draw(ctx, definition.label, labelX, rowY, {
-      fontSize: 10,
+      fontSize: 8,
       color: selected ? colors.background : colors.foreground,
       width: 176
     });
     textRenderer.draw(ctx, levelText, rowRight - levelWidth, rowY, {
-      fontSize: 10,
+      fontSize: 8,
       color: selected ? colors.background : colors.foreground,
       width: levelWidth + 1
     });
@@ -1608,13 +1609,16 @@ function formatUpgradeCostLong(cost) {
 
 function drawHudHealthBars(ctx, x, y, width, height, health, maxHealth, bars, colors) {
   const gap = 1;
-  const segmentWidth = Math.max(3, Math.floor((width - gap * (bars - 1)) / bars));
+  const usableWidth = Math.max(bars, Math.floor(width) - gap * (bars - 1));
   const segmentHealth = maxHealth / bars;
 
   for (let index = 0; index < bars; index += 1) {
-    const segmentX = x + index * (segmentWidth + gap);
+    const segmentStart = Math.floor((usableWidth * index) / bars);
+    const segmentEnd = Math.floor((usableWidth * (index + 1)) / bars);
+    const segmentX = x + segmentStart + gap * index;
+    const segmentWidth = Math.max(1, segmentEnd - segmentStart);
     const segmentProgress = clamp((health - segmentHealth * index) / segmentHealth, 0, 1);
-    const fillWidth = Math.round((segmentWidth - 2) * segmentProgress);
+    const fillWidth = Math.max(0, Math.round((segmentWidth - 2) * segmentProgress));
 
     ctx.fillStyle = colors.foreground;
     ctx.fillRect(segmentX, y, segmentWidth, 1);
