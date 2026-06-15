@@ -52,6 +52,7 @@ LLM instructions
 - The rear boosters should produce one shared visual-only 1-bit particle plume from the point between the boosters while thrusting, with randomized particle velocities and lifetimes.
 - Star background should be a deterministic single layer. Larger/brighter 1-bit star shapes should appear at lower frequencies than smaller/dimmer stars, and the star layer should use parallax rather than moving 1:1 with the camera.
 - The camera should not be clamped to the map bounds. Do not keep a hidden square world boundary in asteroid-backed arenas. The playable asteroid boundary is the collision boundary.
+- Lobby and match playable boundaries should both render as dashed 1-bit boundary lines. Do not make the lobby box solid unless explicitly requested.
 - Bumping into other ships should produce a small physics bounce and minor screen shake. Static asteroid/boundary collisions should bounce but should not add screen shake. Screen shake must be implemented inside the renderer/camera, not with HTML or CSS transforms.
 - Asteroid fields may be non-contiguous, and interior cave pockets may be disconnected until players mine into them. Do not force all empty space to be connected if that destroys cave geometry.
 - Asteroid rock generation should be seeded 3D simplex density: low-frequency body field, domain warp, separate cave fields, radial falloff, and light mask cleanup. Do not create rock with hardcoded stamped disks, paths, straight tunnels, or body blobs.

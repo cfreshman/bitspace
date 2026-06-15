@@ -999,7 +999,6 @@ function projectPoint3D(point, centerX, centerY) {
 
 function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const solidBoundary = asteroid.generation?.mode === "lobby";
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
@@ -1023,40 +1022,22 @@ function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
       const screenY = Math.round(tileY * tileSize - camera.y);
 
       if (!isPlayableTile(asteroid, tileX - 1, tileY)) {
-        drawBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize, solidBoundary);
+        drawDashedBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize);
       }
 
       if (!isPlayableTile(asteroid, tileX + 1, tileY)) {
-        drawBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize, solidBoundary);
+        drawDashedBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize);
       }
 
       if (!isPlayableTile(asteroid, tileX, tileY - 1)) {
-        drawBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize, solidBoundary);
+        drawDashedBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize);
       }
 
       if (!isPlayableTile(asteroid, tileX, tileY + 1)) {
-        drawBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize, solidBoundary);
+        drawDashedBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize);
       }
     }
   }
-}
-
-function drawBoundaryVertical(ctx, x, y, length, worldY, solid) {
-  if (solid) {
-    ctx.fillRect(x, y, 1, length);
-    return;
-  }
-
-  drawDashedBoundaryVertical(ctx, x, y, length, worldY);
-}
-
-function drawBoundaryHorizontal(ctx, x, y, length, worldX, solid) {
-  if (solid) {
-    ctx.fillRect(x, y, length, 1);
-    return;
-  }
-
-  drawDashedBoundaryHorizontal(ctx, x, y, length, worldX);
 }
 
 function drawDashedBoundaryVertical(ctx, x, y, length, worldY) {
