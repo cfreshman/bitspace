@@ -63,22 +63,36 @@ const DEFAULT_GENERATION = Object.freeze({
 });
 
 export function createAsteroid(options = {}) {
+  return createNaturalAsteroid({
+    ...options,
+    seed: options.seed || "bitspace-asteroid"
+  });
+}
+
+export function createNaturalAsteroid(options = {}) {
   const config = {
     ...DEFAULT_GENERATION,
     ...(options.generation || {})
   };
-  const seed = options.seed || "bitspace-asteroid";
+  const seed = options.seed || "bitspace-natural";
   const random = createSeededRandom(seed);
-  const widthTiles = Math.floor(ENGINE.world.width / RENDER.tileSize);
-  const heightTiles = Math.floor(ENGINE.world.height / RENDER.tileSize);
+  const widthTiles = options.widthTiles || Math.floor(ENGINE.world.width / RENDER.tileSize);
+  const heightTiles = options.heightTiles || Math.floor(ENGINE.world.height / RENDER.tileSize);
   const tiles = new Array(widthTiles * heightTiles).fill(ASTEROID_TILE.empty);
   const amounts = new Uint8Array(widthTiles * heightTiles);
 
   generateSimplexAsteroidField(tiles, widthTiles, heightTiles, random, config, seed);
+  clearAsteroidCircles(tiles, amounts, widthTiles, heightTiles, RENDER.tileSize, options.clearCircles || []);
 
   const playable = createPlayableBoundary(tiles, widthTiles, heightTiles, config);
-  const pockets = createPlayerPockets(tiles, playable, widthTiles, heightTiles, config);
-  seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config);
+  markPlayableCircles(playable, widthTiles, heightTiles, RENDER.tileSize, options.playableCircles || options.clearCircles || []);
+  const pockets = options.createPockets === false
+    ? []
+    : createPlayerPockets(tiles, playable, widthTiles, heightTiles, config);
+
+  if (options.seedResources !== false) {
+    seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config);
+  }
 
   return {
     seed,
@@ -105,6 +119,58 @@ export function createAsteroid(options = {}) {
     playable,
     pockets
   };
+}
+
+function clearAsteroidCircles(tiles, amounts, widthTiles, heightTiles, tileSize, circles) {
+  for (const circle of circles) {
+    const centerX = Number(circle.x);
+    const centerY = Number(circle.y);
+    const radius = Number(circle.radius);
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY) || !Number.isFinite(radius) || radius <= 0) {
+      continue;
+    }
+
+    const radiusSq = radius * radius;
+    for (let tileY = 0; tileY < heightTiles; tileY += 1) {
+      for (let tileX = 0; tileX < widthTiles; tileX += 1) {
+        const x = (tileX + 0.5) * tileSize;
+        const y = (tileY + 0.5) * tileSize;
+        const dx = x - centerX;
+        const dy = y - centerY;
+        if (dx * dx + dy * dy > radiusSq) {
+          continue;
+        }
+
+        const index = tileY * widthTiles + tileX;
+        tiles[index] = ASTEROID_TILE.empty;
+        amounts[index] = 0;
+      }
+    }
+  }
+}
+
+function markPlayableCircles(playable, widthTiles, heightTiles, tileSize, circles) {
+  for (const circle of circles) {
+    const centerX = Number(circle.x);
+    const centerY = Number(circle.y);
+    const radius = Number(circle.radius);
+    if (!Number.isFinite(centerX) || !Number.isFinite(centerY) || !Number.isFinite(radius) || radius <= 0) {
+      continue;
+    }
+
+    const radiusSq = radius * radius;
+    for (let tileY = 0; tileY < heightTiles; tileY += 1) {
+      for (let tileX = 0; tileX < widthTiles; tileX += 1) {
+        const x = (tileX + 0.5) * tileSize;
+        const y = (tileY + 0.5) * tileSize;
+        const dx = x - centerX;
+        const dy = y - centerY;
+        if (dx * dx + dy * dy <= radiusSq) {
+          playable[tileY * widthTiles + tileX] = true;
+        }
+      }
+    }
+  }
 }
 
 export function createLobbyAsteroid(options = {}) {

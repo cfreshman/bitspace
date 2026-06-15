@@ -4,6 +4,7 @@ import {
   STORM_STATE,
   blockingTilesNearCircle,
   createLobbyAsteroid,
+  createNaturalAsteroid,
   raycastAsteroid
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
@@ -39,14 +40,17 @@ const MENU_BUTTON_WIDTH = 112;
 const MENU_BUTTON_WIDE_WIDTH = 128;
 const MENU_BUTTON_HEIGHT = 32;
 const MENU_BUTTON_GAP = 24;
+const THEME_SWATCH_RADIUS = 15.5;
+const THEME_SWATCH_RING_RADIUS = 76;
+const THEME_ASTEROID_GAP = 24;
 const THEME_PRESETS = Object.freeze([
   { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
-  { id: "purple", label: "PURPLE", background: "#3d2945", foreground: "#65ceff" },
+  { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff", backing: "#101020" },
   { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
-  { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" },
-  { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff" },
+  { id: "purple", label: "PURPLE", background: "#3d2945", foreground: "#65ceff" },
   { id: "tan", label: "TAN", background: "#555452", foreground: "#ffc366" },
-  { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" }
+  { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" },
+  { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" }
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -526,7 +530,11 @@ function createTalkInput() {
 }
 
 function createMenuState() {
-  const asteroid = createLobbyAsteroid({ seed: "bitspace-menu" });
+  const asteroids = {
+    [MENU_ROOMS.ready]: createLobbyAsteroid({ seed: "bitspace-menu" }),
+    [MENU_ROOMS.theme]: createThemeMenuAsteroid()
+  };
+  const asteroid = asteroids[MENU_ROOMS.ready];
 
   return {
     room: MENU_ROOMS.ready,
@@ -537,9 +545,63 @@ function createMenuState() {
     buttonTargetId: null,
     buttonTargetSeconds: 0,
     buttonTargetActivated: false,
+    asteroids,
     asteroid,
     player: createMenuPlayer(asteroid)
   };
+}
+
+function createThemeMenuAsteroid() {
+  const widthTiles = 48;
+  const heightTiles = 48;
+  const center = {
+    x: (widthTiles * RENDER.tileSize) / 2,
+    y: (heightTiles * RENDER.tileSize) / 2
+  };
+  const clearRadius = THEME_SWATCH_RING_RADIUS + THEME_SWATCH_RADIUS + THEME_ASTEROID_GAP;
+
+  return createNaturalAsteroid({
+    seed: "bitspace-menu-theme",
+    widthTiles,
+    heightTiles,
+    createPockets: false,
+    clearCircles: [{ x: center.x, y: center.y, radius: clearRadius }],
+    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + RENDER.tileSize * 2 }],
+    generation: {
+      edgeMargin: 5,
+      noiseScale: 0.09,
+      noiseDetailScale: 0.22,
+      noiseWarpScale: 0.06,
+      noiseWarpStrength: 4,
+      noiseCaveScale: 0.13,
+      noiseCaveSecondaryScale: 0.17,
+      noiseCaveDetailScale: 0.28,
+      noiseCaveBand: 0.12,
+      noiseCaveJunctionBand: 0.06,
+      noiseCaveWidthJitter: 0.04,
+      noiseCaveMinDepth: 0.08,
+      noiseOctaves: 4,
+      noisePersistence: 0.52,
+      noiseLacunarity: 2,
+      noiseFieldRadius: 19,
+      noiseThreshold: -0.14,
+      noiseRadialFalloff: 0.45,
+      noiseMinComponentSize: 4,
+      caveCloseMaxSize: 10,
+      caveCloseProbabilityPower: 1.15,
+      resourceCandidateChance: 0.48,
+      resourceConnectionChance: 0.6,
+      resourceConnectionMaxDistance: 5,
+      resourceGraphKeepDegradation: 0.92,
+      resourceMaxGraphs: 80,
+      resourceMaxSpawnTiles: 120,
+      oreChance: 0.82,
+      diamondChance: 0.05,
+      boundaryDilate: 8,
+      boundaryShrink: 4,
+      boundaryGap: 4
+    }
+  });
 }
 
 function createMenuPlayer(asteroid) {
@@ -611,8 +673,9 @@ function enterMenuRoom(room) {
   cancelMiningRay();
 
   const player = state.menu.player;
-  const center = menuCenter(state.menu.asteroid);
   state.menu.room = room;
+  state.menu.asteroid = state.menu.asteroids[room];
+  const center = menuCenter(state.menu.asteroid);
   state.menu.activeTargetId = null;
   resetMenuButtonTarget();
   player.x = center.x;
@@ -667,8 +730,43 @@ function updateMenuSimulation(timeSeconds) {
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
   resolveMenuAsteroidCollisions(player);
+  updateThemeRoomSelection(player);
 
   updateMenuMiningRay(player, dtSeconds);
+}
+
+function updateThemeRoomSelection(player) {
+  if (state.menu.room !== MENU_ROOMS.theme) {
+    return;
+  }
+
+  const preset = closestThemePresetToPoint(player.x, player.y, menuCenter(state.menu.asteroid));
+  if (preset && !themeMatchesPreset(state.theme, preset)) {
+    setTheme(preset);
+  }
+}
+
+function closestThemePresetToPoint(x, y, center) {
+  const startAngle = -Math.PI / 2;
+  let closest = null;
+  let closestDistance = Number.POSITIVE_INFINITY;
+  let nextDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < THEME_PRESETS.length; index += 1) {
+    const angle = startAngle + (index * Math.PI * 2) / THEME_PRESETS.length;
+    const swatchX = center.x + Math.cos(angle) * THEME_SWATCH_RING_RADIUS;
+    const swatchY = center.y + Math.sin(angle) * THEME_SWATCH_RING_RADIUS;
+    const distance = Math.hypot(x - swatchX, y - swatchY);
+    if (distance < closestDistance) {
+      nextDistance = closestDistance;
+      closestDistance = distance;
+      closest = THEME_PRESETS[index];
+    } else if (distance < nextDistance) {
+      nextDistance = distance;
+    }
+  }
+
+  return nextDistance - closestDistance >= 2 ? closest : null;
 }
 
 function updateMenuAim(player) {
@@ -798,7 +896,13 @@ function raycastMenuEntities(start, direction, maxDistance) {
   let nearest = null;
 
   for (const entity of menuEntities()) {
-    const hit = rayRectIntersection(start, direction, entity, maxDistance);
+    if (!entity.action) {
+      continue;
+    }
+
+    const hit = entity.type === "themeSwatch"
+      ? rayCircleIntersection(start, direction, entity, maxDistance)
+      : rayRectIntersection(start, direction, entity, maxDistance);
     if (!hit || (nearest && hit.distance >= nearest.distance)) {
       continue;
     }
@@ -841,6 +945,15 @@ function activateMenuEntity(entity) {
 
   if (entity.action === "reset") {
     resetTheme();
+    return;
+  }
+
+  if (entity.action === "select-theme") {
+    const preset = THEME_PRESETS.find((candidate) => candidate.id === entity.themeId);
+    if (preset) {
+      setTheme(preset);
+    }
+    enterMenuRoom(MENU_ROOMS.ready);
     return;
   }
 
@@ -897,6 +1010,33 @@ function rayRectIntersection(start, direction, rect, maxDistance) {
   };
 }
 
+function rayCircleIntersection(start, direction, circle, maxDistance) {
+  const radius = circle.radius || THEME_SWATCH_RADIUS;
+  const dx = start.x - circle.x;
+  const dy = start.y - circle.y;
+  const startDistanceSq = dx * dx + dy * dy;
+  const projection = dx * direction.x + dy * direction.y;
+  const closestDistanceSq = startDistanceSq - projection * projection;
+  const radiusSq = radius * radius;
+  if (closestDistanceSq > radiusSq) {
+    return null;
+  }
+
+  const offset = Math.sqrt(radiusSq - closestDistanceSq);
+  const nearDistance = -projection - offset;
+  const farDistance = -projection + offset;
+  const distance = nearDistance >= 0 ? nearDistance : farDistance;
+  if (distance < 0 || distance > maxDistance) {
+    return null;
+  }
+
+  return {
+    x: start.x + direction.x * distance,
+    y: start.y + direction.y * distance,
+    distance
+  };
+}
+
 function menuSnapshot() {
   const world = menuWorld(state.menu.asteroid);
   return {
@@ -921,24 +1061,24 @@ function menuEntities() {
   const top = center.y + 28;
 
   if (state.menu.room === MENU_ROOMS.theme) {
-    const commandTop = center.y + 24;
-    const backTop = commandTop + MENU_BUTTON_HEIGHT + 20;
-    const themeButtonWidth = 96;
-    const themeButtonGap = 16;
-    const themeButtonLeft = center.x - (themeButtonWidth * 3 + themeButtonGap * 2) / 2;
-
-    return [
-      menuButton("menu-previous-theme", "previous-theme", "PREV", themeButtonLeft, commandTop, themeButtonWidth),
-      menuButton("menu-next-theme", "next-theme", "NEXT", themeButtonLeft + themeButtonWidth + themeButtonGap, commandTop, themeButtonWidth),
-      menuButton("menu-reset", "reset", "RESET", themeButtonLeft + (themeButtonWidth + themeButtonGap) * 2, commandTop, themeButtonWidth),
-      menuButton("menu-back", "back", "BACK", center.x - MENU_BUTTON_WIDTH / 2, backTop, MENU_BUTTON_WIDTH)
-    ];
+    return themeSwatchEntities(center);
   }
 
   return [
+    menuTitle("menu-title", "BITSPACE", center.x, center.y - 114),
     menuButton("menu-ready", "ready", "READY", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH)
   ];
+}
+
+function menuTitle(id, label, x, y) {
+  return {
+    id,
+    type: "menuTitle",
+    label,
+    x,
+    y
+  };
 }
 
 function menuButton(id, action, label, x, y, width) {
@@ -953,6 +1093,27 @@ function menuButton(id, action, label, x, y, width) {
     height: MENU_BUTTON_HEIGHT,
     active: state.menu.activeTargetId === id
   };
+}
+
+function themeSwatchEntities(center) {
+  const startAngle = -Math.PI / 2;
+  return THEME_PRESETS.map((preset, index) => {
+    const angle = startAngle + (index * Math.PI * 2) / THEME_PRESETS.length;
+    return {
+      id: `menu-theme-${preset.id}`,
+      type: "themeSwatch",
+      action: "select-theme",
+      label: String(index + 1),
+      themeId: preset.id,
+      background: preset.background,
+      foreground: preset.foreground,
+      x: center.x + Math.cos(angle) * THEME_SWATCH_RING_RADIUS,
+      y: center.y + Math.sin(angle) * THEME_SWATCH_RING_RADIUS,
+      radius: THEME_SWATCH_RADIUS,
+      active: state.menu.activeTargetId === `menu-theme-${preset.id}`,
+      selected: themeMatchesPreset(state.theme, preset)
+    };
+  });
 }
 
 function menuCenter(asteroid) {
@@ -973,8 +1134,9 @@ function loadTheme() {
   try {
     const stored = JSON.parse(window.localStorage.getItem(THEME_STORAGE_KEY) || "null");
     if (isValidTheme(stored)) {
-      applyThemeToSource(stored);
-      return stored;
+      const theme = normalizeTheme(stored);
+      applyThemeToSource(theme);
+      return theme;
     }
   } catch {
     window.localStorage.removeItem(THEME_STORAGE_KEY);
@@ -992,10 +1154,7 @@ function cycleThemePreset(direction = 1) {
 }
 
 function setTheme(theme) {
-  state.theme = {
-    foreground: theme.foreground,
-    background: theme.background
-  };
+  state.theme = normalizeTheme(theme);
   applyThemeToSource(state.theme);
   saveTheme();
 }
@@ -1010,8 +1169,11 @@ function adjacentThemePreset(theme, direction) {
 }
 
 function themeMatchesPreset(theme, preset) {
-  return theme?.foreground?.toLowerCase() === preset.foreground &&
-    theme?.background?.toLowerCase() === preset.background;
+  const normalized = normalizeTheme(theme);
+  const presetTheme = normalizeTheme(preset);
+  return normalized?.foreground === presetTheme?.foreground &&
+    normalized?.background === presetTheme?.background &&
+    normalized?.backing === presetTheme?.backing;
 }
 
 function syncThemeFromCss() {
@@ -1020,8 +1182,14 @@ function syncThemeFromCss() {
     return;
   }
 
-  if (cssTheme.foreground !== state.theme.foreground || cssTheme.background !== state.theme.background) {
-    state.theme = cssTheme;
+  const theme = normalizeTheme(cssTheme);
+  if (
+    theme.foreground !== state.theme.foreground ||
+    theme.background !== state.theme.background ||
+    theme.backing !== state.theme.backing
+  ) {
+    state.theme = theme;
+    applyThemeBacking(state.theme);
   }
 }
 
@@ -1033,13 +1201,15 @@ function readThemeSource() {
   const style = window.getComputedStyle(themeSource);
   const foreground = cssColorToHex(style.color);
   const background = cssColorToHex(style.backgroundColor);
+  const backing = cssColorToHex(style.getPropertyValue("--bitspace-backing")) || "#000000";
   if (!foreground || !background) {
     return null;
   }
 
   return {
     foreground,
-    background
+    background,
+    backing
   };
 }
 
@@ -1050,6 +1220,34 @@ function applyThemeToSource(theme) {
 
   themeSource.style.color = theme.foreground;
   themeSource.style.backgroundColor = theme.background;
+  themeSource.style.setProperty("--bitspace-backing", normalizeTheme(theme).backing);
+  applyThemeBacking(theme);
+}
+
+function applyThemeBacking(theme) {
+  const backing = normalizeTheme(theme).backing;
+  document.documentElement.style.backgroundColor = backing;
+  document.body.style.backgroundColor = backing;
+  canvas.style.backgroundColor = backing;
+}
+
+function normalizeTheme(theme) {
+  if (!isValidTheme(theme)) {
+    return null;
+  }
+
+  const foreground = theme.foreground.toLowerCase();
+  const background = theme.background.toLowerCase();
+  const preset = THEME_PRESETS.find((candidate) =>
+    candidate.foreground === foreground && candidate.background === background
+  );
+  const backing = theme.backing || preset?.backing || "#000000";
+
+  return {
+    foreground,
+    background,
+    backing: backing.toLowerCase()
+  };
 }
 
 function rgbToHex(color) {
@@ -1101,7 +1299,7 @@ function hexByte(value) {
 }
 
 function defaultTheme() {
-  return cssDefaultTheme;
+  return normalizeTheme(cssDefaultTheme);
 }
 
 function saveTheme() {
@@ -1111,7 +1309,8 @@ function saveTheme() {
 function isValidTheme(theme) {
   return Boolean(theme) &&
     isHexColor(theme.foreground) &&
-    isHexColor(theme.background);
+    isHexColor(theme.background) &&
+    (theme.backing === undefined || isHexColor(theme.backing));
 }
 
 function isHexColor(value) {

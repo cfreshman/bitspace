@@ -51,6 +51,7 @@ const MINING_RAY_BASE_SPIN_RATE = 2.5;
 const MAX_PARTICLES = 260;
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
+const MENU_THEME_BACKING_COLOR = "#000000";
 const stormNoiseCache = new Map();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -461,10 +462,6 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
 }
 
 function drawMenuOverlay(ctx, options, colors, textRenderer) {
-  drawCenteredText(ctx, textRenderer, "BITSPACE", RENDER.width / 2, 78, {
-    fontSize: 10,
-    color: colors.foreground
-  });
   drawRoomButtons(ctx, options, colors, textRenderer);
 }
 
@@ -1662,7 +1659,7 @@ function isPlayableTile(asteroid, tileX, tileY) {
 
 function isBoundarySafeTile(asteroid, tileX, tileY) {
   return isPlayableTile(asteroid, tileX, tileY) &&
-    stormTileStateAt(asteroid, tileX, tileY) !== STORM_STATE.storm;
+    stormTileStateAt(asteroid, tileX, tileY) === STORM_STATE.safe;
 }
 
 function stormTileStateAt(asteroid, tileX, tileY) {
@@ -1794,6 +1791,16 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     return;
   }
 
+  if (entity.type === "themeSwatch") {
+    drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer);
+    return;
+  }
+
+  if (entity.type === "menuTitle") {
+    drawMenuTitleEntity(ctx, entity, camera, colors, textRenderer);
+    return;
+  }
+
   const screen = worldToScreen(entity, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -1813,6 +1820,61 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     [1, 1],
     [0, 2]
   ], ENTITY_PIXEL_SIZE);
+}
+
+function drawMenuTitleEntity(ctx, entity, camera, colors, textRenderer) {
+  if (!textRenderer) {
+    return;
+  }
+
+  const screen = worldToScreen(entity, camera);
+  const label = String(entity.label || "").toUpperCase();
+  const textOptions = {
+    fontSize: 10,
+    color: colors.foreground
+  };
+  const width = textRenderer.measure(label, textOptions);
+  textRenderer.draw(ctx, label, Math.round(screen.x - width / 2), Math.round(screen.y), {
+    ...textOptions,
+    width: width + 2
+  });
+}
+
+function drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer) {
+  const screen = worldToScreen(entity, camera);
+  const x = Math.round(screen.x);
+  const y = Math.round(screen.y);
+  const radius = Number(entity.radius || 15);
+  const selected = entity.selected === true;
+  const background = entity.background || colors.background;
+  const foreground = entity.foreground || colors.foreground;
+  const fillColor = selected ? foreground : background;
+  const detailColor = selected ? background : foreground;
+
+  if (!selected) {
+    ctx.fillStyle = MENU_THEME_BACKING_COLOR;
+    fillDisk(ctx, x, y, radius + 4);
+  }
+
+  ctx.fillStyle = fillColor;
+  fillDisk(ctx, x, y, radius);
+  ctx.fillStyle = detailColor;
+  drawCenteredCircleLabel(ctx, textRenderer, String(entity.label || ""), x, y - 7, {
+    fontSize: 10,
+    color: detailColor
+  });
+}
+
+function drawCenteredCircleLabel(ctx, textRenderer, label, centerX, y, options) {
+  if (!textRenderer || !label) {
+    return;
+  }
+
+  const width = textRenderer.measure(label, options);
+  textRenderer.draw(ctx, label, Math.round(centerX - width / 2), y, {
+    ...options,
+    width: width + 2
+  });
 }
 
 function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRenderer) {
