@@ -114,6 +114,7 @@ export function createRenderer(canvas) {
     background: RENDER.background
   };
   const particles = [];
+  const miningParticles = [];
   const emitCarry = new Map();
   let particleSeed = 1;
   let lastFrameTime = null;
@@ -143,6 +144,7 @@ export function createRenderer(canvas) {
 
       drawFrame(surface, snapshot, { ...options, timeSeconds, dtSeconds }, colors, textRenderer, {
         particles,
+        miningParticles,
         emitCarry,
         nextSeed() {
           particleSeed += 1;
@@ -364,8 +366,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     }
   }
 
-  updateThrusterParticles(particleState.particles, options.dtSeconds);
-  drawThrusterParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
+  updateParticles(particleState.particles, options.dtSeconds);
+  updateParticles(particleState.miningParticles, options.dtSeconds);
+  drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
 
   for (const renderPlayer of renderPlayers) {
     if (renderPlayer.mining) {
@@ -373,6 +376,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     }
     drawShip(ctx, renderPlayer, camera, colors, options.timeSeconds ?? snapshot.tick / 60);
   }
+
+  drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
 
   for (const renderPlayer of renderPlayers) {
     drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
@@ -1764,7 +1769,7 @@ function emitMiningParticles(state, player, dtSeconds) {
     const spread = (randomUnit(seed, 4) - 0.5) * 36;
     const life = 0.12 + randomUnit(seed, 5) * 0.24;
 
-    state.particles.push({
+    state.miningParticles.push({
       x: ray.endX - direction.x * impactJitter + normal.x * sideJitter,
       y: ray.endY - direction.y * impactJitter + normal.y * sideJitter,
       vx: -direction.x * speed + normal.x * spread,
@@ -1775,8 +1780,8 @@ function emitMiningParticles(state, player, dtSeconds) {
     });
   }
 
-  if (state.particles.length > MAX_PARTICLES) {
-    state.particles.splice(0, state.particles.length - MAX_PARTICLES);
+  if (state.miningParticles.length > MAX_PARTICLES) {
+    state.miningParticles.splice(0, state.miningParticles.length - MAX_PARTICLES);
   }
 }
 
@@ -1795,7 +1800,7 @@ function boosterClusterCenter(player, rear, side) {
   };
 }
 
-function updateThrusterParticles(particles, dtSeconds) {
+function updateParticles(particles, dtSeconds) {
   for (let index = particles.length - 1; index >= 0; index -= 1) {
     const particle = particles[index];
     particle.age += dtSeconds;
@@ -1814,7 +1819,7 @@ function updateThrusterParticles(particles, dtSeconds) {
   }
 }
 
-function drawThrusterParticles(ctx, particles, camera, colors, timeSeconds) {
+function drawParticles(ctx, particles, camera, colors, timeSeconds) {
   ctx.fillStyle = colors.foreground;
 
   for (const particle of particles) {
