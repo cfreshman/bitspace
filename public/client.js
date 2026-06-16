@@ -134,13 +134,20 @@ const state = {
   lastReattachRequestAt: 0
 };
 
-const socket = window.io({
-  auth: {
-    name: getPlayerName(),
-    clientId: storedClientId,
-    clientSecret: storedClientSecret
-  }
-});
+const mapGenMode = isMapGenMode();
+if (mapGenMode) {
+  setupMapGenMode();
+}
+
+const socket = mapGenMode
+  ? createMapGenSocketStub()
+  : window.io({
+      auth: {
+        name: getPlayerName(),
+        clientId: storedClientId,
+        clientSecret: storedClientSecret
+      }
+    });
 
 socket.on(SERVER_EVENTS.welcome, (payload) => {
   state.clientId = payload.clientId;
@@ -543,6 +550,328 @@ function createTalkInput() {
   input.setAttribute("aria-label", "Talk");
   document.body.append(input);
   return input;
+}
+
+function isMapGenMode() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("mapgen") === "1" || window.location.hash === "#mapgen";
+}
+
+function createMapGenSocketStub() {
+  return {
+    auth: {},
+    connected: false,
+    on() {},
+    emit() {}
+  };
+}
+
+function setupMapGenMode() {
+  const panel = document.querySelector("#mapgen-panel");
+  const preview = document.querySelector("#mapgen-preview");
+  const stats = document.querySelector("#mapgen-stats");
+  if (!panel || !preview || !stats) {
+    return;
+  }
+
+  const controls = {
+    seed: document.querySelector("#mapgen-seed"),
+    nodes: document.querySelector("#mapgen-nodes"),
+    players: document.querySelector("#mapgen-players"),
+    links: document.querySelector("#mapgen-links"),
+    degree: document.querySelector("#mapgen-degree"),
+    radius: document.querySelector("#mapgen-radius"),
+    center: document.querySelector("#mapgen-center"),
+    curve: document.querySelector("#mapgen-curve"),
+    feather: document.querySelector("#mapgen-feather"),
+    regenerate: document.querySelector("#mapgen-regenerate"),
+    random: document.querySelector("#mapgen-random")
+  };
+  const params = new URLSearchParams(window.location.search);
+  const defaults = {
+    seed: params.get("seed") || "bitspace-main:asteroid",
+    nodes: 72,
+    players: mapGenParamNumber(params, "players", 2),
+    links: 4,
+    degree: 3,
+    radius: 0.95,
+    center: 2.7,
+    curve: 3.2,
+    feather: 0.58
+  };
+
+  document.body.classList.add("mapgen-active");
+  panel.hidden = false;
+  panel.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+  });
+  panel.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+
+  controls.seed.value = defaults.seed;
+  controls.nodes.value = defaults.nodes;
+  controls.players.value = defaults.players;
+  controls.links.value = defaults.links;
+  controls.degree.value = defaults.degree;
+  controls.radius.value = defaults.radius;
+  controls.center.value = defaults.center;
+  controls.curve.value = defaults.curve;
+  controls.feather.value = defaults.feather;
+
+  let pending = false;
+  const requestRender = () => {
+    if (pending) {
+      return;
+    }
+
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      renderMapGenPreview(preview, stats, mapGenOptionsFromControls(controls));
+    });
+  };
+
+  for (const control of [
+    controls.seed,
+    controls.nodes,
+    controls.players,
+    controls.links,
+    controls.degree,
+    controls.radius,
+    controls.center,
+    controls.curve,
+    controls.feather
+  ]) {
+    control.addEventListener("input", requestRender);
+    control.addEventListener("change", requestRender);
+  }
+
+  controls.regenerate.addEventListener("click", requestRender);
+  controls.random.addEventListener("click", () => {
+    controls.seed.value = `map-${Math.random().toString(36).slice(2, 10)}`;
+    requestRender();
+  });
+
+  renderMapGenPreview(preview, stats, mapGenOptionsFromControls(controls));
+}
+
+function mapGenOptionsFromControls(controls) {
+  return {
+    seed: controls.seed.value.trim() || "bitspace-main:asteroid",
+    playerCount: mapGenNumber(controls.players, 2),
+    generation: {
+      tunnelNodeCount: mapGenNumber(controls.nodes, 72),
+      tunnelExtraConnectionCount: mapGenNumber(controls.links, 4),
+      tunnelMaxNodeDegree: mapGenNumber(controls.degree, 3),
+      tunnelCenterMaxDegree: mapGenNumber(controls.degree, 3),
+      tunnelRadius: mapGenNumber(controls.radius, 0.95),
+      tunnelCenterRadius: mapGenNumber(controls.center, 2.7),
+      tunnelCurveStrength: mapGenNumber(controls.curve, 3.2),
+      tunnelFeather: mapGenNumber(controls.feather, 0.58)
+    }
+  };
+}
+
+function mapGenNumber(input, fallback) {
+  const value = Number(input.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function mapGenParamNumber(params, key, fallback) {
+  const value = Number(params.get(key));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function renderMapGenPreview(canvasElement, statsElement, options) {
+  const asteroid = createNaturalAsteroid({
+    seed: options.seed,
+    playerCount: options.playerCount,
+    generation: options.generation
+  });
+  const ctx = canvasElement.getContext("2d", { alpha: false });
+  const scale = Math.max(
+    1,
+    Math.floor(Math.min(canvasElement.width / asteroid.widthTiles, canvasElement.height / asteroid.heightTiles))
+  );
+  const offsetX = Math.floor((canvasElement.width - asteroid.widthTiles * scale) / 2);
+  const offsetY = Math.floor((canvasElement.height - asteroid.heightTiles * scale) / 2);
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+  for (let tileY = 0; tileY < asteroid.heightTiles; tileY += 1) {
+    for (let tileX = 0; tileX < asteroid.widthTiles; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const tile = asteroid.tiles[index];
+      const color = mapGenTileColor(tile, asteroid.playable[index]);
+      if (!color) {
+        continue;
+      }
+
+      ctx.fillStyle = color;
+      ctx.fillRect(offsetX + tileX * scale, offsetY + tileY * scale, scale, scale);
+    }
+  }
+
+  drawMapGenPockets(ctx, asteroid, offsetX, offsetY, scale);
+  statsElement.textContent = mapGenStats(asteroid, options);
+}
+
+function mapGenTileColor(tile, playable) {
+  if (tile === ASTEROID_TILE.diamond) {
+    return "#ffffff";
+  }
+
+  if (tile === ASTEROID_TILE.ore) {
+    return "#ffbf00";
+  }
+
+  if (tile === ASTEROID_TILE.rock || tile === ASTEROID_TILE.wall) {
+    return "#74cbef";
+  }
+
+  return playable ? "#111822" : null;
+}
+
+function drawMapGenPockets(ctx, asteroid, offsetX, offsetY, scale) {
+  ctx.strokeStyle = "#ff4a7a";
+  ctx.lineWidth = 1;
+  for (const pocket of asteroid.pockets || []) {
+    const x = offsetX + pocket.tileX * scale;
+    const y = offsetY + pocket.tileY * scale;
+    ctx.strokeRect(x - scale, y - scale, scale * 3, scale * 3);
+  }
+}
+
+function mapGenStats(asteroid, options) {
+  const rockComponents = mapGenRockComponents(asteroid);
+  const openComponents = mapGenOpenComponents(asteroid);
+  const oreComponents = mapGenOreComponents(asteroid);
+  const totals = mapGenResourceTotals(asteroid);
+  const rockTiles = asteroid.tiles.filter(mapGenIsRockTile).length;
+  const tinyRockComponents = rockComponents.filter((size) => size <= 2).length;
+
+  return [
+    `seed: ${options.seed}`,
+    `players: ${options.playerCount}`,
+    `tiles: ${asteroid.widthTiles} x ${asteroid.heightTiles}`,
+    `rock: ${rockTiles} (${((rockTiles / asteroid.tiles.length) * 100).toFixed(1)}%)`,
+    `rock components: ${rockComponents.length} largest ${rockComponents.slice(0, 6).join(", ")}`,
+    `1-2 tile rock components: ${tinyRockComponents}`,
+    `open components: ${openComponents.length} largest ${openComponents.slice(0, 6).join(", ")}`,
+    `resources: ROCK ${totals.rock} ORE ${totals.ore} DIAMOND ${totals.diamond}`,
+    `ore tiles: 1x ${totals.ore1} 2x ${totals.ore2} 3x ${totals.ore3}`,
+    `ore components: ${oreComponents.length} largest ${oreComponents.slice(0, 8).join(", ")}`,
+    `pockets: ${asteroid.pockets.length}`,
+    `generation: ${JSON.stringify(options.generation)}`
+  ].join("\n");
+}
+
+function mapGenResourceTotals(asteroid) {
+  const totals = {
+    rock: 0,
+    ore: 0,
+    diamond: 0,
+    ore1: 0,
+    ore2: 0,
+    ore3: 0
+  };
+
+  for (let index = 0; index < asteroid.tiles.length; index += 1) {
+    const tile = asteroid.tiles[index];
+    if (tile === ASTEROID_TILE.ore) {
+      const amount = Number(asteroid.amounts[index]) || 0;
+      totals.ore += amount;
+      if (amount === 1) {
+        totals.ore1 += 1;
+      } else if (amount === 2) {
+        totals.ore2 += 1;
+      } else if (amount >= 3) {
+        totals.ore3 += 1;
+      }
+    } else if (tile === ASTEROID_TILE.diamond) {
+      totals.diamond += Number(asteroid.amounts[index]) || 0;
+    } else if (tile === ASTEROID_TILE.rock) {
+      totals.rock += 1;
+    }
+  }
+
+  return totals;
+}
+
+function mapGenRockComponents(asteroid) {
+  return mapGenComponents(asteroid, (index) => mapGenIsRockTile(asteroid.tiles[index]));
+}
+
+function mapGenOpenComponents(asteroid) {
+  return mapGenComponents(
+    asteroid,
+    (index) => asteroid.playable[index] && !mapGenIsRockTile(asteroid.tiles[index])
+  );
+}
+
+function mapGenOreComponents(asteroid) {
+  return mapGenComponents(asteroid, (index) => asteroid.tiles[index] === ASTEROID_TILE.ore);
+}
+
+function mapGenComponents(asteroid, passable) {
+  const visited = new Set();
+  const components = [];
+
+  for (let index = 0; index < asteroid.tiles.length; index += 1) {
+    if (visited.has(index) || !passable(index)) {
+      continue;
+    }
+
+    const queue = [index];
+    let size = 0;
+    visited.add(index);
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      size += 1;
+      for (const neighbor of mapGenNeighborIndexes(current, asteroid.widthTiles, asteroid.heightTiles)) {
+        if (visited.has(neighbor) || !passable(neighbor)) {
+          continue;
+        }
+
+        visited.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+
+    components.push(size);
+  }
+
+  return components.sort((a, b) => b - a);
+}
+
+function mapGenNeighborIndexes(index, widthTiles, heightTiles) {
+  const x = index % widthTiles;
+  const y = Math.floor(index / widthTiles);
+  const neighbors = [];
+  if (x > 0) {
+    neighbors.push(index - 1);
+  }
+  if (x < widthTiles - 1) {
+    neighbors.push(index + 1);
+  }
+  if (y > 0) {
+    neighbors.push(index - widthTiles);
+  }
+  if (y < heightTiles - 1) {
+    neighbors.push(index + widthTiles);
+  }
+  return neighbors;
+}
+
+function mapGenIsRockTile(tile) {
+  return tile === ASTEROID_TILE.rock ||
+    tile === ASTEROID_TILE.ore ||
+    tile === ASTEROID_TILE.diamond ||
+    tile === ASTEROID_TILE.wall;
 }
 
 function createMenuState() {

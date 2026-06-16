@@ -29,7 +29,10 @@ const INITIAL_SPAWN_ANGLE = Math.PI / 4;
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
-  const asteroid = options.asteroid ?? createAsteroid({ seed: `${seed}:asteroid` });
+  const asteroid = options.asteroid ?? createAsteroid({
+    seed: `${seed}:asteroid`,
+    playerCount: options.playerCount
+  });
   const playerDamage = options.playerDamage ?? true;
   const stormEnabled = options.storm ?? playerDamage;
 

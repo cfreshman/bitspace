@@ -39,6 +39,22 @@ const DEFAULT_GENERATION = Object.freeze({
   noiseCaveJunctionBand: 0.048,
   noiseCaveWidthJitter: 0.028,
   noiseCaveMinDepth: 0.14,
+  tunnelNodeCount: 72,
+  tunnelExtraConnectionCount: 4,
+  tunnelMaxNodeDegree: 3,
+  tunnelCenterMaxDegree: 3,
+  tunnelMinNodeDistance: 5.4,
+  tunnelMaxConnectionLength: 22,
+  tunnelCenterRadius: 2.7,
+  tunnelRadius: 0.95,
+  tunnelEndRadius: 0.58,
+  tunnelMaxRadius: 0.78,
+  tunnelFeather: 0.58,
+  tunnelDensityStrength: 1.65,
+  tunnelRadiusJitter: 0.12,
+  tunnelNoiseScale: 0.18,
+  tunnelCurveStrength: 3.2,
+  tunnelMinRockComponentSize: 3,
   noiseOctaves: 5,
   noisePersistence: 0.54,
   noiseLacunarity: 2.05,
@@ -49,14 +65,36 @@ const DEFAULT_GENERATION = Object.freeze({
   caveCloseMaxSize: 80,
   caveCloseProbabilityPower: 1.35,
   edgeMargin: 30,
-  resourceCandidateChance: 0.3,
+  resourceCandidateChance: 0.95,
+  resourceNoiseScale: 0.24,
+  resourceNoiseDetailScale: 0.56,
+  resourceNoiseDetailWeight: 0.55,
+  resourceNoiseMultiplier: 1.62,
+  resourceNoiseThreshold: 0.9,
+  resourceNoiseFeather: 0.075,
+  resourceNoiseJitter: 0.1,
   resourceConnectionChance: 0.55,
   resourceConnectionMaxDistance: 6,
-  resourceGraphKeepDegradation: 0.9,
+  resourceGraphKeepDegradation: 0.92,
+  resourceGraphMinKeepChance: 0.04,
+  resourceSmallOreCullMaxSize: 3,
+  resourceSmallOreKeepDegradation: 0.55,
+  resourcePlayerBaseline: 2,
+  resourcePlayerScaleExponent: 0.72,
+  resourcePlayerMaxScale: 3,
+  resourcePlayerThresholdDrop: 0.025,
+  resourcePlayerDiamondBoost: 0.35,
+  resourcePlayerOreBoost: 0.045,
+  resourcePlayerNoiseScaleBoost: 0.16,
   resourceMaxGraphs: 360,
-  resourceMaxSpawnTiles: 900,
-  oreChance: 0.78,
+  resourceMaxSpawnTiles: 940,
+  oreChance: 0.8,
   diamondChance: 0.035,
+  oreAmountNoiseScale: 0.09,
+  oreAmountNoiseDetailScale: 0.23,
+  oreAmountNoiseMultiplier: 1.7,
+  oreAmountTwoThreshold: 0.48,
+  oreAmountThreeThreshold: 0.62,
   boundaryDilate: 28,
   boundaryShrink: 20,
   boundaryGap: 7
@@ -70,10 +108,10 @@ export function createAsteroid(options = {}) {
 }
 
 export function createNaturalAsteroid(options = {}) {
-  const config = {
+  const config = applyPlayerResourceScaling({
     ...DEFAULT_GENERATION,
     ...(options.generation || {})
-  };
+  }, options.playerCount);
   const seed = options.seed || "bitspace-natural";
   const random = createSeededRandom(seed);
   const widthTiles = options.widthTiles || Math.floor(ENGINE.world.width / RENDER.tileSize);
@@ -91,7 +129,7 @@ export function createNaturalAsteroid(options = {}) {
     : createPlayerPockets(tiles, playable, widthTiles, heightTiles, config);
 
   if (options.seedResources !== false) {
-    seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config);
+    seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config, seed);
   }
 
   return {
@@ -101,14 +139,30 @@ export function createNaturalAsteroid(options = {}) {
     tileSize: RENDER.tileSize,
     generation: {
       resourceGraphKeepDegradation: config.resourceGraphKeepDegradation,
+      resourceGraphMinKeepChance: config.resourceGraphMinKeepChance,
       resourceConnectionChance: config.resourceConnectionChance,
       resourceConnectionMaxDistance: config.resourceConnectionMaxDistance,
       resourceMaxGraphs: config.resourceMaxGraphs,
       resourceMaxSpawnTiles: config.resourceMaxSpawnTiles,
+      resourceNoiseMultiplier: config.resourceNoiseMultiplier,
+      resourceNoiseThreshold: config.resourceNoiseThreshold,
+      resourceSmallOreCullMaxSize: config.resourceSmallOreCullMaxSize,
+      resourceSmallOreKeepDegradation: config.resourceSmallOreKeepDegradation,
+      resourcePlayerCount: config.resourcePlayerCount,
+      resourcePlayerScale: config.resourcePlayerScale,
+      oreAmountNoiseMultiplier: config.oreAmountNoiseMultiplier,
+      oreAmountThreeThreshold: config.oreAmountThreeThreshold,
       noiseScale: config.noiseScale,
       noiseFieldRadius: config.noiseFieldRadius,
       noiseThreshold: config.noiseThreshold,
       noiseCaveBand: config.noiseCaveBand,
+      tunnelNodeCount: config.tunnelNodeCount,
+      tunnelExtraConnectionCount: config.tunnelExtraConnectionCount,
+      tunnelMaxNodeDegree: config.tunnelMaxNodeDegree,
+      tunnelCenterRadius: config.tunnelCenterRadius,
+      tunnelRadius: config.tunnelRadius,
+      tunnelMaxRadius: config.tunnelMaxRadius,
+      tunnelMinRockComponentSize: config.tunnelMinRockComponentSize,
       caveCloseMaxSize: config.caveCloseMaxSize,
       boundaryDilate: config.boundaryDilate,
       boundaryShrink: config.boundaryShrink,
@@ -118,6 +172,47 @@ export function createNaturalAsteroid(options = {}) {
     amounts,
     playable,
     pockets
+  };
+}
+
+function applyPlayerResourceScaling(config, playerCount) {
+  const rawPlayerCount = Number(playerCount);
+  if (!Number.isFinite(rawPlayerCount) || rawPlayerCount <= 0) {
+    return {
+      ...config,
+      resourcePlayerCount: null,
+      resourcePlayerScale: 1
+    };
+  }
+
+  const players = Math.max(1, Math.min(ENGINE.maxPlayers, Math.round(rawPlayerCount)));
+  const playerRatio = Math.max(1, players / Math.max(1, config.resourcePlayerBaseline));
+  const scale = Math.min(
+    config.resourcePlayerMaxScale,
+    Math.pow(playerRatio, config.resourcePlayerScaleExponent)
+  );
+  const noiseScale = 1 + (scale - 1) * config.resourcePlayerNoiseScaleBoost;
+
+  return {
+    ...config,
+    resourcePlayerCount: players,
+    resourcePlayerScale: scale,
+    resourceMaxGraphs: Math.round(config.resourceMaxGraphs * scale),
+    resourceMaxSpawnTiles: Math.round(config.resourceMaxSpawnTiles * scale),
+    resourceNoiseThreshold: Math.max(
+      0,
+      config.resourceNoiseThreshold - (scale - 1) * config.resourcePlayerThresholdDrop
+    ),
+    resourceNoiseScale: config.resourceNoiseScale * noiseScale,
+    resourceNoiseDetailScale: config.resourceNoiseDetailScale * noiseScale,
+    diamondChance: Math.min(
+      0.12,
+      config.diamondChance * (1 + (scale - 1) * config.resourcePlayerDiamondBoost)
+    ),
+    oreChance: Math.min(
+      0.94,
+      config.oreChance + (scale - 1) * config.resourcePlayerOreBoost
+    )
   };
 }
 
@@ -488,6 +583,7 @@ function generateSimplexAsteroidField(tiles, widthTiles, heightTiles, random, co
   const centerX = (widthTiles - 1) / 2;
   const centerY = (heightTiles - 1) / 2;
   const z = random() * 1024;
+  const tunnelNetwork = createTunnelNetwork(widthTiles, heightTiles, config, seed);
 
   for (let y = config.edgeMargin; y < heightTiles - config.edgeMargin; y += 1) {
     for (let x = config.edgeMargin; x < widthTiles - config.edgeMargin; x += 1) {
@@ -529,8 +625,10 @@ function generateSimplexAsteroidField(tiles, widthTiles, heightTiles, random, co
         detail * 0.24 +
         (1 - radial) * 0.72 -
         Math.max(0, radial - 0.42) * config.noiseRadialFalloff;
+      const tunnelCut = tunnelDensityCut(tunnelNetwork, x, y, sampleX, sampleY, caveNoise, z, config);
+      const index = y * widthTiles + x;
 
-      if (density <= config.noiseThreshold) {
+      if (density - tunnelCut <= config.noiseThreshold) {
         continue;
       }
 
@@ -568,7 +666,7 @@ function generateSimplexAsteroidField(tiles, widthTiles, heightTiles, random, co
         continue;
       }
 
-      mask[y * widthTiles + x] = true;
+      mask[index] = true;
     }
   }
 
@@ -579,12 +677,270 @@ function generateSimplexAsteroidField(tiles, widthTiles, heightTiles, random, co
     config.noiseMinComponentSize
   );
   closeSmallCaves(manipulated, widthTiles, heightTiles, random, config);
+  const cleaned = pruneSmallRockMaskComponents(
+    manipulated,
+    widthTiles,
+    heightTiles,
+    config.tunnelMinRockComponentSize
+  );
 
   for (let index = 0; index < tiles.length; index += 1) {
-    if (manipulated[index]) {
+    if (cleaned[index]) {
       tiles[index] = ASTEROID_TILE.rock;
     }
   }
+}
+
+function createTunnelNetwork(widthTiles, heightTiles, config, seed) {
+  const nodeCount = Math.max(0, Math.round(config.tunnelNodeCount || 0));
+  const center = {
+    x: (widthTiles - 1) / 2,
+    y: (heightTiles - 1) / 2,
+    radius: config.tunnelCenterRadius
+  };
+  const network = {
+    centerX: center.x,
+    centerY: center.y,
+    nodes: [],
+    segments: []
+  };
+
+  if (nodeCount === 0) {
+    return network;
+  }
+
+  network.nodes.push(center);
+  const tunnelRandom = createSeededRandom(`${seed}:tunnel-network`);
+  const maxRadius = config.noiseFieldRadius * config.tunnelMaxRadius;
+
+  scatterTunnelNodes(network, nodeCount, maxRadius, widthTiles, heightTiles, config, tunnelRandom);
+  connectTunnelNodeGraph(network, maxRadius, config, tunnelRandom);
+
+  return network;
+}
+
+function scatterTunnelNodes(network, nodeCount, maxRadius, widthTiles, heightTiles, config, random) {
+  const maxAttempts = nodeCount * 48;
+  let attempts = 0;
+
+  while (network.nodes.length < nodeCount && attempts < maxAttempts) {
+    attempts += 1;
+    const angle = random() * Math.PI * 2;
+    const radial = maxRadius * Math.sqrt(random()) * lerp(0.2, 1, random());
+    const x = network.centerX + Math.cos(angle) * radial;
+    const y = network.centerY + Math.sin(angle) * radial;
+    const minDistance = attempts > maxAttempts * 0.65
+      ? config.tunnelMinNodeDistance * 0.55
+      : config.tunnelMinNodeDistance;
+
+    if (
+      x < config.edgeMargin ||
+      y < config.edgeMargin ||
+      x >= widthTiles - config.edgeMargin ||
+      y >= heightTiles - config.edgeMargin ||
+      Math.hypot(x - network.centerX, y - network.centerY) > maxRadius ||
+      tunnelNodeTooClose(network.nodes, x, y, minDistance)
+    ) {
+      continue;
+    }
+
+    const radialProgress = Math.max(0, Math.min(1, Math.hypot(x - network.centerX, y - network.centerY) / maxRadius));
+    network.nodes.push({
+      x,
+      y,
+      radius: Math.max(
+        config.tunnelEndRadius,
+        lerp(config.tunnelRadius, config.tunnelEndRadius, radialProgress) + (random() - 0.5) * 0.24
+      )
+    });
+  }
+}
+
+function tunnelNodeTooClose(nodes, x, y, minDistance) {
+  const minDistanceSq = minDistance * minDistance;
+  return nodes.some((node) => {
+    const dx = node.x - x;
+    const dy = node.y - y;
+    return dx * dx + dy * dy < minDistanceSq;
+  });
+}
+
+function connectTunnelNodeGraph(network, maxRadius, config, random) {
+  if (network.nodes.length <= 1) {
+    return;
+  }
+
+  const connected = new Set([0]);
+  const degrees = new Array(network.nodes.length).fill(0);
+  const edges = new Set();
+
+  while (connected.size < network.nodes.length) {
+    let best = null;
+    let fallback = null;
+
+    for (const fromIndex of connected) {
+      for (let toIndex = 1; toIndex < network.nodes.length; toIndex += 1) {
+        if (connected.has(toIndex)) {
+          continue;
+        }
+
+        const fromMaxDegree = fromIndex === 0 ? config.tunnelCenterMaxDegree : config.tunnelMaxNodeDegree;
+        const score = tunnelConnectionScore(
+          network.nodes[fromIndex],
+          network.nodes[toIndex],
+          fromIndex,
+          degrees,
+          network,
+          maxRadius,
+          config,
+          random
+        );
+        const candidate = { fromIndex, toIndex, score };
+        if (!fallback || score < fallback.score) {
+          fallback = candidate;
+        }
+        if (degrees[fromIndex] >= fromMaxDegree) {
+          continue;
+        }
+        if (!best || score < best.score) {
+          best = candidate;
+        }
+      }
+    }
+
+    const next = best || fallback;
+    if (!next) {
+      break;
+    }
+
+    addTunnelGraphEdge(network, next.fromIndex, next.toIndex, degrees, edges, config, random);
+    connected.add(next.toIndex);
+  }
+
+  const candidates = [];
+  for (let fromIndex = 0; fromIndex < network.nodes.length; fromIndex += 1) {
+    for (let toIndex = fromIndex + 1; toIndex < network.nodes.length; toIndex += 1) {
+      const key = tunnelEdgeKey(fromIndex, toIndex);
+      const distance = tunnelNodeDistance(network.nodes[fromIndex], network.nodes[toIndex]);
+      if (
+        edges.has(key) ||
+        distance > config.tunnelMaxConnectionLength ||
+        degrees[fromIndex] >= (fromIndex === 0 ? config.tunnelCenterMaxDegree : config.tunnelMaxNodeDegree) ||
+        degrees[toIndex] >= (toIndex === 0 ? config.tunnelCenterMaxDegree : config.tunnelMaxNodeDegree)
+      ) {
+        continue;
+      }
+
+      candidates.push({
+        fromIndex,
+        toIndex,
+        score: distance * lerp(0.75, 1.35, random()) * (1 + (degrees[fromIndex] + degrees[toIndex]) * 0.12)
+      });
+    }
+  }
+
+  candidates.sort((a, b) => a.score - b.score);
+  const extraCount = Math.min(Math.max(0, Math.round(config.tunnelExtraConnectionCount || 0)), candidates.length);
+  for (let index = 0; index < extraCount; index += 1) {
+    const candidate = candidates[index];
+    addTunnelGraphEdge(network, candidate.fromIndex, candidate.toIndex, degrees, edges, config, random);
+  }
+}
+
+function tunnelConnectionScore(from, to, fromIndex, degrees, network, maxRadius, config, random) {
+  const distance = tunnelNodeDistance(from, to);
+  const centerPenalty = fromIndex === 0 && degrees[fromIndex] >= 2 ? 5 + degrees[fromIndex] : 1;
+  const degreePenalty = 1 + degrees[fromIndex] * 0.28;
+  const fromRadial = Math.hypot(from.x - network.centerX, from.y - network.centerY);
+  const toRadial = Math.hypot(to.x - network.centerX, to.y - network.centerY);
+  const radialBias = 1 + Math.abs(toRadial - fromRadial) / Math.max(1, maxRadius) * 0.18;
+  return distance * centerPenalty * degreePenalty * radialBias * lerp(0.85, 1.18, random());
+}
+
+function addTunnelGraphEdge(network, fromIndex, toIndex, degrees, edges, config, random) {
+  const key = tunnelEdgeKey(fromIndex, toIndex);
+  if (edges.has(key)) {
+    return;
+  }
+
+  edges.add(key);
+  degrees[fromIndex] += 1;
+  degrees[toIndex] += 1;
+  network.segments.push({
+    from: network.nodes[fromIndex],
+    to: network.nodes[toIndex],
+    curve: (random() - 0.5) * config.tunnelCurveStrength
+  });
+}
+
+function tunnelNodeDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function tunnelEdgeKey(a, b) {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+function tunnelDensityCut(network, x, y, sampleX, sampleY, noise, z, config) {
+  if (network.nodes.length === 0) {
+    return 0;
+  }
+
+  const radiusNoise =
+    noise(
+      sampleX * config.tunnelNoiseScale,
+      sampleY * config.tunnelNoiseScale,
+      z * 0.23 + 509.7
+    ) * config.tunnelRadiusJitter;
+  let influence = 0;
+
+  for (const node of network.nodes) {
+    const radius = Math.max(config.tunnelEndRadius, node.radius + radiusNoise);
+    influence = Math.max(influence, radialTunnelInfluence(Math.hypot(x - node.x, y - node.y), radius, config));
+  }
+
+  for (const segment of network.segments) {
+    influence = Math.max(influence, segmentTunnelInfluence(x, y, segment, radiusNoise, config));
+  }
+
+  if (influence <= 0) {
+    return 0;
+  }
+
+  return influence * config.tunnelDensityStrength;
+}
+
+function segmentTunnelInfluence(x, y, segment, radiusNoise, config) {
+  const ax = segment.from.x;
+  const ay = segment.from.y;
+  const bx = segment.to.x;
+  const by = segment.to.y;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lengthSq = dx * dx + dy * dy;
+  const t = lengthSq === 0
+    ? 0
+    : Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / lengthSq));
+  const length = Math.sqrt(lengthSq);
+  const bend = segment.curve * Math.sin(t * Math.PI);
+  const normalX = length === 0 ? 0 : -dy / length;
+  const normalY = length === 0 ? 0 : dx / length;
+  const closestX = ax + dx * t + normalX * bend;
+  const closestY = ay + dy * t + normalY * bend;
+  const radius = Math.max(
+    config.tunnelEndRadius,
+    lerp(segment.from.radius, segment.to.radius, t) + radiusNoise
+  );
+
+  return radialTunnelInfluence(Math.hypot(x - closestX, y - closestY), radius, config);
+}
+
+function radialTunnelInfluence(distance, radius, config) {
+  if (distance <= radius) {
+    return 1;
+  }
+
+  return 1 - smoothstep(radius, radius + config.tunnelFeather, distance);
 }
 
 function fractalSimplex3D(noise, x, y, z, config) {
@@ -610,6 +966,10 @@ function smoothstep(edge0, edge1, value) {
 
   const x = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
   return x * x * (3 - 2 * x);
+}
+
+function lerp(from, to, amount) {
+  return from + (to - from) * amount;
 }
 
 function pruneSmallRockMaskComponents(mask, widthTiles, heightTiles, minSize) {
@@ -872,8 +1232,8 @@ function floodPassable(startIndex, tiles, playable, visited, widthTiles, heightT
   return { seed, size, indexes };
 }
 
-function seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config) {
-  const candidates = createResourceCandidateSeeds(tiles, widthTiles, heightTiles, random, config);
+function seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config, seed) {
+  const candidates = createResourceCandidateSeeds(tiles, widthTiles, heightTiles, random, config, seed);
   connectResourceCandidates(tiles, candidates, widthTiles, heightTiles, random, config);
 
   const visited = new Set();
@@ -886,7 +1246,8 @@ function seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, conf
 
     const component = collectCandidateComponent(candidate, candidates, visited, widthTiles, heightTiles);
     const graphAmount = component.reduce((total, node) => total + resourceGraphAmount(node), 0);
-    const keepProbability = Math.pow(config.resourceGraphKeepDegradation, Math.max(0, graphAmount - 1));
+    const spawnCount = component.filter((node) => node.resource !== RESOURCE_TYPE.rock).length;
+    const keepProbability = resourceGraphKeepProbability(spawnCount, config);
     if (random() > keepProbability) {
       continue;
     }
@@ -894,7 +1255,7 @@ function seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, conf
     keptGraphs.push({
       nodes: component,
       graphAmount,
-      spawnCount: component.filter((node) => node.resource !== RESOURCE_TYPE.rock).length,
+      spawnCount,
       order: random()
     });
   }
@@ -925,23 +1286,50 @@ function seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, conf
     spawnedGraphs += 1;
     spawnedTiles += graph.spawnCount;
   }
+
+  cullSmallOreComponents(tiles, amounts, widthTiles, heightTiles, random, config);
 }
 
-function createResourceCandidateSeeds(tiles, widthTiles, heightTiles, random, config) {
+function createResourceCandidateSeeds(tiles, widthTiles, heightTiles, random, config, seed) {
   const candidates = new Map();
+  const resourceNoise = createSimplexNoise3D(`${seed}:resource-density`);
+  const oreAmountNoise = createSimplexNoise3D(`${seed}:ore-amount`);
 
   for (let y = 1; y < heightTiles - 1; y += 1) {
     for (let x = 1; x < widthTiles - 1; x += 1) {
       const index = y * widthTiles + x;
-      if (tiles[index] !== ASTEROID_TILE.rock || random() > config.resourceCandidateChance) {
+      if (tiles[index] !== ASTEROID_TILE.rock) {
         continue;
       }
 
-      addResourceCandidate(candidates, index, x, y, randomResourceType(random, config), random);
+      const density = resourceCandidateDensity(x, y, random, config, resourceNoise);
+      if (density <= 0 || random() > config.resourceCandidateChance * density) {
+        continue;
+      }
+
+      addResourceCandidate(candidates, index, x, y, randomResourceType(random, config), random, config, oreAmountNoise);
     }
   }
 
   return candidates;
+}
+
+function resourceCandidateDensity(x, y, random, config, resourceNoise) {
+  const broad = (resourceNoise(
+    x * config.resourceNoiseScale,
+    y * config.resourceNoiseScale,
+    41.17
+  ) + 1) * 0.5;
+  const detail = (resourceNoise(
+    x * config.resourceNoiseDetailScale,
+    y * config.resourceNoiseDetailScale,
+    93.61
+  ) + 1) * 0.5;
+  const jitter = (random() - 0.5) * config.resourceNoiseJitter;
+  const detailWeight = Math.max(0, Math.min(1, config.resourceNoiseDetailWeight));
+  const score = (broad * (1 - detailWeight) + detail * detailWeight + jitter) * config.resourceNoiseMultiplier;
+
+  return smoothstep(config.resourceNoiseThreshold, config.resourceNoiseThreshold + config.resourceNoiseFeather, score);
 }
 
 function randomResourceType(random, config) {
@@ -957,7 +1345,7 @@ function randomResourceType(random, config) {
   return RESOURCE_TYPE.rock;
 }
 
-function addResourceCandidate(candidates, index, x, y, resource, random) {
+function addResourceCandidate(candidates, index, x, y, resource, random, config, oreAmountNoise) {
   if (candidates.has(index)) {
     return candidates.get(index);
   }
@@ -967,10 +1355,37 @@ function addResourceCandidate(candidates, index, x, y, resource, random) {
     x,
     y,
     resource,
-    amount: resource === RESOURCE_TYPE.ore ? 1 + Math.floor(random() * 3) : 1
+    amount: resource === RESOURCE_TYPE.ore
+      ? oreAmountForCandidate(x, y, random, config, oreAmountNoise)
+      : 1
   };
   candidates.set(index, candidate);
   return candidate;
+}
+
+function oreAmountForCandidate(x, y, random, config, oreAmountNoise) {
+  const broad = (oreAmountNoise(
+    x * config.oreAmountNoiseScale,
+    y * config.oreAmountNoiseScale,
+    19.31
+  ) + 1) * 0.5;
+  const detail = (oreAmountNoise(
+    x * config.oreAmountNoiseDetailScale,
+    y * config.oreAmountNoiseDetailScale,
+    71.73
+  ) + 1) * 0.5;
+  const jitter = (random() - 0.5) * 0.08;
+  const score = (broad * 0.78 + detail * 0.22 + jitter) * config.oreAmountNoiseMultiplier;
+
+  if (score >= config.oreAmountThreeThreshold) {
+    return 3;
+  }
+
+  if (score >= config.oreAmountTwoThreshold) {
+    return 2;
+  }
+
+  return 1;
 }
 
 function connectResourceCandidates(tiles, candidates, widthTiles, heightTiles, random, config) {
@@ -1001,7 +1416,9 @@ function connectResourceCandidates(tiles, candidates, widthTiles, heightTiles, r
         index % widthTiles,
         Math.floor(index / widthTiles),
         RESOURCE_TYPE.rock,
-        random
+        random,
+        config,
+        null
       );
     }
   }
@@ -1078,6 +1495,66 @@ function resourceGraphAmount(node) {
   }
 
   return node.amount;
+}
+
+function resourceGraphKeepProbability(spawnCount, config) {
+  if (spawnCount <= 0) {
+    return 0;
+  }
+
+  const cullProbability = Math.pow(config.resourceGraphKeepDegradation, spawnCount);
+  return Math.max(config.resourceGraphMinKeepChance, 1 - cullProbability);
+}
+
+function cullSmallOreComponents(tiles, amounts, widthTiles, heightTiles, random, config) {
+  const maxSize = Math.max(0, Math.round(config.resourceSmallOreCullMaxSize || 0));
+  if (maxSize <= 0) {
+    return;
+  }
+
+  const visited = new Set();
+  for (let index = 0; index < tiles.length; index += 1) {
+    if (visited.has(index) || tiles[index] !== ASTEROID_TILE.ore) {
+      continue;
+    }
+
+    const component = collectOreComponent(index, tiles, visited, widthTiles, heightTiles);
+    if (component.length > maxSize) {
+      continue;
+    }
+
+    const keepProbability = 1 - Math.pow(config.resourceSmallOreKeepDegradation, component.length);
+    if (random() <= keepProbability) {
+      continue;
+    }
+
+    for (const oreIndex of component) {
+      tiles[oreIndex] = ASTEROID_TILE.rock;
+      amounts[oreIndex] = 0;
+    }
+  }
+}
+
+function collectOreComponent(startIndex, tiles, visited, widthTiles, heightTiles) {
+  const queue = [startIndex];
+  const component = [];
+  visited.add(startIndex);
+
+  while (queue.length > 0) {
+    const index = queue.shift();
+    component.push(index);
+
+    for (const neighborIndex of neighborIndexes(index, widthTiles, heightTiles)) {
+      if (visited.has(neighborIndex) || tiles[neighborIndex] !== ASTEROID_TILE.ore) {
+        continue;
+      }
+
+      visited.add(neighborIndex);
+      queue.push(neighborIndex);
+    }
+  }
+
+  return component;
 }
 
 function collectCandidateComponent(start, candidates, visited, widthTiles, heightTiles) {

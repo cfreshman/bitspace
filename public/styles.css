@@ -25,3 +25,85 @@ body {
   opacity: 0;
   pointer-events: none;
 }
+
+body.mapgen-active {
+  overflow: auto;
+}
+
+body.mapgen-active #scene {
+  display: none;
+}
+
+.mapgen-panel {
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 14px;
+  color: #d7e8ef;
+  background: #050608;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.mapgen-controls {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+  padding: 0 0 12px;
+  background: #050608;
+}
+
+.mapgen-controls label {
+  display: grid;
+  gap: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.mapgen-controls input,
+.mapgen-controls button {
+  box-sizing: border-box;
+  height: 28px;
+  border: 1px solid #5d7480;
+  border-radius: 0;
+  color: #d7e8ef;
+  background: #10151a;
+  font: inherit;
+}
+
+.mapgen-controls input {
+  width: 92px;
+  padding: 3px 6px;
+}
+
+#mapgen-seed {
+  width: 180px;
+}
+
+.mapgen-controls button {
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.mapgen-controls button:hover {
+  color: #050608;
+  background: #d7e8ef;
+}
+
+#mapgen-preview {
+  display: block;
+  width: min(768px, 100%);
+  height: auto;
+  border: 1px solid #5d7480;
+  background: #000000;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.mapgen-stats {
+  max-width: 768px;
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+}

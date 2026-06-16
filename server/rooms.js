@@ -486,15 +486,16 @@ export function createRoomManager(options = {}) {
       return { ok: false, reason: "empty_room" };
     }
 
+    const participants = sortedParticipants(room);
     room.state = ROOM_STATES.active;
     room.startedAtMs = now();
     room.startReason = reason;
     room.arena = createArena({
       id: room.id,
-      seed: room.seed
+      seed: room.seed,
+      playerCount: participants.length
     });
 
-    const participants = sortedParticipants(room);
     const spawnNumbers = randomizedSpawnNumbers(room.seed, participants.length);
     for (let index = 0; index < participants.length; index += 1) {
       const participant = participants[index];
