@@ -10,7 +10,7 @@ import {
 } from "/shared/upgrades.js";
 
 const ENTITY_PIXEL_SIZE = 1;
-const STAR_CELL_SIZE = 16;
+const STAR_CELL_SIZE = 13;
 const STAR_PARALLAX = 0.22;
 const MENU_STAR_SEED = "bitspace-menu";
 const MENU_STAR_SCROLL_SPEED = 12;
