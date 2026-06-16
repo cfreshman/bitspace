@@ -1008,6 +1008,11 @@ function createMenuPlayer(asteroid) {
     vx: 0,
     vy: 0,
     angle: Math.PI / 4,
+    facingMoveX: 0,
+    facingMoveY: 0,
+    pendingFacingSignX: 0,
+    pendingFacingSignY: 0,
+    pendingFacingSeconds: 0,
     aimAngle: Math.PI / 2,
     mining: false,
     miningRay: null,
@@ -1078,6 +1083,9 @@ function enterMenuRoom(room) {
   player.vx = 0;
   player.vy = 0;
   player.angle = Math.PI / 4;
+  player.facingMoveX = 0;
+  player.facingMoveY = 0;
+  clearPendingFacing(player);
   player.aimAngle = Math.PI / 2;
   player.mining = false;
   player.miningRay = null;
@@ -1107,9 +1115,7 @@ function updateMenuSimulation(timeSeconds) {
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent && player.huckRockEngineCutoutSeconds <= 0;
 
-  if (hasMoveIntent) {
-    player.angle = normalizeAngle(Math.atan2(move.y, move.x));
-  }
+  updateShipFacing(player, move, dtSeconds);
 
   if (canThrust) {
     applyThrusterAcceleration(player, move, effects, dtSeconds);
@@ -2822,6 +2828,79 @@ function applyThrusterAcceleration(player, move, effects, dtSeconds) {
   player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
 }
 
+function updateShipFacing(player, move, dtSeconds) {
+  const hasMoveIntent = move.x !== 0 || move.y !== 0;
+  if (!hasMoveIntent) {
+    player.facingMoveX = 0;
+    player.facingMoveY = 0;
+    clearPendingFacing(player);
+    return;
+  }
+
+  const signX = signAxis(move.x);
+  const signY = signAxis(move.y);
+  if (
+    player.pendingFacingSeconds > 0 &&
+    player.pendingFacingSignX === signX &&
+    player.pendingFacingSignY === signY
+  ) {
+    player.pendingFacingSeconds = Math.max(0, player.pendingFacingSeconds - dtSeconds);
+    player.facingMoveX = move.x;
+    player.facingMoveY = move.y;
+    if (player.pendingFacingSeconds > 0.000001) {
+      return;
+    }
+  } else {
+    clearPendingFacing(player);
+  }
+
+  const previousSignX = signAxis(player.facingMoveX);
+  const previousSignY = signAxis(player.facingMoveY);
+  if (shouldDelayFacingUpdate(previousSignX, previousSignY, signX, signY)) {
+    player.pendingFacingSignX = signX;
+    player.pendingFacingSignY = signY;
+    player.pendingFacingSeconds = Math.max(0, ENGINE.ship.directionKeyGraceSeconds - dtSeconds);
+    player.facingMoveX = move.x;
+    player.facingMoveY = move.y;
+    if (player.pendingFacingSeconds > 0.000001) {
+      return;
+    }
+  }
+
+  player.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  player.facingMoveX = move.x;
+  player.facingMoveY = move.y;
+}
+
+function shouldDelayFacingUpdate(previousSignX, previousSignY, signX, signY) {
+  const previousWasDiagonal = previousSignX !== 0 && previousSignY !== 0;
+  const previousWasIdle = previousSignX === 0 && previousSignY === 0;
+  const currentIsCardinal = (signX !== 0) !== (signY !== 0);
+  const keptOneDiagonalAxis =
+    (signX !== 0 && signX === previousSignX) ||
+    (signY !== 0 && signY === previousSignY);
+  return currentIsCardinal && (
+    previousWasIdle ||
+    (previousWasDiagonal && keptOneDiagonalAxis)
+  );
+}
+
+function clearPendingFacing(player) {
+  player.pendingFacingSignX = 0;
+  player.pendingFacingSignY = 0;
+  player.pendingFacingSeconds = 0;
+}
+
+function signAxis(value) {
+  if (value > 0) {
+    return 1;
+  }
+  if (value < 0) {
+    return -1;
+  }
+  return 0;
+}
+
 function huckRockRecoilImpulse(player) {
   const config = ENGINE.huckRock;
   const rockMass = config.radius * config.radius;
@@ -2861,7 +2940,7 @@ function reconcilePrediction(snapshot, timeSeconds) {
   }
 
   if (!state.prediction.player || state.prediction.player.id !== authoritative.id) {
-    state.prediction.player = { ...authoritative };
+    state.prediction.player = resetPredictedFacingState(authoritative);
     state.prediction.huckRockCooldownSeconds = Number(authoritative.huckRockCooldownSeconds) || 0;
     state.prediction.lastTimeSeconds = timeSeconds;
     return;
@@ -2873,7 +2952,7 @@ function reconcilePrediction(snapshot, timeSeconds) {
   const distance = Math.hypot(dx, dy);
 
   if (distance > PREDICTION_SNAP_DISTANCE) {
-    state.prediction.player = { ...authoritative };
+    state.prediction.player = resetPredictedFacingState(authoritative);
     state.prediction.huckRockCooldownSeconds = Number(authoritative.huckRockCooldownSeconds) || 0;
     state.prediction.lastTimeSeconds = timeSeconds;
     return;
@@ -2891,8 +2970,24 @@ function reconcilePrediction(snapshot, timeSeconds) {
     vx: predicted.vx + (authoritative.vx - predicted.vx) * PREDICTION_VELOCITY_CORRECTION,
     vy: predicted.vy + (authoritative.vy - predicted.vy) * PREDICTION_VELOCITY_CORRECTION,
     angle: predicted.angle,
+    facingMoveX: predicted.facingMoveX,
+    facingMoveY: predicted.facingMoveY,
+    pendingFacingSignX: predicted.pendingFacingSignX,
+    pendingFacingSignY: predicted.pendingFacingSignY,
+    pendingFacingSeconds: predicted.pendingFacingSeconds,
     aimAngle: state.mouse.aimAngle,
     mining: state.mouse.down && !state.chat.active && !state.upgrades.active && !state.build.active && !isInputBlocked()
+  };
+}
+
+function resetPredictedFacingState(player) {
+  return {
+    ...player,
+    facingMoveX: 0,
+    facingMoveY: 0,
+    pendingFacingSignX: 0,
+    pendingFacingSignY: 0,
+    pendingFacingSeconds: 0
   };
 }
 
@@ -2921,9 +3016,7 @@ function updatePrediction(timeSeconds) {
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent && predicted.huckRockEngineCutoutSeconds <= 0;
 
-  if (hasMoveIntent) {
-    predicted.angle = normalizeAngle(Math.atan2(move.y, move.x));
-  }
+  updateShipFacing(predicted, move, dtSeconds);
 
   if (canThrust) {
     applyThrusterAcceleration(predicted, move, effects, dtSeconds);

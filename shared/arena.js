@@ -78,6 +78,11 @@ export function addPlayer(arena, playerOptions) {
     vx: 0,
     vy: 0,
     angle: spawn.angle,
+    facingMoveX: 0,
+    facingMoveY: 0,
+    pendingFacingSignX: 0,
+    pendingFacingSignY: 0,
+    pendingFacingSeconds: 0,
     aimAngle: spawn.angle,
     mining: false,
     miningRay: null,
@@ -172,6 +177,7 @@ export function clearPlayerInput(arena, playerId) {
   };
   player.mining = false;
   player.thrusting = false;
+  clearPendingFacing(player);
   player.miningHoldSeconds = 0;
   player.rayExtension = 0;
   player.buttonTargetId = null;
@@ -384,9 +390,7 @@ function stepPlayer(arena, player, dtSeconds) {
   const canThrust = hasMoveIntent && player.huckRockEngineCutoutSeconds <= 0;
   player.thrusting = canThrust;
 
-  if (hasMoveIntent) {
-    player.angle = normalizeAngle(Math.atan2(move.y, move.x));
-  }
+  updateShipFacing(player, move, dtSeconds);
 
   if (canThrust) {
     applyThrusterAcceleration(player, move, effects, dtSeconds);
@@ -544,6 +548,79 @@ function applyShipFriction(player, dtSeconds) {
 function applyThrusterAcceleration(player, move, effects, dtSeconds) {
   player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
   player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+}
+
+function updateShipFacing(player, move, dtSeconds) {
+  const hasMoveIntent = move.x !== 0 || move.y !== 0;
+  if (!hasMoveIntent) {
+    player.facingMoveX = 0;
+    player.facingMoveY = 0;
+    clearPendingFacing(player);
+    return;
+  }
+
+  const signX = signAxis(move.x);
+  const signY = signAxis(move.y);
+  if (
+    player.pendingFacingSeconds > 0 &&
+    player.pendingFacingSignX === signX &&
+    player.pendingFacingSignY === signY
+  ) {
+    player.pendingFacingSeconds = Math.max(0, player.pendingFacingSeconds - dtSeconds);
+    player.facingMoveX = move.x;
+    player.facingMoveY = move.y;
+    if (player.pendingFacingSeconds > 0.000001) {
+      return;
+    }
+  } else {
+    clearPendingFacing(player);
+  }
+
+  const previousSignX = signAxis(player.facingMoveX);
+  const previousSignY = signAxis(player.facingMoveY);
+  if (shouldDelayFacingUpdate(previousSignX, previousSignY, signX, signY)) {
+    player.pendingFacingSignX = signX;
+    player.pendingFacingSignY = signY;
+    player.pendingFacingSeconds = Math.max(0, ENGINE.ship.directionKeyGraceSeconds - dtSeconds);
+    player.facingMoveX = move.x;
+    player.facingMoveY = move.y;
+    if (player.pendingFacingSeconds > 0.000001) {
+      return;
+    }
+  }
+
+  player.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  player.facingMoveX = move.x;
+  player.facingMoveY = move.y;
+}
+
+function shouldDelayFacingUpdate(previousSignX, previousSignY, signX, signY) {
+  const previousWasDiagonal = previousSignX !== 0 && previousSignY !== 0;
+  const previousWasIdle = previousSignX === 0 && previousSignY === 0;
+  const currentIsCardinal = (signX !== 0) !== (signY !== 0);
+  const keptOneDiagonalAxis =
+    (signX !== 0 && signX === previousSignX) ||
+    (signY !== 0 && signY === previousSignY);
+  return currentIsCardinal && (
+    previousWasIdle ||
+    (previousWasDiagonal && keptOneDiagonalAxis)
+  );
+}
+
+function clearPendingFacing(player) {
+  player.pendingFacingSignX = 0;
+  player.pendingFacingSignY = 0;
+  player.pendingFacingSeconds = 0;
+}
+
+function signAxis(value) {
+  if (value > 0) {
+    return 1;
+  }
+  if (value < 0) {
+    return -1;
+  }
+  return 0;
 }
 
 function huckRockRecoilImpulse(player) {
@@ -1943,6 +2020,7 @@ function killPlayer(player, options = {}) {
   player.buttonTargetSeconds = 0;
   player.buttonTargetActivated = false;
   player.thrusting = false;
+  clearPendingFacing(player);
   player.vx = 0;
   player.vy = 0;
 }

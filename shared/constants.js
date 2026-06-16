@@ -53,7 +53,8 @@ export const ENGINE = Object.freeze({
     thrust: SHIP_THRUST,
     baseTerminalSpeed: SHIP_BASE_TERMINAL_SPEED,
     friction: SHIP_FRICTION,
-    audioSpeedReference: SHIP_BASE_TERMINAL_SPEED
+    audioSpeedReference: SHIP_BASE_TERMINAL_SPEED,
+    directionKeyGraceSeconds: 0.05
   },
   player: {
     startingHealthBars: 3,
@@ -86,7 +87,7 @@ export const ENGINE = Object.freeze({
     damage: 12,
     restitution: 0.78,
     recoilImpulseScale: 1,
-    shipMassScale: 3,
+    shipMassScale: 2,
     lifetimeSeconds: 7,
     maxLobbyRocks: 32,
     fragments: {
