@@ -124,15 +124,16 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     id: "health",
     label: "HEALTH",
     code: "HEALTH",
-    maxLevel: 4,
+    maxLevel: 5,
     description: "ADDS ANOTHER HP BAR",
     baseStatText: "3 HP BARS",
-    visual: "HUD health bar count increases up to seven.",
+    visual: "HUD health bar count increases up to eight.",
     levels: Object.freeze([
-      { cost: CORE_UPGRADE_COSTS[1], effectText: "4 HP BARS", effects: { healthBarsBonus: 1 } },
-      { cost: CORE_UPGRADE_COSTS[2], effectText: "5 HP BARS", effects: { healthBarsBonus: 2 } },
-      { cost: CORE_UPGRADE_COSTS[3], effectText: "6 HP BARS", effects: { healthBarsBonus: 3 } },
-      { cost: CORE_UPGRADE_COSTS[4], effectText: "7 HP BARS", effects: { healthBarsBonus: 4 } }
+      { cost: CORE_UPGRADE_COSTS[0], effectText: "4 HP BARS", effects: { healthBarsBonus: 1 } },
+      { cost: CORE_UPGRADE_COSTS[1], effectText: "5 HP BARS", effects: { healthBarsBonus: 2 } },
+      { cost: CORE_UPGRADE_COSTS[2], effectText: "6 HP BARS", effects: { healthBarsBonus: 3 } },
+      { cost: CORE_UPGRADE_COSTS[3], effectText: "7 HP BARS", effects: { healthBarsBonus: 4 } },
+      { cost: CORE_UPGRADE_COSTS[4], effectText: "8 HP BARS", effects: { healthBarsBonus: 5 } }
     ])
   },
   {

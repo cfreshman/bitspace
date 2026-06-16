@@ -46,9 +46,9 @@ export const ENGINE = Object.freeze({
   },
   player: {
     startingHealthBars: 3,
-    maxHealthBars: 7,
+    maxHealthBars: 8,
     healthPerBar: 100,
-    maxHealth: 300,
+    maxHealth: 800,
     rechargeDelaySeconds: 5,
     maxResourceAmount: 999
   },

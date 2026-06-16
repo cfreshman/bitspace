@@ -52,6 +52,9 @@ const MAX_PARTICLES = 260;
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
 const MENU_THEME_BACKING_COLOR = "#000000";
+const ORE_RING_STEPS = 16;
+const ORE_MINING_ROTATION = 0.26;
+const ORE_OCCLUSION_PADDING = 0.85;
 const stormNoiseCache = new Map();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -377,10 +380,10 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     predictedPlayer,
     renderPlayers
   );
-  const diamondMiningTargets = diamondMiningTargetMap(snapshot);
+  const asteroidMiningTargets = asteroidMiningTargetMap(snapshot);
   drawStars(ctx, snapshot, camera);
   if (options.asteroid) {
-    drawAsteroid(ctx, options.asteroid, camera, colors, options.timeSeconds ?? snapshot.tick / 60, diamondMiningTargets);
+    drawAsteroid(ctx, options.asteroid, camera, colors, options.timeSeconds ?? snapshot.tick / 60, asteroidMiningTargets);
   } else {
     drawWorldBounds(ctx, snapshot, camera);
   }
@@ -662,26 +665,40 @@ function shakeOffset(amount, timeSeconds) {
   };
 }
 
-function diamondMiningTargetMap(snapshot) {
+function asteroidMiningTargetMap(snapshot) {
   const targets = new Map();
 
   for (const miningState of snapshot.asteroidMining || []) {
-    if (miningState.phase === ASTEROID_TILE.diamond) {
-      targets.set(miningState.index, miningState.progress || 0);
-    }
+    targets.set(miningState.index, {
+      phase: miningState.phase,
+      progress: miningState.progress || 0
+    });
   }
 
   for (const player of snapshot.players || []) {
-    if (player.miningRay?.mineable && player.miningRay.tile === ASTEROID_TILE.diamond) {
-      targets.set(player.miningRay.index, player.miningRay.progress || 0);
+    const ray = player.miningRay;
+    if (!ray?.mineable || ray.index === null || ray.index === undefined) {
+      continue;
+    }
+
+    if (ray.tile === ASTEROID_TILE.ore || ray.tile === ASTEROID_TILE.diamond) {
+      const current = targets.get(ray.index);
+      const progress = ray.progress || 0;
+      if (!current || progress > current.progress) {
+        targets.set(ray.index, {
+          phase: null,
+          tile: ray.tile,
+          progress
+        });
+      }
     }
   }
 
   return targets;
 }
 
-function drawAsteroid(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets) {
-  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets);
+function drawAsteroid(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets) {
+  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets);
   drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds);
   if (asteroid.storm) {
     drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
@@ -820,7 +837,7 @@ function stormNoiseForSeed(seed) {
   return noise;
 }
 
-function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMiningTargets) {
+function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
@@ -867,6 +884,7 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
 
   drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors);
 
+  ctx.fillStyle = colors.foreground;
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
       const index = tileY * asteroid.widthTiles + tileX;
@@ -878,7 +896,16 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
       const screenX = Math.round(tileX * tileSize - camera.x);
       const screenY = Math.round(tileY * tileSize - camera.y);
       if (tile === ASTEROID_TILE.ore) {
-        drawOreRings(ctx, screenX, screenY, tileSize, amountAt(asteroid, index), hashCell(asteroid.seed, tileX, tileY));
+        const amount = amountAt(asteroid, index);
+        drawOreRings(
+          ctx,
+          screenX,
+          screenY,
+          tileSize,
+          amount,
+          hashCell(asteroid.seed, tileX, tileY),
+          oreMiningProgressFor(asteroidMiningTargets, index, amount)
+        );
       } else if (tile === ASTEROID_TILE.diamond) {
         drawDiamondWireframe(
           ctx,
@@ -886,7 +913,7 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, diamondMi
           screenY,
           tileSize,
           hashCell(asteroid.seed, tileX, tileY),
-          diamondMiningTargets.get(index) ?? null
+          diamondMiningProgressFor(asteroidMiningTargets, index)
         );
       }
     }
@@ -1361,26 +1388,107 @@ function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX
   }
 }
 
-function drawOreRings(ctx, tileX, tileY, size, amount, hash) {
+function oreMiningProgressFor(targets, index, amount) {
+  const target = targets.get(index);
+  if (!target) {
+    return null;
+  }
+
+  const expectedPhase = `${ASTEROID_TILE.ore}:${amount}`;
+  if (target.phase !== expectedPhase && target.tile !== ASTEROID_TILE.ore) {
+    return null;
+  }
+
+  return clamp(target.progress || 0, 0, 1);
+}
+
+function diamondMiningProgressFor(targets, index) {
+  const target = targets.get(index);
+  if (!target || (target.phase !== ASTEROID_TILE.diamond && target.tile !== ASTEROID_TILE.diamond)) {
+    return null;
+  }
+
+  return clamp(target.progress || 0, 0, 1);
+}
+
+function drawOreRings(ctx, tileX, tileY, size, amount, hash, miningProgress = null) {
+  const pieces = buildOrePieces(tileX, tileY, size, amount, hash, miningProgress);
+  const drawOrder = [...pieces].sort((a, b) => a.depth - b.depth);
+
+  for (const piece of drawOrder) {
+    const occluders = pieces
+      .filter((other) => other.depth > piece.depth)
+      .map(orePieceOccluder);
+    drawOrePiece(ctx, piece, occluders);
+  }
+}
+
+function buildOrePieces(tileX, tileY, size, amount, hash, miningProgress) {
   const count = clamp(Math.round(amount), 1, 3);
+  const activeIndex = count - 1;
+  const progress = miningProgress === null ? 0 : clamp(miningProgress, 0, 1);
+  const pieces = [];
 
   for (let index = 0; index < count; index += 1) {
     const seed = hash ^ Math.imul(index + 1, 1597334677);
     const radius = 2 + randomUnit(seed, 1) * 0.65;
     const margin = Math.ceil(radius + 2);
-    const center = {
-      x: tileX + margin + Math.round(randomUnit(seed, 2) * (size - margin * 2)),
-      y: tileY + margin + Math.round(randomUnit(seed, 3) * (size - margin * 2))
-    };
-    const tilt = randomUnit(seed, 4) * (Math.PI / 4);
-    const tiltAxis = randomUnit(seed, 5) * Math.PI * 2;
-    const spin = randomUnit(seed, 6) * Math.PI * 2;
+    const centerX = tileX + margin + Math.round(randomUnit(seed, 2) * (size - margin * 2));
+    const centerY = tileY + margin + Math.round(randomUnit(seed, 3) * (size - margin * 2));
+    const pieceProgress = index === activeIndex ? progress : 0;
+    const rotateSign = randomUnit(seed, 7) < 0.5 ? -1 : 1;
+    const tiltSign = randomUnit(seed, 8) < 0.5 ? -1 : 1;
+    const tilt = clamp(randomUnit(seed, 4) * (Math.PI / 4) + tiltSign * pieceProgress * 0.07, 0, Math.PI / 4);
+    const tiltAxis = randomUnit(seed, 5) * Math.PI * 2 + rotateSign * pieceProgress * ORE_MINING_ROTATION;
+    const spin = randomUnit(seed, 6) * Math.PI * 2 + rotateSign * pieceProgress * 0.38;
+    const depth = index + randomUnit(seed, 9) * 0.08;
 
-    drawProjectedRing(ctx, center.x, center.y, radius, tilt, tiltAxis, spin);
+    pieces.push({
+      centerX,
+      centerY,
+      radius,
+      tilt,
+      tiltAxis,
+      spin,
+      depth
+    });
+  }
+
+  return pieces;
+}
+
+function drawOrePiece(ctx, piece, occluders) {
+  const points = projectedRingPoints(piece);
+
+  for (let index = 0; index < points.length; index += 1) {
+    const from = points[index];
+    const to = points[(index + 1) % points.length];
+    drawPixelLine(ctx, from.x, from.y, to.x, to.y, occluders);
   }
 }
 
-function drawProjectedRing(ctx, centerX, centerY, radius, tilt, tiltAxis, spin) {
+function orePieceOccluder(piece) {
+  const axis = {
+    x: Math.cos(piece.tiltAxis),
+    y: Math.sin(piece.tiltAxis)
+  };
+  const perpendicular = {
+    x: -axis.y,
+    y: axis.x
+  };
+
+  return {
+    type: "ellipse",
+    x: piece.centerX,
+    y: piece.centerY,
+    axis,
+    perpendicular,
+    radiusX: piece.radius + ORE_OCCLUSION_PADDING,
+    radiusY: piece.radius * Math.cos(piece.tilt) + ORE_OCCLUSION_PADDING
+  };
+}
+
+function projectedRingPoints({ centerX, centerY, radius, tilt, tiltAxis, spin }) {
   const axis = {
     x: Math.cos(tiltAxis),
     y: Math.sin(tiltAxis)
@@ -1393,8 +1501,8 @@ function drawProjectedRing(ctx, centerX, centerY, radius, tilt, tiltAxis, spin) 
   const sinTilt = Math.sin(tilt);
   const points = [];
 
-  for (let step = 0; step < 16; step += 1) {
-    const angle = spin + (step / 16) * Math.PI * 2;
+  for (let step = 0; step < ORE_RING_STEPS; step += 1) {
+    const angle = spin + (step / ORE_RING_STEPS) * Math.PI * 2;
     const alongAxis = Math.cos(angle) * radius;
     const alongTilt = Math.sin(angle) * radius;
     const z = alongTilt * sinTilt;
@@ -1405,11 +1513,7 @@ function drawProjectedRing(ctx, centerX, centerY, radius, tilt, tiltAxis, spin) 
     });
   }
 
-  for (let index = 0; index < points.length; index += 1) {
-    const from = points[index];
-    const to = points[(index + 1) % points.length];
-    drawPixelLine(ctx, from.x, from.y, to.x, to.y);
-  }
+  return points;
 }
 
 function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = null) {
@@ -2030,9 +2134,15 @@ function drawShipHealthIndicator(ctx, x, y, player, colors) {
   ctx.fillStyle = colors.foreground;
 
   const healthRatio = clamp(health / maxHealth, 0, 1);
-  const radius = Math.max(2, Math.floor(player.radius * 0.45));
-  const bottomAngle = Math.PI / 2;
-  const halfSpan = healthRatio * Math.PI;
+  const healthBars = clamp(
+    Math.round(player.healthBars || maxHealth / ENGINE.player.healthPerBar || ENGINE.player.startingHealthBars),
+    1,
+    ENGINE.player.maxHealthBars
+  );
+  const radius = Math.max(3, Math.floor(player.radius * 0.58));
+  const depletedAngle = (1 - healthRatio) * Math.PI * 2;
+  const segmentAngle = (Math.PI * 2) / healthBars;
+  const gapPixels = 0.72;
   const minX = x - radius - 1;
   const maxX = x + radius + 1;
   const minY = y - radius - 1;
@@ -2047,11 +2157,14 @@ function drawShipHealthIndicator(ctx, x, y, player, colors) {
         continue;
       }
 
-      const angle = Math.atan2(dy, dx);
-      const distanceFromBottom = Math.abs(
-        Math.atan2(Math.sin(angle - bottomAngle), Math.cos(angle - bottomAngle))
-      );
-      if (distanceFromBottom > halfSpan) {
+      const clockwiseAngle = positiveModulo(Math.atan2(dy, dx) + Math.PI / 2, Math.PI * 2);
+      if (clockwiseAngle < depletedAngle) {
+        continue;
+      }
+
+      const segmentPosition = positiveModulo(clockwiseAngle, segmentAngle);
+      const boundaryDistance = Math.min(segmentPosition, segmentAngle - segmentPosition);
+      if (healthBars > 1 && boundaryDistance * radius <= gapPixels) {
         continue;
       }
 
@@ -2061,7 +2174,10 @@ function drawShipHealthIndicator(ctx, x, y, player, colors) {
   }
 
   if (!drewPoint) {
-    drawPoint(ctx, x, y + radius);
+    const fallbackAngle = depletedAngle + (healthRatio * Math.PI);
+    const fallbackX = Math.round(x + Math.sin(fallbackAngle) * radius);
+    const fallbackY = Math.round(y - Math.cos(fallbackAngle) * radius);
+    drawPoint(ctx, fallbackX, fallbackY);
   }
 }
 
@@ -2736,6 +2852,16 @@ function isOccluded(x, y, occluders) {
   return occluders.some((occluder) => {
     const dx = x - occluder.x;
     const dy = y - occluder.y;
+    if (occluder.type === "ellipse") {
+      const alongAxis = dx * occluder.axis.x + dy * occluder.axis.y;
+      const alongPerpendicular = dx * occluder.perpendicular.x + dy * occluder.perpendicular.y;
+      return (
+        (alongAxis * alongAxis) / (occluder.radiusX * occluder.radiusX) +
+          (alongPerpendicular * alongPerpendicular) / (occluder.radiusY * occluder.radiusY) <=
+        1
+      );
+    }
+
     return dx * dx + dy * dy <= occluder.radius * occluder.radius;
   });
 }
