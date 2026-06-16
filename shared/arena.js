@@ -274,7 +274,7 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
 
   player.resources.rock = clamp(player.resources.rock - cost, 0, ENGINE.player.maxResourceAmount);
   clearMiningProgress(arena, index);
-  setAsteroidTile(arena, index, ASTEROID_TILE.wall, 0);
+  setAsteroidTile(arena, index, ASTEROID_TILE.rock, 0);
   return {
     ok: true,
     tileX,
