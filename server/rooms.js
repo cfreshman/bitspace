@@ -160,7 +160,7 @@ export function createRoomManager(options = {}) {
       participant.name = client.name;
       participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs || now();
       ensureWaitingPlayer(existingRoom, client);
-      syncLobbyHosts(existingRoom);
+      syncLobbyControls(existingRoom);
       return { ok: true, room: existingRoom, rejoined: true };
     }
 
@@ -194,7 +194,10 @@ export function createRoomManager(options = {}) {
       room.waitingStartedAtMs = joinedAtMs;
       room.autoStartAtMs = joinedAtMs + ENGINE.lobby.autoStartSeconds * 1000;
     }
-    syncLobbyHosts(room);
+    if (room.participants.size === ENGINE.lobby.minPlayers) {
+      room.autoStartAtMs = joinedAtMs + ENGINE.lobby.autoStartSeconds * 1000;
+    }
+    syncLobbyControls(room);
 
     if (room.participants.size >= ENGINE.maxPlayers) {
       armStartCountdown(room, "full");
@@ -222,7 +225,7 @@ export function createRoomManager(options = {}) {
     clientRooms.set(clientId, room.id);
     ensureWaitingPlayer(room, client);
     clearParticipantInput(room, clientId);
-    syncLobbyHosts(room);
+    syncLobbyControls(room);
 
     return { ok: true, room, rejoined: true };
   }
@@ -259,8 +262,11 @@ export function createRoomManager(options = {}) {
     clientRooms.delete(clientId);
     if (room.hostClientId === clientId) {
       room.hostClientId = firstParticipantId(room);
-      syncLobbyHosts(room);
     }
+    if (room.state === ROOM_STATES.waiting && room.participants.size < ENGINE.lobby.minPlayers) {
+      cancelStartCountdown(room);
+    }
+    syncLobbyControls(room);
 
     if (room.state === ROOM_STATES.active) {
       maybeEndActiveRoom(room, "leave");
@@ -290,7 +296,9 @@ export function createRoomManager(options = {}) {
           }
         }
 
-        if (room.participants.size > 0 && !room.countdownArmed) {
+        if (room.participants.size < ENGINE.lobby.minPlayers) {
+          cancelStartCountdown(room);
+        } else if (!room.countdownArmed) {
           const remainingMs = room.autoStartAtMs - now();
           if (remainingMs <= ENGINE.lobby.countdownSeconds * 1000) {
             const result = armStartCountdown(room, "timer");
@@ -300,7 +308,7 @@ export function createRoomManager(options = {}) {
           }
         }
 
-        if (room.participants.size > 0 && now() >= room.autoStartAtMs) {
+        if (room.participants.size >= ENGINE.lobby.minPlayers && now() >= room.autoStartAtMs) {
           const result = startWaitingRoom(room, room.countdownReason || "timer");
           if (result.ok) {
             events.push({ type: "started", room });
@@ -446,8 +454,8 @@ export function createRoomManager(options = {}) {
       return { ok: false, reason: "no_waiting_room" };
     }
 
-    if (room.participants.size === 0) {
-      return { ok: false, reason: "empty_room" };
+    if (room.participants.size < ENGINE.lobby.minPlayers) {
+      return { ok: false, reason: "not_enough_players" };
     }
 
     if (room.countdownArmed) {
@@ -478,13 +486,24 @@ export function createRoomManager(options = {}) {
     };
   }
 
+  function cancelStartCountdown(room) {
+    if (!room?.countdownArmed) {
+      return;
+    }
+
+    room.countdownArmed = false;
+    room.countdownReason = null;
+    room.countdownStartedAtMs = null;
+    room.autoStartAtMs = now() + ENGINE.lobby.autoStartSeconds * 1000;
+  }
+
   function startWaitingRoom(room, reason) {
     if (!room || room.state !== ROOM_STATES.waiting) {
       return { ok: false, reason: "no_waiting_room" };
     }
 
-    if (room.participants.size === 0) {
-      return { ok: false, reason: "empty_room" };
+    if (room.participants.size < ENGINE.lobby.minPlayers) {
+      return { ok: false, reason: "not_enough_players" };
     }
 
     const participants = sortedParticipants(room);
@@ -561,7 +580,10 @@ export function createRoomManager(options = {}) {
     if (!room.participants.has(room.hostClientId)) {
       room.hostClientId = firstParticipantId(room);
     }
-    syncLobbyHosts(room);
+    if (room.participants.size < ENGINE.lobby.minPlayers) {
+      cancelStartCountdown(room);
+    }
+    syncLobbyControls(room);
 
     const emptied = room.participants.size === 0;
     if (emptied) {
@@ -628,7 +650,7 @@ export function createRoomManager(options = {}) {
     for (const hit of hits) {
       const player = room.arena.players.get(hit.ownerId);
       const entity = room.arena.entities.get(hit.targetId);
-      if (!player?.alive || entity?.type !== "lobbyButton") {
+      if (!player?.alive || entity?.type !== "lobbyButton" || entity.hidden) {
         continue;
       }
 
@@ -655,7 +677,7 @@ export function createRoomManager(options = {}) {
       }
 
       const entity = room.arena.entities.get(player.miningRay.targetId);
-      if (entity?.type !== "lobbyButton") {
+      if (entity?.type !== "lobbyButton" || entity.hidden) {
         resetLobbyButtonTarget(player);
         continue;
       }
@@ -824,6 +846,19 @@ function syncLobbyHosts(room) {
   }
 }
 
+function syncLobbyControls(room) {
+  syncLobbyHosts(room);
+
+  if (room.state !== ROOM_STATES.waiting || !room.arena) {
+    return;
+  }
+
+  const startButton = room.arena.entities.get("lobby-start");
+  if (startButton) {
+    startButton.hidden = room.participants.size < ENGINE.lobby.minPlayers;
+  }
+}
+
 function ensureWaitingPlayer(room, client) {
   if (room?.state !== ROOM_STATES.waiting || !room.arena || room.arena.players.has(client.clientId)) {
     return;
@@ -834,7 +869,7 @@ function ensureWaitingPlayer(room, client) {
     name: client.name,
     spawnNumber: nextLobbySpawnNumber(room)
   });
-  syncLobbyHosts(room);
+  syncLobbyControls(room);
 }
 
 function clearParticipantInput(room, clientId) {
@@ -876,6 +911,7 @@ function snapshotRoom(room, clientId) {
     roomId: room.id,
     clientId,
     maxPlayers: ENGINE.maxPlayers,
+    minPlayers: ENGINE.lobby.minPlayers,
     autoStartSeconds: ENGINE.lobby.autoStartSeconds,
     countdownSeconds: ENGINE.lobby.countdownSeconds,
     hostClientId: room.hostClientId,

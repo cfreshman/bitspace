@@ -38,7 +38,7 @@ const ENTITY_MAX_EXTRAPOLATION_SECONDS = 0.22;
 const ELIMINATION_NOTICE_SECONDS = 4;
 const ELIMINATION_NOTICE_MAX = 3;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
-const MINING_AUDIO_MAX_GAIN = 0.034;
+const MINING_AUDIO_MAX_GAIN = 0.022;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
 const AUDIO_COLLISION_CLUNK_SPEED = 18;
 const MENU_PLAYER_ID = "menu-player";
@@ -2560,14 +2560,14 @@ function playLocalClunk(context, intensity) {
   noiseFilter.frequency.exponentialRampToValueAtTime(110, start + 0.11);
   noiseFilter.Q.value = 0.9;
   noiseGain.gain.setValueAtTime(0.0001, start);
-  noiseGain.gain.exponentialRampToValueAtTime(0.055 * intensity, start + 0.006);
+  noiseGain.gain.exponentialRampToValueAtTime(0.034 * intensity, start + 0.006);
   noiseGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
 
   oscillator.type = "square";
   oscillator.frequency.setValueAtTime(155 + intensity * 18, start);
   oscillator.frequency.exponentialRampToValueAtTime(72, start + 0.13);
   oscillatorGain.gain.setValueAtTime(0.0001, start);
-  oscillatorGain.gain.exponentialRampToValueAtTime(0.04 * intensity, start + 0.006);
+  oscillatorGain.gain.exponentialRampToValueAtTime(0.025 * intensity, start + 0.006);
   oscillatorGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.14);
 
   noise.connect(noiseFilter);

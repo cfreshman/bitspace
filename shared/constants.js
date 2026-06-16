@@ -20,6 +20,7 @@ export const ENGINE = Object.freeze({
     timeoutSeconds: 15
   },
   lobby: {
+    minPlayers: 2,
     autoStartSeconds: 300,
     countdownSeconds: 10
   },

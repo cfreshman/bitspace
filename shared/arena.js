@@ -758,7 +758,7 @@ function resolveHuckRockCollisions(arena, rock, previousX = rock.x, previousY = 
   }
 
   for (const entity of arena.entities.values()) {
-    if (entity.type !== "lobbyButton") {
+    if (entity.type !== "lobbyButton" || entity.hidden) {
       continue;
     }
 
@@ -1790,6 +1790,10 @@ function raycastEntities(arena, player, start, angle, maxDistance) {
 
 function entityBlocksRayForPlayer(entity, player) {
   if (entity.type !== "lobbyButton") {
+    return false;
+  }
+
+  if (entity.hidden) {
     return false;
   }
 

@@ -472,6 +472,7 @@ function drawMenuOverlay(ctx, options, colors, textRenderer) {
 function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
   const count = room.players?.length || 0;
   const maxPlayers = room.maxPlayers || ENGINE.maxPlayers;
+  const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
   const secondsLeft = Math.max(0, Math.ceil(((room.autoStartAtMs || 0) - Date.now()) / 1000));
 
   if (room.countdownArmed) {
@@ -486,7 +487,10 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
     fontSize: 8,
     color: colors.foreground
   });
-  drawCenteredText(ctx, textRenderer, `START ${formatClock(secondsLeft)}`, RENDER.width / 2, panel.y + 21, {
+  const status = count < minPlayers
+    ? `NEED ${minPlayers} PLAYERS`
+    : `START ${formatClock(secondsLeft)}`;
+  drawCenteredText(ctx, textRenderer, status, RENDER.width / 2, panel.y + 21, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -1891,6 +1895,10 @@ function drawMediumStar(ctx, x, y) {
 }
 
 function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
+  if (entity.hidden) {
+    return;
+  }
+
   if (entity.type === "lobbyButton") {
     drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRenderer);
     return;
