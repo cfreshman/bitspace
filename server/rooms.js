@@ -24,6 +24,7 @@ const LOBBY_BUTTON_WIDTH = 112;
 const LOBBY_BUTTON_HEIGHT = 32;
 const LOBBY_BUTTON_GAP = 32;
 const HEARTBEAT_TIMEOUT_MS = ENGINE.heartbeat.timeoutSeconds * 1000;
+const FINAL_COUNTDOWN_BEEP_SECONDS = new Set([3, 2, 1]);
 
 export function createRoomManager(options = {}) {
   const now = options.now ?? (() => Date.now());
@@ -308,9 +309,16 @@ export function createRoomManager(options = {}) {
           }
         }
 
+        const countdownBeepEvent = maybeFinalCountdownBeep(room);
+        if (countdownBeepEvent) {
+          events.push(countdownBeepEvent);
+        }
+
         if (room.participants.size >= ENGINE.lobby.minPlayers && now() >= room.autoStartAtMs) {
           const result = startWaitingRoom(room, room.countdownReason || "timer");
           if (result.ok) {
+            room.countdownBeepSeq += 1;
+            events.push({ type: "countdown", room });
             events.push({ type: "started", room });
           }
           continue;
@@ -443,6 +451,7 @@ export function createRoomManager(options = {}) {
       countdownArmed: false,
       countdownReason: null,
       countdownStartedAtMs: null,
+      countdownLastBeepSecond: null,
       countdownBeepSeq: 0
     };
     rooms.set(room.id, room);
@@ -472,6 +481,7 @@ export function createRoomManager(options = {}) {
     room.countdownArmed = true;
     room.countdownReason = reason;
     room.countdownStartedAtMs = now();
+    room.countdownLastBeepSecond = null;
     room.autoStartAtMs = deadlineMs;
 
     if (countdownStarted) {
@@ -494,7 +504,23 @@ export function createRoomManager(options = {}) {
     room.countdownArmed = false;
     room.countdownReason = null;
     room.countdownStartedAtMs = null;
+    room.countdownLastBeepSecond = null;
     room.autoStartAtMs = now() + ENGINE.lobby.autoStartSeconds * 1000;
+  }
+
+  function maybeFinalCountdownBeep(room) {
+    if (!room?.countdownArmed) {
+      return null;
+    }
+
+    const secondsLeft = Math.max(0, Math.ceil((room.autoStartAtMs - now()) / 1000));
+    if (!FINAL_COUNTDOWN_BEEP_SECONDS.has(secondsLeft) || room.countdownLastBeepSecond === secondsLeft) {
+      return null;
+    }
+
+    room.countdownLastBeepSecond = secondsLeft;
+    room.countdownBeepSeq += 1;
+    return { type: "countdown", room };
   }
 
   function startWaitingRoom(room, reason) {

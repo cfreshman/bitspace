@@ -63,7 +63,7 @@ export const ENGINE = Object.freeze({
     diamondSeconds: 5
   },
   build: {
-    wallCostRock: 2,
+    wallCostRock: 1,
     radiusTiles: 4
   },
   huckRock: {
