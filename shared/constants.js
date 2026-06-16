@@ -59,7 +59,7 @@ export const ENGINE = Object.freeze({
     buttonSeconds: 0.1,
     playerDamagePerSecond: 22.5,
     rockSeconds: 0.5,
-    oreSeconds: 1,
+    oreSeconds: 0.5,
     diamondSeconds: 5
   },
   build: {
