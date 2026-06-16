@@ -14,6 +14,7 @@ import {
   clamp,
   clampMagnitude,
   createSeededRandom,
+  inheritedVelocityLaunchAngle,
   roundForSnapshot
 } from "./math.js";
 import {
@@ -164,7 +165,9 @@ export function clearPlayerInput(arena, playerId) {
   player.input = {
     ...createEmptyInput(),
     sessionId: player.inputSessionId,
-    aimAngle: player.input?.aimAngle ?? player.aimAngle
+    aimAngle: player.input?.aimAngle ?? player.aimAngle,
+    huckRockTargetX: player.input?.huckRockTargetX ?? null,
+    huckRockTargetY: player.input?.huckRockTargetY ?? null
   };
   player.mining = false;
   player.thrusting = false;
@@ -472,7 +475,7 @@ function processHuckRockInput(arena, player, dtSeconds) {
     player.resources.rock = clamp(player.resources.rock - cost, 0, ENGINE.player.maxResourceAmount);
   }
 
-  const angle = player.aimAngle ?? player.angle;
+  const angle = huckRockLaunchAngle(player);
   const direction = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -502,6 +505,27 @@ function processHuckRockInput(arena, player, dtSeconds) {
   });
   player.huckRockCooldownSeconds = config.fireIntervalSeconds;
   trimHuckRocks(arena);
+}
+
+function huckRockLaunchAngle(player) {
+  const fallbackAngle = player.aimAngle ?? player.angle;
+  const targetX = player.input?.huckRockTargetX;
+  const targetY = player.input?.huckRockTargetY;
+  if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
+    return fallbackAngle;
+  }
+
+  return inheritedVelocityLaunchAngle({
+    originX: player.x,
+    originY: player.y,
+    inheritedVx: player.vx || 0,
+    inheritedVy: player.vy || 0,
+    targetX,
+    targetY,
+    launchSpeed: ENGINE.huckRock.speed,
+    spawnOffset: ENGINE.huckRock.spawnOffset,
+    fallbackAngle
+  });
 }
 
 function stepHuckRocks(arena, dtSeconds) {

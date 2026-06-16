@@ -7,6 +7,8 @@ export function createEmptyInput() {
     aimAngle: 0,
     mining: false,
     huckRock: false,
+    huckRockTargetX: null,
+    huckRockTargetY: null,
     interact: false,
     build: false
   };
@@ -23,6 +25,8 @@ export function normalizeInput(payload = {}) {
     aimAngle: normalizeAngle(payload.aimAngle),
     mining: Boolean(payload.mining),
     huckRock: Boolean(payload.huckRock),
+    huckRockTargetX: normalizeNullableNumber(payload.huckRockTargetX),
+    huckRockTargetY: normalizeNullableNumber(payload.huckRockTargetY),
     interact: Boolean(payload.interact),
     build: Boolean(payload.build)
   };
@@ -40,6 +44,15 @@ function normalizeAxis(value) {
   }
 
   return Math.max(-1, Math.min(1, number));
+}
+
+function normalizeNullableNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function normalizeMoveVector(x, y) {

@@ -11,6 +11,7 @@ import {
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
+import { inheritedVelocityLaunchAngle } from "/shared/math.js";
 import {
   aggregateUpgradeEffects,
   canAffordUpgrade,
@@ -1505,7 +1506,8 @@ function deterministicContactNormal(a, b) {
 }
 
 function spawnMenuHuckRock(player) {
-  const angle = player.aimAngle ?? player.angle;
+  const target = huckRockTargetForPlayer(player);
+  const angle = huckRockLaunchAngleForPlayer(player, target?.x, target?.y);
   const direction = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -2630,12 +2632,18 @@ function readInput() {
       aimAngle: state.mouse.aimAngle,
       mining: false,
       huckRock: false,
+      huckRockTargetX: null,
+      huckRockTargetY: null,
       interact: false,
       build: false
     });
   }
 
   const move = readMoveVector();
+  const huckRock = readHuckRockInput();
+  const huckRockTarget = huckRock
+    ? huckRockTargetForPlayer(predictedLocalPlayer() || localPlayerFromSnapshot())
+    : null;
 
   return normalizeInput({
     sessionId: inputSessionId,
@@ -2644,7 +2652,9 @@ function readInput() {
     moveY: move.y,
     aimAngle: state.mouse.aimAngle,
     mining: state.mouse.down && !state.upgrades.active && !state.build.active,
-    huckRock: readHuckRockInput(),
+    huckRock,
+    huckRockTargetX: huckRockTarget?.x ?? null,
+    huckRockTargetY: huckRockTarget?.y ?? null,
     interact: false,
     build: false
   });
@@ -2676,6 +2686,37 @@ function readHuckRockInput() {
   }
 
   return true;
+}
+
+function huckRockTargetForPlayer(player) {
+  if (!player) {
+    return null;
+  }
+
+  const render = state.snapshot?.render || RENDER;
+  return {
+    x: player.x - render.width / 2 + state.mouse.x,
+    y: player.y - render.height / 2 + state.mouse.y
+  };
+}
+
+function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
+  const fallbackAngle = player.aimAngle ?? player.angle;
+  if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
+    return fallbackAngle;
+  }
+
+  return inheritedVelocityLaunchAngle({
+    originX: player.x,
+    originY: player.y,
+    inheritedVx: player.vx || 0,
+    inheritedVy: player.vy || 0,
+    targetX,
+    targetY,
+    launchSpeed: ENGINE.huckRock.speed,
+    spawnOffset: ENGINE.huckRock.spawnOffset,
+    fallbackAngle
+  });
 }
 
 function readMoveVector() {

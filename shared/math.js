@@ -22,6 +22,72 @@ export function roundForSnapshot(value) {
   return Math.round(value * 100) / 100;
 }
 
+export function inheritedVelocityLaunchAngle({
+  originX,
+  originY,
+  inheritedVx,
+  inheritedVy,
+  targetX,
+  targetY,
+  launchSpeed,
+  spawnOffset,
+  fallbackAngle
+}) {
+  const rx = targetX - originX;
+  const ry = targetY - originY;
+  if (Math.hypot(rx, ry) <= 0.0001) {
+    return fallbackAngle;
+  }
+
+  const speed = Math.max(0.0001, launchSpeed);
+  const offset = Math.max(0, spawnOffset);
+  const a = inheritedVx * inheritedVx + inheritedVy * inheritedVy - speed * speed;
+  const b = -2 * (rx * inheritedVx + ry * inheritedVy + offset * speed);
+  const c = rx * rx + ry * ry - offset * offset;
+  const time = smallestPositiveRoot(a, b, c);
+  if (!Number.isFinite(time)) {
+    return Math.atan2(ry, rx);
+  }
+
+  const divisor = offset + speed * time;
+  if (divisor <= 0.0001) {
+    return Math.atan2(ry, rx);
+  }
+
+  const directionX = (rx - inheritedVx * time) / divisor;
+  const directionY = (ry - inheritedVy * time) / divisor;
+  if (Math.hypot(directionX, directionY) <= 0.0001) {
+    return Math.atan2(ry, rx);
+  }
+
+  return Math.atan2(directionY, directionX);
+}
+
+function smallestPositiveRoot(a, b, c) {
+  const epsilon = 0.000001;
+  if (Math.abs(a) < epsilon) {
+    if (Math.abs(b) < epsilon) {
+      return Number.NaN;
+    }
+
+    const time = -c / b;
+    return time > epsilon ? time : Number.NaN;
+  }
+
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) {
+    return Number.NaN;
+  }
+
+  const root = Math.sqrt(discriminant);
+  const t1 = (-b - root) / (2 * a);
+  const t2 = (-b + root) / (2 * a);
+  const positive = [t1, t2]
+    .filter((time) => Number.isFinite(time) && time > epsilon)
+    .sort((left, right) => left - right);
+  return positive[0] ?? Number.NaN;
+}
+
 export function createSeededRandom(seed) {
   let state = 1779033703 ^ String(seed).length;
 
