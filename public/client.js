@@ -85,6 +85,7 @@ const cssDefaultTheme = readThemeSource() || {
   background: RENDER.background
 };
 const keys = new Set();
+const releasedKeysUntilKeyup = new Set();
 const storedClientId = getClientId();
 const storedClientSecret = getClientSecret();
 const inputSessionId = randomClientSecret();
@@ -198,11 +199,13 @@ socket.on(SERVER_EVENTS.room, (room) => {
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   if (previousRoomId !== nextRoomId) {
     state.lastRoomId = nextRoomId;
+    releaseSpaceUntilKeyup();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
   }
 
   if (!room || room.state === "menu") {
+    releaseSpaceUntilKeyup();
     state.snapshot = null;
     state.asteroid = null;
     state.prediction.player = null;
@@ -221,6 +224,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
 
   rememberRegisteredRoom(room.roomId);
   if (previousState !== room.state || previousRoomId !== nextRoomId) {
+    releaseSpaceUntilKeyup();
     state.upgrades.active = false;
     state.build.active = false;
     resetLocalDamageAudioState();
@@ -307,6 +311,13 @@ socket.on(SERVER_EVENTS.beep, () => {
 
 window.addEventListener("keydown", (event) => {
   unlockAudio();
+  if (releasedKeysUntilKeyup.has(event.code)) {
+    if (shouldCaptureKey(event.code) || event.code === "Enter" || event.code === "Escape") {
+      event.preventDefault();
+    }
+    return;
+  }
+
   if (state.chat.active) {
     return;
   }
@@ -361,6 +372,14 @@ window.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("keyup", (event) => {
+  if (releasedKeysUntilKeyup.delete(event.code)) {
+    if (shouldCaptureKey(event.code) || event.code === "Enter" || event.code === "Escape") {
+      event.preventDefault();
+    }
+    keys.delete(event.code);
+    return;
+  }
+
   if (state.chat.active) {
     return;
   }
@@ -389,6 +408,7 @@ window.addEventListener("keyup", (event) => {
 
 window.addEventListener("blur", () => {
   keys.clear();
+  releasedKeysUntilKeyup.clear();
   state.mouse.down = false;
 });
 
@@ -1038,6 +1058,7 @@ function enterMenuRoom(room) {
   }
 
   cancelMiningRay();
+  releaseSpaceUntilKeyup();
 
   const player = state.menu.player;
   state.menu.room = room;
@@ -1796,6 +1817,7 @@ function activateReadyFromMenu() {
   state.menu.readySent = true;
   socket.emit(CLIENT_EVENTS.ready, { button: true });
   cancelMiningRay();
+  releaseSpaceUntilKeyup();
 }
 
 function rayRectIntersection(start, direction, rect, maxDistance) {
@@ -3853,6 +3875,18 @@ function normalizeAngle(angle) {
 function normalizeSignedAngle(angle) {
   const normalized = normalizeAngle(angle);
   return normalized > Math.PI ? normalized - Math.PI * 2 : normalized;
+}
+
+function releaseSpaceUntilKeyup() {
+  releaseKeyUntilKeyup("Space");
+}
+
+function releaseKeyUntilKeyup(code) {
+  const wasDown = keys.has(code);
+  keys.delete(code);
+  if (wasDown) {
+    releasedKeysUntilKeyup.add(code);
+  }
 }
 
 function shouldCaptureKey(code) {
