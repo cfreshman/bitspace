@@ -31,6 +31,10 @@ const ROOM_ID_PATTERN = /^room-\d+$/;
 const PREDICTION_SNAP_DISTANCE = 96;
 const PREDICTION_POSITION_CORRECTION = 0.08;
 const PREDICTION_VELOCITY_CORRECTION = 0.2;
+const ENTITY_SNAP_DISTANCE = 56;
+const ENTITY_POSITION_CORRECTION = 0.14;
+const ENTITY_VELOCITY_CORRECTION = 0.32;
+const ENTITY_MAX_EXTRAPOLATION_SECONDS = 0.22;
 const ELIMINATION_NOTICE_SECONDS = 4;
 const ELIMINATION_NOTICE_MAX = 3;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
@@ -104,6 +108,9 @@ const state = {
   prediction: {
     player: null,
     lastTimeSeconds: 0
+  },
+  entitySmoothing: {
+    byId: new Map()
   },
   eliminationNotices: [],
   playerAliveById: new Map(),
@@ -199,6 +206,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
     state.snapshot = null;
     state.asteroid = null;
     state.prediction.player = null;
+    resetEntitySmoothing();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
     state.upgrades.active = false;
@@ -216,6 +224,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
     state.upgrades.active = false;
     state.build.active = false;
     resetLocalDamageAudioState();
+    resetEntitySmoothing();
     cancelMiningRay();
   }
   if (room?.state === "menu") {
@@ -226,6 +235,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   const receivedAtSeconds = performance.now() / 1000;
   snapshot.receivedAtSeconds = receivedAtSeconds;
+  recordEntitySnapshot(snapshot, receivedAtSeconds);
   updateLocalDamageAudio(snapshot, receivedAtSeconds);
   recordEliminations(snapshot, receivedAtSeconds);
   state.snapshot = snapshot;
@@ -515,7 +525,7 @@ function draw(now = 0) {
   const cameraPlayerId = cameraPlayerIdForRoom();
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   const buildTarget = buildTargetFromMouse();
-  const snapshot = readyMenu ? menuSnapshot() : state.snapshot;
+  const snapshot = readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
@@ -2772,6 +2782,322 @@ function predictedLocalPlayer() {
   };
 }
 
+function renderSnapshot(timeSeconds) {
+  if (!state.snapshot) {
+    return null;
+  }
+
+  updateEntitySmoothing(timeSeconds);
+  const sourceEntities = Array.isArray(state.snapshot.entities) ? state.snapshot.entities : [];
+  if (sourceEntities.length === 0) {
+    return state.snapshot;
+  }
+
+  const entities = [];
+  for (const entity of sourceEntities) {
+    const tracked = state.entitySmoothing.byId.get(entity.id);
+    if (!tracked) {
+      entities.push(entity);
+      continue;
+    }
+
+    if (!tracked.hidden) {
+      entities.push(renderEntityForFrame(entity, tracked.render));
+    }
+  }
+
+  return {
+    ...state.snapshot,
+    entities
+  };
+}
+
+function recordEntitySnapshot(snapshot, timeSeconds) {
+  const entities = Array.isArray(snapshot.entities) ? snapshot.entities : [];
+  const seen = new Set();
+
+  for (const entity of entities) {
+    if (!entity?.id || !shouldSmoothEntity(entity)) {
+      continue;
+    }
+
+    seen.add(entity.id);
+    const target = cloneRenderEntity(entity);
+    const tracked = state.entitySmoothing.byId.get(entity.id);
+
+    if (!tracked || tracked.type !== entity.type || tracked.fragment !== Boolean(entity.fragment)) {
+      state.entitySmoothing.byId.set(entity.id, {
+        type: entity.type,
+        fragment: Boolean(entity.fragment),
+        render: cloneRenderEntity(entity),
+        target,
+        lastRenderTimeSeconds: timeSeconds,
+        targetReceivedAtSeconds: timeSeconds,
+        hidden: false
+      });
+      continue;
+    }
+
+    tracked.target = target;
+    tracked.targetReceivedAtSeconds = timeSeconds;
+    tracked.hidden = false;
+
+    const dx = target.x - tracked.render.x;
+    const dy = target.y - tracked.render.y;
+    if (Math.hypot(dx, dy) > ENTITY_SNAP_DISTANCE) {
+      tracked.render = cloneRenderEntity(entity);
+      tracked.lastRenderTimeSeconds = timeSeconds;
+    }
+  }
+
+  for (const id of state.entitySmoothing.byId.keys()) {
+    if (!seen.has(id)) {
+      state.entitySmoothing.byId.delete(id);
+    }
+  }
+}
+
+function updateEntitySmoothing(timeSeconds) {
+  for (const tracked of state.entitySmoothing.byId.values()) {
+    const dtSeconds = clamp(timeSeconds - tracked.lastRenderTimeSeconds, 0, 1 / 15);
+    tracked.lastRenderTimeSeconds = timeSeconds;
+    if (dtSeconds > 0) {
+      advanceRenderEntity(tracked.render, dtSeconds);
+    }
+
+    reconcileRenderEntity(tracked, timeSeconds, dtSeconds);
+
+    if (tracked.render.type === "huckRock") {
+      resolveRenderHuckRockTerrain(tracked);
+    }
+  }
+}
+
+function advanceRenderEntity(entity, dtSeconds) {
+  entity.previousX = entity.x;
+  entity.previousY = entity.y;
+  entity.x += (entity.vx || 0) * dtSeconds;
+  entity.y += (entity.vy || 0) * dtSeconds;
+  entity.angleX = normalizeAngle((entity.angleX || 0) + (entity.spinX || 0) * dtSeconds);
+  entity.angleY = normalizeAngle((entity.angleY || 0) + (entity.spinY || 0) * dtSeconds);
+  entity.angleZ = normalizeAngle((entity.angleZ || 0) + (entity.spinZ || 0) * dtSeconds);
+  entity.ageSeconds = (entity.ageSeconds || 0) + dtSeconds;
+}
+
+function reconcileRenderEntity(tracked, timeSeconds, dtSeconds) {
+  const leadSeconds = clamp(
+    timeSeconds - tracked.targetReceivedAtSeconds,
+    0,
+    ENTITY_MAX_EXTRAPOLATION_SECONDS
+  );
+  const projected = projectRenderEntity(tracked.target, leadSeconds);
+  const dx = projected.x - tracked.render.x;
+  const dy = projected.y - tracked.render.y;
+
+  if (Math.hypot(dx, dy) > ENTITY_SNAP_DISTANCE) {
+    tracked.render = projected;
+    tracked.hidden = false;
+    return;
+  }
+
+  const positionAlpha = frameAlpha(ENTITY_POSITION_CORRECTION, dtSeconds);
+  const velocityAlpha = frameAlpha(ENTITY_VELOCITY_CORRECTION, dtSeconds);
+  tracked.render.x += dx * positionAlpha;
+  tracked.render.y += dy * positionAlpha;
+  tracked.render.vx += ((projected.vx || 0) - (tracked.render.vx || 0)) * velocityAlpha;
+  tracked.render.vy += ((projected.vy || 0) - (tracked.render.vy || 0)) * velocityAlpha;
+  reconcileAngleField(tracked.render, projected, "angleX", positionAlpha);
+  reconcileAngleField(tracked.render, projected, "angleY", positionAlpha);
+  reconcileAngleField(tracked.render, projected, "angleZ", positionAlpha);
+  tracked.render.spinX += ((projected.spinX || 0) - (tracked.render.spinX || 0)) * velocityAlpha;
+  tracked.render.spinY += ((projected.spinY || 0) - (tracked.render.spinY || 0)) * velocityAlpha;
+  tracked.render.spinZ += ((projected.spinZ || 0) - (tracked.render.spinZ || 0)) * velocityAlpha;
+  tracked.render.ageSeconds += ((projected.ageSeconds || 0) - (tracked.render.ageSeconds || 0)) * positionAlpha;
+}
+
+function reconcileAngleField(render, target, field, alpha) {
+  const current = Number(render[field]) || 0;
+  const next = Number(target[field]) || 0;
+  render[field] = normalizeAngle(current + normalizeSignedAngle(next - current) * alpha);
+}
+
+function projectRenderEntity(entity, seconds) {
+  const projected = cloneRenderEntity(entity);
+  projected.x += (projected.vx || 0) * seconds;
+  projected.y += (projected.vy || 0) * seconds;
+  projected.angleX = normalizeAngle((projected.angleX || 0) + (projected.spinX || 0) * seconds);
+  projected.angleY = normalizeAngle((projected.angleY || 0) + (projected.spinY || 0) * seconds);
+  projected.angleZ = normalizeAngle((projected.angleZ || 0) + (projected.spinZ || 0) * seconds);
+  projected.ageSeconds = (projected.ageSeconds || 0) + seconds;
+  return projected;
+}
+
+function resolveRenderHuckRockTerrain(tracked) {
+  const rock = tracked.render;
+  if (!state.asteroid) {
+    return;
+  }
+
+  const hit = nearestRenderHuckRockAsteroidHit(rock, rock.previousX ?? rock.x, rock.previousY ?? rock.y);
+  if (!hit) {
+    return;
+  }
+
+  if (rock.fragment || hit.destroy) {
+    tracked.hidden = true;
+    return;
+  }
+
+  bounceRenderHuckRock(rock, hit);
+}
+
+function nearestRenderHuckRockAsteroidHit(rock, previousX, previousY) {
+  const options = { blockNonPlayable: !state.asteroid?.storm };
+  const blockers = blockingTilesAlongSegment(
+    state.asteroid,
+    previousX,
+    previousY,
+    rock.x,
+    rock.y,
+    rock.radius,
+    options
+  );
+  const seen = new Set();
+  let nearest = null;
+  let buried = false;
+
+  for (const blocker of blockers) {
+    const key = blocker.key ?? `${blocker.tileX}:${blocker.tileY}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    const hit = sweptCircleBoundsHit(
+      previousX,
+      previousY,
+      rock.x,
+      rock.y,
+      rock.radius,
+      blocker.x,
+      blocker.y,
+      blocker.size,
+      blocker.size
+    ) || circleTileOverlap(rock, blocker);
+    if (!hit) {
+      continue;
+    }
+
+    if (!isExposedRenderBlockFace(blocker, hit, options)) {
+      buried = true;
+      continue;
+    }
+
+    if (nearest && hitTime(hit) >= hitTime(nearest)) {
+      continue;
+    }
+
+    nearest = hit;
+  }
+
+  return nearest || (buried ? { destroy: true } : null);
+}
+
+function isExposedRenderBlockFace(blocker, hit, options = {}) {
+  const normalX = Math.abs(hit.normalX) >= Math.abs(hit.normalY) ? Math.sign(hit.normalX) : 0;
+  const normalY = normalX === 0 ? Math.sign(hit.normalY) : 0;
+  if (normalX === 0 && normalY === 0) {
+    return true;
+  }
+
+  return !isBlockingRenderTile(blocker.tileX + normalX, blocker.tileY + normalY, options);
+}
+
+function isBlockingRenderTile(tileX, tileY, options = {}) {
+  const asteroid = state.asteroid;
+  if (!asteroid || tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return options.blockNonPlayable !== false;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  return isAsteroidRockTile(asteroid.tiles[index]) ||
+    (options.blockNonPlayable !== false && !(asteroid.playable[index] === true || asteroid.playable[index] === "1"));
+}
+
+function bounceRenderHuckRock(rock, hit) {
+  if (Number.isFinite(hit.x) && Number.isFinite(hit.y)) {
+    rock.x = hit.x + hit.normalX * 0.01;
+    rock.y = hit.y + hit.normalY * 0.01;
+  } else {
+    rock.x += hit.normalX * hit.overlap;
+    rock.y += hit.normalY * hit.overlap;
+  }
+
+  const normalSpeed = rock.vx * hit.normalX + rock.vy * hit.normalY;
+  if (normalSpeed < 0) {
+    rock.vx -= (1 + ENGINE.huckRock.restitution) * normalSpeed * hit.normalX;
+    rock.vy -= (1 + ENGINE.huckRock.restitution) * normalSpeed * hit.normalY;
+  }
+}
+
+function renderEntityForFrame(authoritative, render) {
+  return {
+    ...authoritative,
+    x: render.x,
+    y: render.y,
+    vx: render.vx,
+    vy: render.vy,
+    angleX: render.angleX,
+    angleY: render.angleY,
+    angleZ: render.angleZ,
+    spinX: render.spinX,
+    spinY: render.spinY,
+    spinZ: render.spinZ,
+    ageSeconds: render.ageSeconds
+  };
+}
+
+function shouldSmoothEntity(entity) {
+  if (!Number.isFinite(entity.x) || !Number.isFinite(entity.y)) {
+    return false;
+  }
+
+  return Number.isFinite(entity.vx) ||
+    Number.isFinite(entity.vy) ||
+    Number.isFinite(entity.spinX) ||
+    Number.isFinite(entity.spinY) ||
+    Number.isFinite(entity.spinZ);
+}
+
+function cloneRenderEntity(entity) {
+  return {
+    ...entity,
+    x: Number(entity.x) || 0,
+    y: Number(entity.y) || 0,
+    vx: Number(entity.vx) || 0,
+    vy: Number(entity.vy) || 0,
+    angleX: Number(entity.angleX) || 0,
+    angleY: Number(entity.angleY) || 0,
+    angleZ: Number(entity.angleZ) || 0,
+    spinX: Number(entity.spinX) || 0,
+    spinY: Number(entity.spinY) || 0,
+    spinZ: Number(entity.spinZ) || 0,
+    ageSeconds: Number(entity.ageSeconds) || 0
+  };
+}
+
+function frameAlpha(perTickAlpha, dtSeconds) {
+  if (dtSeconds <= 0) {
+    return 0;
+  }
+
+  return 1 - Math.pow(1 - perTickAlpha, dtSeconds * ENGINE.tickRate);
+}
+
+function resetEntitySmoothing() {
+  state.entitySmoothing.byId.clear();
+}
+
 function resolvePredictionCollisions(player, effects) {
   resolvePredictionAsteroidCollisions(player);
   resolvePredictionPlayerCollisions(player);
@@ -3522,6 +3848,11 @@ function miningRayExtension(mining, holdSeconds) {
 function normalizeAngle(angle) {
   const fullTurn = Math.PI * 2;
   return ((angle % fullTurn) + fullTurn) % fullTurn;
+}
+
+function normalizeSignedAngle(angle) {
+  const normalized = normalizeAngle(angle);
+  return normalized > Math.PI ? normalized - Math.PI * 2 : normalized;
 }
 
 function shouldCaptureKey(code) {
