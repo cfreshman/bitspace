@@ -6,6 +6,7 @@ export function createEmptyInput() {
     moveY: 0,
     aimAngle: 0,
     mining: false,
+    huckRock: false,
     interact: false,
     build: false
   };
@@ -21,6 +22,7 @@ export function normalizeInput(payload = {}) {
     moveY: move.y,
     aimAngle: normalizeAngle(payload.aimAngle),
     mining: Boolean(payload.mining),
+    huckRock: Boolean(payload.huckRock),
     interact: Boolean(payload.interact),
     build: Boolean(payload.build)
   };

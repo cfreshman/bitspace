@@ -1,6 +1,6 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
 import { ASTEROID_TILE, STORM_STATE, raycastAsteroid } from "/shared/asteroid.js";
-import { createSimplexNoise3D } from "/shared/math.js";
+import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
 import {
   aggregateUpgradeEffects,
   canAffordUpgrade,
@@ -56,6 +56,7 @@ const ORE_RING_STEPS = 16;
 const ORE_MINING_ROTATION = 0.26;
 const ORE_OCCLUSION_PADDING = 0.85;
 const stormNoiseCache = new Map();
+const huckRockShapeCache = new Map();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -1910,6 +1911,11 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     return;
   }
 
+  if (entity.type === "huckRock") {
+    drawHuckRockEntity(ctx, entity, camera, colors);
+    return;
+  }
+
   const screen = worldToScreen(entity, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -1946,7 +1952,7 @@ function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {
     color: colors.foreground
   };
 
-  rows.slice(0, 2).forEach((row, index) => {
+  rows.slice(0, 3).forEach((row, index) => {
     const input = String(row.input || "").toUpperCase();
     const action = String(row.action || "").toUpperCase();
     const rowY = y + index * 11;
@@ -1960,6 +1966,105 @@ function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {
       width: actionWidth + 2
     });
   });
+}
+
+function drawHuckRockEntity(ctx, entity, camera, colors) {
+  const screen = worldToScreen(entity, camera);
+  const radius = Number(entity.radius || ENGINE.huckRock.radius);
+  const points = projectedHuckRockPoints(
+    entity.shapeSeed || entity.id || "huck-rock",
+    Math.round(screen.x),
+    Math.round(screen.y),
+    radius,
+    Number(entity.angleY) || 0,
+    Number(entity.angleX) || 0,
+    Number(entity.angleZ) || 0
+  );
+  const hull = convexHull(points);
+
+  if (hull.length < 2) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+  for (let index = 0; index < hull.length; index += 1) {
+    const from = hull[index];
+    const to = hull[(index + 1) % hull.length];
+    drawPixelLine(ctx, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y));
+  }
+}
+
+function projectedHuckRockPoints(seed, centerX, centerY, radius, yaw, pitch, roll) {
+  return huckRockShapePoints(seed).map((point) => {
+    const rotated = rotatePoint3D(point, yaw, pitch, roll);
+    const perspective = 2.7 / (2.7 - rotated.z * 0.55);
+    return {
+      x: centerX + rotated.x * radius * perspective,
+      y: centerY + rotated.y * radius * perspective
+    };
+  });
+}
+
+function huckRockShapePoints(seed) {
+  const cacheKey = String(seed);
+  const cached = huckRockShapeCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const random = createSeededRandom(cacheKey);
+  const points = [];
+  for (let index = 0; index < 14; index += 1) {
+    const z = random() * 2 - 1;
+    const angle = random() * Math.PI * 2;
+    const radius = Math.sqrt(Math.max(0, 1 - z * z));
+    points.push({
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius,
+      z
+    });
+  }
+
+  huckRockShapeCache.set(cacheKey, points);
+  return points;
+}
+
+function convexHull(points) {
+  const sorted = points
+    .map((point) => ({
+      x: Math.round(point.x * 100) / 100,
+      y: Math.round(point.y * 100) / 100
+    }))
+    .sort((a, b) => a.x - b.x || a.y - b.y);
+
+  if (sorted.length <= 3) {
+    return sorted;
+  }
+
+  const lower = [];
+  for (const point of sorted) {
+    while (lower.length >= 2 && hullCross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+      lower.pop();
+    }
+    lower.push(point);
+  }
+
+  const upper = [];
+  for (let index = sorted.length - 1; index >= 0; index -= 1) {
+    const point = sorted[index];
+    while (upper.length >= 2 && hullCross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+      upper.pop();
+    }
+    upper.push(point);
+  }
+
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function hullCross(origin, a, b) {
+  return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
 }
 
 function drawMenuTitleEntity(ctx, entity, camera, colors, textRenderer) {

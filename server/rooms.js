@@ -309,6 +309,7 @@ export function createRoomManager(options = {}) {
         }
 
         stepArenaFn(room.arena, dtSeconds);
+        events.push(...processLobbyHuckRockButtonHits(room));
         events.push(...processLobbyButtonHits(room, dtSeconds));
       }
 
@@ -616,6 +617,31 @@ export function createRoomManager(options = {}) {
     return events;
   }
 
+  function processLobbyHuckRockButtonHits(room) {
+    if (room.state !== ROOM_STATES.waiting || !room.arena) {
+      return [];
+    }
+
+    const hits = Array.isArray(room.arena.huckRockButtonHits)
+      ? room.arena.huckRockButtonHits.splice(0)
+      : [];
+    for (const hit of hits) {
+      const player = room.arena.players.get(hit.ownerId);
+      const entity = room.arena.entities.get(hit.targetId);
+      if (!player?.alive || entity?.type !== "lobbyButton") {
+        continue;
+      }
+
+      if (entity.hostOnly && room.hostClientId !== player.id) {
+        continue;
+      }
+
+      return activateLobbyButton(room, player.id, entity);
+    }
+
+    return [];
+  }
+
   function processLobbyButtonHits(room, dtSeconds) {
     const events = [];
     if (room.state !== ROOM_STATES.waiting || !room.arena) {
@@ -654,28 +680,35 @@ export function createRoomManager(options = {}) {
       }
 
       player.buttonTargetActivated = true;
-      if (entity.action === "start") {
-        const result = armStartCountdown(room, "host");
-        if (result.ok && result.countdownStarted) {
-          events.push({ type: "countdown", room: result.room });
-        }
-        return events;
-      }
+      return activateLobbyButton(room, player.id, entity);
+    }
 
-      if (entity.action === "leave") {
-        const participant = room.participants.get(player.id);
-        const socketId = participant?.socketId ?? null;
-        const result = leaveClient(player.id);
-        events.push({
-          type: "left",
-          room,
-          clientId: player.id,
-          socketId,
-          emptied: result.emptied === true,
-          beep: true
-        });
-        return events;
+    return events;
+  }
+
+  function activateLobbyButton(room, playerId, entity) {
+    const events = [];
+
+    if (entity.action === "start") {
+      const result = armStartCountdown(room, "host");
+      if (result.ok && result.countdownStarted) {
+        events.push({ type: "countdown", room: result.room });
       }
+      return events;
+    }
+
+    if (entity.action === "leave") {
+      const participant = room.participants.get(playerId);
+      const socketId = participant?.socketId ?? null;
+      const result = leaveClient(playerId);
+      events.push({
+        type: "left",
+        room,
+        clientId: playerId,
+        socketId,
+        emptied: result.emptied === true,
+        beep: true
+      });
     }
 
     return events;

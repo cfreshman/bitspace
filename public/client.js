@@ -1,10 +1,12 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
 import {
   ASTEROID_TILE,
+  blockingTilesAlongSegment,
   STORM_STATE,
   blockingTilesNearCircle,
   createLobbyAsteroid,
   createNaturalAsteroid,
+  isAsteroidRockTile,
   raycastAsteroid
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
@@ -90,7 +92,8 @@ const audio = {
   lastHealth: null,
   lastShake: 0,
   lastClunkAtSeconds: 0,
-  pendingDamage: 0
+  pendingDamage: 0,
+  huckRockBuffer: null
 };
 const state = {
   clientId: storedClientId,
@@ -106,6 +109,7 @@ const state = {
   playerAliveById: new Map(),
   lastRoomId: null,
   inputSeq: 0,
+  nextHuckRockThunkAtSeconds: 0,
   mouse: {
     x: 0,
     y: 0,
@@ -294,6 +298,12 @@ socket.on(SERVER_EVENTS.beep, () => {
 window.addEventListener("keydown", (event) => {
   unlockAudio();
   if (state.chat.active) {
+    return;
+  }
+
+  if (event.code === "Space" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    keys.add(event.code);
     return;
   }
 
@@ -892,6 +902,8 @@ function createMenuState() {
     buttonTargetActivated: false,
     asteroids,
     asteroid,
+    huckRocks: [],
+    huckRockCooldownSeconds: 0,
     player: createMenuPlayer(asteroid)
   };
 }
@@ -1020,6 +1032,8 @@ function enterMenuRoom(room) {
   const player = state.menu.player;
   state.menu.room = room;
   state.menu.asteroid = state.menu.asteroids[room];
+  state.menu.huckRocks = [];
+  state.menu.huckRockCooldownSeconds = 0;
   const center = menuCenter(state.menu.asteroid);
   state.menu.activeTargetId = null;
   resetMenuButtonTarget();
@@ -1078,6 +1092,7 @@ function updateMenuSimulation(timeSeconds) {
   updateThemeRoomSelection(player);
 
   updateMenuMiningRay(player, dtSeconds);
+  updateMenuHuckRocks(player, dtSeconds);
 }
 
 function updateThemeRoomSelection(player) {
@@ -1200,6 +1215,461 @@ function updateMenuMiningRay(player, dtSeconds) {
 
   state.menu.buttonTargetActivated = true;
   activateMenuEntity(entityHit.target);
+}
+
+function updateMenuHuckRocks(player, dtSeconds) {
+  state.menu.huckRockCooldownSeconds = Math.max(0, state.menu.huckRockCooldownSeconds - dtSeconds);
+
+  const movedRocks = [];
+  const roomAtStart = state.menu.room;
+  for (const rock of state.menu.huckRocks) {
+    if (rock.destroyed) {
+      continue;
+    }
+
+    rock.ageSeconds = (rock.ageSeconds || 0) + dtSeconds;
+    if (rock.ageSeconds > (rock.lifetimeSeconds || ENGINE.huckRock.lifetimeSeconds)) {
+      continue;
+    }
+
+    const previousX = rock.x;
+    const previousY = rock.y;
+    rock.previousX = previousX;
+    rock.previousY = previousY;
+    rock.x += rock.vx * dtSeconds;
+    rock.y += rock.vy * dtSeconds;
+    rock.angleX = normalizeAngle((rock.angleX || 0) + (rock.spinX || 0) * dtSeconds);
+    rock.angleY = normalizeAngle((rock.angleY || 0) + (rock.spinY || 0) * dtSeconds);
+    rock.angleZ = normalizeAngle((rock.angleZ || 0) + (rock.spinZ || 0) * dtSeconds);
+    movedRocks.push(rock);
+  }
+
+  const spawnedFragments = [];
+  resolveMenuHuckRockContacts(movedRocks, spawnedFragments);
+
+  const rocks = [];
+  let activatedEntityThisFrame = false;
+  for (const rock of movedRocks) {
+    if (rock.destroyed) {
+      continue;
+    }
+
+    if (rock.fragment) {
+      if (menuHuckRockFragmentAsteroidHit(rock, rock.previousX, rock.previousY)) {
+        continue;
+      }
+      rocks.push(rock);
+      continue;
+    }
+
+    if (menuHuckRockEntityHit(rock, rock.previousX, rock.previousY, spawnedFragments)) {
+      activatedEntityThisFrame = true;
+      state.menu.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
+      if (state.menu.room !== roomAtStart) {
+        return;
+      }
+      continue;
+    }
+
+    if (resolveMenuHuckRockAsteroidCollisions(rock, rock.previousX, rock.previousY, spawnedFragments)) {
+      continue;
+    }
+
+    rocks.push(rock);
+  }
+
+  state.menu.huckRocks = rocks.concat(spawnedFragments);
+
+  if (
+    !activatedEntityThisFrame &&
+    !state.chat.active &&
+    !state.mouse.down &&
+    keys.has("Space") &&
+    state.menu.huckRockCooldownSeconds <= 0
+  ) {
+    spawnMenuHuckRock(player);
+    requestHuckRockThunk();
+    state.menu.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
+  }
+}
+
+function resolveMenuHuckRockContacts(rocks, spawnedFragments) {
+  for (let index = 0; index < rocks.length; index += 1) {
+    const a = rocks[index];
+    if (a.destroyed || a.fragment) {
+      continue;
+    }
+
+    for (let otherIndex = index + 1; otherIndex < rocks.length; otherIndex += 1) {
+      const b = rocks[otherIndex];
+      if (b.destroyed || b.fragment || !huckRocksOverlap(a, b)) {
+        continue;
+      }
+
+      bounceHuckRocks(a, b, spawnedFragments);
+      if (a.destroyed) {
+        break;
+      }
+    }
+  }
+}
+
+function huckRocksOverlap(a, b) {
+  const radius = (a.radius || ENGINE.huckRock.radius) + (b.radius || ENGINE.huckRock.radius);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return dx * dx + dy * dy < radius * radius;
+}
+
+function bounceHuckRocks(a, b, spawnedFragments) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const distance = Math.hypot(dx, dy);
+  const normal = distance > 0
+    ? { x: dx / distance, y: dy / distance }
+    : deterministicContactNormal(a.id, b.id);
+  const minDistance = (a.radius || ENGINE.huckRock.radius) + (b.radius || ENGINE.huckRock.radius);
+  const overlap = Math.max(0, minDistance - distance);
+
+  if (overlap > 0) {
+    a.x -= normal.x * overlap * 0.5;
+    a.y -= normal.y * overlap * 0.5;
+    b.x += normal.x * overlap * 0.5;
+    b.y += normal.y * overlap * 0.5;
+  }
+
+  const relativeSpeed = (b.vx - a.vx) * normal.x + (b.vy - a.vy) * normal.y;
+  if (relativeSpeed < 0) {
+    const impulse = (-(1 + ENGINE.huckRock.restitution) * relativeSpeed) / 2;
+    a.vx -= normal.x * impulse;
+    a.vy -= normal.y * impulse;
+    b.vx += normal.x * impulse;
+    b.vy += normal.y * impulse;
+  }
+
+  consumeHuckRockBounce(a, spawnedFragments, "rock");
+  consumeHuckRockBounce(b, spawnedFragments, "rock");
+}
+
+function consumeHuckRockBounce(rock, spawnedFragments, reason) {
+  if ((rock.bounceCount || 0) >= 1) {
+    breakMenuHuckRock(rock, null, spawnedFragments, reason);
+    return;
+  }
+
+  rock.bounceCount = 1;
+}
+
+function breakMenuHuckRock(rock, hit, spawnedFragments, reason = "break") {
+  if (hit && !hit.destroy) {
+    bounceMenuHuckRock(rock, hit);
+  }
+
+  if (!rock.fragment && !rock.fragmentsSpawned) {
+    rock.fragmentsSpawned = true;
+    spawnMenuHuckRockFragments(rock, spawnedFragments, reason);
+  }
+  rock.destroyed = true;
+}
+
+function spawnMenuHuckRockFragments(rock, spawnedFragments, reason) {
+  const config = ENGINE.huckRock.fragments;
+  const count = config.minCount + Math.floor(Math.random() * (config.maxCount - config.minCount + 1));
+  const speed = Math.hypot(rock.vx || 0, rock.vy || 0);
+  const baseAngle = speed > 0.001
+    ? Math.atan2(rock.vy, rock.vx)
+    : Number(rock.angleZ) || 0;
+  const fragments = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const scale = config.minRadiusScale + Math.random() * (config.maxRadiusScale - config.minRadiusScale);
+    const radius = Math.max(1.25, (rock.radius || ENGINE.huckRock.radius) * scale);
+    const angle = baseAngle + (Math.random() * 2 - 1) * config.spreadRadians;
+    const fragmentSpeed = Math.max(
+      18,
+      speed * (config.minSpeedScale + Math.random() * (config.maxSpeedScale - config.minSpeedScale))
+    );
+    const sideAngle = baseAngle + Math.PI / 2;
+    const sideJitter = (Math.random() * 2 - 1) * config.spawnJitter;
+    const outwardJitter = Math.random() * config.spawnJitter;
+    const id = `${rock.id}:fragment:${state.menu.tick}:${index}:${Math.random().toString(36).slice(2)}`;
+    const fragment = {
+      id,
+      type: "huckRock",
+      fragment: true,
+      ownerId: rock.ownerId,
+      shapeSeed: `${rock.shapeSeed || rock.id}:fragment:${index}:${reason}`,
+      x: rock.x +
+        Math.cos(baseAngle) * outwardJitter +
+        Math.cos(sideAngle) * sideJitter,
+      y: rock.y +
+        Math.sin(baseAngle) * outwardJitter +
+        Math.sin(sideAngle) * sideJitter,
+      vx: Math.cos(angle) * fragmentSpeed,
+      vy: Math.sin(angle) * fragmentSpeed,
+      radius,
+      angleX: Math.random() * Math.PI * 2,
+      angleY: Math.random() * Math.PI * 2,
+      angleZ: Math.random() * Math.PI * 2,
+      spinX: (Math.random() - 0.5) * 5.5,
+      spinY: (Math.random() - 0.5) * 5.5,
+      spinZ: (Math.random() - 0.5) * 3.2,
+      bounceCount: 2,
+      ageSeconds: 0,
+      lifetimeSeconds: config.minLifetimeSeconds +
+        Math.random() * (config.maxLifetimeSeconds - config.minLifetimeSeconds),
+      bornTick: state.menu.tick
+    };
+
+    if (!menuHuckRockFragmentAsteroidHit(fragment, fragment.x, fragment.y)) {
+      fragments.push(fragment);
+    }
+  }
+
+  preserveMenuHuckRockFragmentMomentum(fragments, rock.vx || 0, rock.vy || 0);
+  spawnedFragments.push(...fragments);
+}
+
+function preserveMenuHuckRockFragmentMomentum(fragments, targetVx, targetVy) {
+  const totalMass = fragments.reduce((sum, fragment) => sum + menuHuckRockFragmentMass(fragment), 0);
+  if (totalMass <= 0) {
+    return;
+  }
+
+  let currentVx = 0;
+  let currentVy = 0;
+  for (const fragment of fragments) {
+    const mass = menuHuckRockFragmentMass(fragment);
+    currentVx += fragment.vx * mass;
+    currentVy += fragment.vy * mass;
+  }
+
+  currentVx /= totalMass;
+  currentVy /= totalMass;
+  const correctionX = targetVx - currentVx;
+  const correctionY = targetVy - currentVy;
+  for (const fragment of fragments) {
+    fragment.vx += correctionX;
+    fragment.vy += correctionY;
+  }
+}
+
+function menuHuckRockFragmentMass(fragment) {
+  const radius = Math.max(0.1, fragment.radius || ENGINE.huckRock.radius);
+  return radius * radius;
+}
+
+function deterministicContactNormal(a, b) {
+  const seed = `${a}:${b}`;
+  let hash = 2166136261;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  const angle = ((hash >>> 0) / 4294967296) * Math.PI * 2;
+  return {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+}
+
+function spawnMenuHuckRock(player) {
+  const angle = player.aimAngle ?? player.angle;
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const config = ENGINE.huckRock;
+  const id = `menu-huck-rock:${state.menu.tick}:${Math.random().toString(36).slice(2)}`;
+
+  state.menu.huckRocks.push({
+    id,
+    type: "huckRock",
+    ownerId: MENU_PLAYER_ID,
+    shapeSeed: `${id}:shape`,
+    x: player.x + direction.x * config.spawnOffset,
+    y: player.y + direction.y * config.spawnOffset,
+    vx: player.vx + direction.x * config.speed,
+    vy: player.vy + direction.y * config.speed,
+    radius: config.radius,
+    angleX: Math.random() * Math.PI * 2,
+    angleY: Math.random() * Math.PI * 2,
+    angleZ: Math.random() * Math.PI * 2,
+    spinX: (Math.random() - 0.5) * 2.2,
+    spinY: (Math.random() - 0.5) * 2.2,
+    spinZ: (Math.random() - 0.5) * 1.2,
+    bounceCount: 0,
+    ageSeconds: 0,
+    bornTick: state.menu.tick
+  });
+
+  while (state.menu.huckRocks.length > ENGINE.huckRock.maxLobbyRocks) {
+    state.menu.huckRocks.shift();
+  }
+}
+
+function menuHuckRockEntityHit(rock, previousX = rock.x, previousY = rock.y, spawnedFragments = []) {
+  let nearest = null;
+
+  for (const entity of menuEntities()) {
+    if (!entity.action) {
+      continue;
+    }
+
+    const hit = entity.type === "themeSwatch"
+      ? sweptCircleCircleHit(previousX, previousY, rock.x, rock.y, rock.radius, entity) || circleCircleOverlap(rock, entity)
+      : sweptCircleRectHit(previousX, previousY, rock.x, rock.y, rock.radius, entity) || circleRectOverlap(rock, entity);
+    if (!hit) {
+      continue;
+    }
+
+    const time = Number.isFinite(hit.time) ? hit.time : 1;
+    if (!nearest || time < nearest.time) {
+      nearest = {
+        entity,
+        hit,
+        time
+      };
+    }
+  }
+
+  if (nearest) {
+    breakMenuHuckRock(rock, nearest.hit, spawnedFragments, "button");
+    state.menu.huckRocks = state.menu.huckRocks.filter((candidate) => candidate.id !== rock.id);
+    state.menu.activeTargetId = nearest.entity.id;
+    activateMenuEntity(nearest.entity);
+    state.menu.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
+    return true;
+  }
+
+  return false;
+}
+
+function resolveMenuHuckRockAsteroidCollisions(rock, previousX = rock.x, previousY = rock.y, spawnedFragments = []) {
+  const hit = nearestMenuHuckRockAsteroidHit(rock, previousX, previousY);
+  if (!hit) {
+    return false;
+  }
+
+  if (hit.destroy) {
+    rock.destroyed = true;
+    return true;
+  }
+
+  if (bounceMenuHuckRock(rock, hit)) {
+    if ((rock.bounceCount || 0) >= 1) {
+      breakMenuHuckRock(rock, null, spawnedFragments, "wall");
+      return true;
+    }
+    rock.bounceCount = 1;
+  }
+
+  return false;
+}
+
+function menuHuckRockFragmentAsteroidHit(rock, previousX = rock.x, previousY = rock.y) {
+  return Boolean(nearestMenuHuckRockAsteroidHit(rock, previousX, previousY));
+}
+
+function nearestMenuHuckRockAsteroidHit(rock, previousX, previousY) {
+  const options = { blockNonPlayable: true };
+  const blockers = blockingTilesAlongSegment(
+    state.menu.asteroid,
+    previousX,
+    previousY,
+    rock.x,
+    rock.y,
+    rock.radius,
+    options
+  );
+  const seen = new Set();
+  let nearest = null;
+  let buried = false;
+
+  for (const blocker of blockers) {
+    const key = blocker.key ?? `${blocker.tileX}:${blocker.tileY}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    const hit = sweptCircleBoundsHit(
+      previousX,
+      previousY,
+      rock.x,
+      rock.y,
+      rock.radius,
+      blocker.x,
+      blocker.y,
+      blocker.size,
+      blocker.size
+    ) || circleTileOverlap(rock, blocker);
+    if (!hit) {
+      continue;
+    }
+
+    if (!isExposedMenuBlockFace(blocker, hit, options)) {
+      buried = true;
+      continue;
+    }
+
+    if (nearest && hitTime(hit) >= hitTime(nearest)) {
+      continue;
+    }
+
+    nearest = hit;
+  }
+
+  return nearest || (buried ? { destroy: true } : null);
+}
+
+function bounceMenuHuckRock(rock, hit) {
+  if (hit.destroy) {
+    rock.destroyed = true;
+    return true;
+  }
+
+  if (Number.isFinite(hit.x) && Number.isFinite(hit.y)) {
+    rock.x = hit.x + hit.normalX * 0.01;
+    rock.y = hit.y + hit.normalY * 0.01;
+  } else {
+    rock.x += hit.normalX * hit.overlap;
+    rock.y += hit.normalY * hit.overlap;
+  }
+
+  const normalSpeed = rock.vx * hit.normalX + rock.vy * hit.normalY;
+  if (normalSpeed < 0) {
+    rock.vx -= (1 + ENGINE.huckRock.restitution) * normalSpeed * hit.normalX;
+    rock.vy -= (1 + ENGINE.huckRock.restitution) * normalSpeed * hit.normalY;
+    return true;
+  }
+
+  return false;
+}
+
+function isExposedMenuBlockFace(blocker, hit, options = {}) {
+  const normalX = Math.abs(hit.normalX) >= Math.abs(hit.normalY) ? Math.sign(hit.normalX) : 0;
+  const normalY = normalX === 0 ? Math.sign(hit.normalY) : 0;
+  if (normalX === 0 && normalY === 0) {
+    return true;
+  }
+
+  return !isBlockingMenuTile(blocker.tileX + normalX, blocker.tileY + normalY, options);
+}
+
+function isBlockingMenuTile(tileX, tileY, options = {}) {
+  const asteroid = state.menu.asteroid;
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return options.blockNonPlayable !== false;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  return isAsteroidRockTile(asteroid.tiles[index]) ||
+    (options.blockNonPlayable !== false && !(asteroid.playable[index] === true || asteroid.playable[index] === "1"));
+}
+
+function hitTime(hit) {
+  return Number.isFinite(hit.time) ? hit.time : 1;
 }
 
 function resetMenuButtonTarget() {
@@ -1385,6 +1855,9 @@ function rayCircleIntersection(start, direction, circle, maxDistance) {
 
 function menuSnapshot() {
   const world = menuWorld(state.menu.asteroid);
+  const entities = menuEntities().concat(
+    state.menu.huckRocks.filter((entity) => entity.destroyed !== true)
+  );
   return {
     arenaId: `menu-${state.menu.room}`,
     tick: state.menu.tick,
@@ -1393,7 +1866,7 @@ function menuSnapshot() {
     world,
     players: [{ ...state.menu.player }],
     asteroidMining: [],
-    entities: menuEntities(),
+    entities,
     effects: []
   };
 }
@@ -1416,7 +1889,8 @@ function menuEntities() {
     menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuHint("menu-controls", [
       { input: "WASD", action: "MOVE" },
-      { input: "CLICK + HOLD", action: "MINING RAY" }
+      { input: "CLICK + HOLD", action: "MINING RAY" },
+      { input: "SPACE", action: "HUCK ROCK" }
     ], center.x, top + MENU_BUTTON_HEIGHT + 30)
   ];
 }
@@ -1838,6 +2312,59 @@ function playMechanicalTone(context, frequency, start, duration, volume) {
   oscillator.stop(start + duration + 0.02);
 }
 
+function requestHuckRockThunk() {
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    context.resume()
+      .then(() => playHuckRockThunk(context))
+      .catch(() => {});
+    return;
+  }
+
+  playHuckRockThunk(context);
+}
+
+function playHuckRockThunk(context) {
+  const start = context.currentTime + 0.004;
+  const body = context.createOscillator();
+  const bodyGain = context.createGain();
+  const strike = context.createBufferSource();
+  const strikeFilter = context.createBiquadFilter();
+  const strikeGain = context.createGain();
+
+  body.type = "sine";
+  body.frequency.setValueAtTime(92, start);
+  body.frequency.exponentialRampToValueAtTime(42, start + 0.18);
+  bodyGain.gain.setValueAtTime(0.0001, start);
+  bodyGain.gain.exponentialRampToValueAtTime(0.105, start + 0.008);
+  bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+
+  strike.buffer = audio.huckRockBuffer || createNoiseBuffer(context, 0.08);
+  audio.huckRockBuffer = strike.buffer;
+  strikeFilter.type = "lowpass";
+  strikeFilter.frequency.setValueAtTime(420, start);
+  strikeFilter.frequency.exponentialRampToValueAtTime(95, start + 0.07);
+  strikeFilter.Q.value = 0.6;
+  strikeGain.gain.setValueAtTime(0.0001, start);
+  strikeGain.gain.exponentialRampToValueAtTime(0.07, start + 0.004);
+  strikeGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.09);
+
+  body.connect(bodyGain);
+  bodyGain.connect(context.destination);
+  strike.connect(strikeFilter);
+  strikeFilter.connect(strikeGain);
+  strikeGain.connect(context.destination);
+  body.start(start);
+  body.stop(start + 0.24);
+  strike.start(start);
+  strike.stop(start + 0.1);
+}
+
 function updateLocalShipAudio(player, timeSeconds) {
   const context = audio.context;
   if (!audio.unlocked || !context || context.state !== "running") {
@@ -2070,6 +2597,7 @@ function readInput() {
       moveY: 0,
       aimAngle: state.mouse.aimAngle,
       mining: false,
+      huckRock: false,
       interact: false,
       build: false
     });
@@ -2084,9 +2612,38 @@ function readInput() {
     moveY: move.y,
     aimAngle: state.mouse.aimAngle,
     mining: state.mouse.down && !state.upgrades.active && !state.build.active,
+    huckRock: readHuckRockInput(),
     interact: false,
     build: false
   });
+}
+
+function readHuckRockInput() {
+  const roomState = state.room?.state;
+  if (
+    !keys.has("Space") ||
+    state.mouse.down ||
+    (roomState !== "waiting" && roomState !== "active") ||
+    state.upgrades.active ||
+    state.build.active
+  ) {
+    return false;
+  }
+
+  if (roomState === "active") {
+    const player = localPlayerFromSnapshot();
+    if ((player?.resources?.rock || 0) < (ENGINE.huckRock.costRock || 0)) {
+      return false;
+    }
+  }
+
+  const now = performance.now() / 1000;
+  if (now >= state.nextHuckRockThunkAtSeconds) {
+    requestHuckRockThunk();
+    state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
+  }
+
+  return true;
 }
 
 function readMoveVector() {
@@ -2333,6 +2890,179 @@ function circleTileOverlap(circle, tile) {
   }
 
   return { normalX: 0, normalY: 1, overlap: circle.radius + bottom };
+}
+
+function circleRectOverlap(circle, rect) {
+  return circleBoundsOverlap(circle, rect.x, rect.y, rect.width, rect.height);
+}
+
+function circleBoundsOverlap(circle, x, y, width, height) {
+  const right = x + width;
+  const bottom = y + height;
+  const closestX = clamp(circle.x, x, right);
+  const closestY = clamp(circle.y, y, bottom);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+  const distanceSq = dx * dx + dy * dy;
+
+  if (distanceSq > 0) {
+    if (distanceSq >= circle.radius * circle.radius) {
+      return null;
+    }
+
+    const distance = Math.sqrt(distanceSq);
+    return {
+      normalX: dx / distance,
+      normalY: dy / distance,
+      overlap: circle.radius - distance
+    };
+  }
+
+  const left = circle.x - x;
+  const rightDistance = right - circle.x;
+  const top = circle.y - y;
+  const bottomDistance = bottom - circle.y;
+  const nearest = Math.min(left, rightDistance, top, bottomDistance);
+
+  if (nearest === left) {
+    return { normalX: -1, normalY: 0, overlap: circle.radius + left };
+  }
+
+  if (nearest === rightDistance) {
+    return { normalX: 1, normalY: 0, overlap: circle.radius + rightDistance };
+  }
+
+  if (nearest === top) {
+    return { normalX: 0, normalY: -1, overlap: circle.radius + top };
+  }
+
+  return { normalX: 0, normalY: 1, overlap: circle.radius + bottomDistance };
+}
+
+function circleCircleOverlap(circle, target) {
+  const radius = circle.radius + (target.radius || 0);
+  const dx = circle.x - target.x;
+  const dy = circle.y - target.y;
+  const distanceSq = dx * dx + dy * dy;
+  if (distanceSq >= radius * radius) {
+    return null;
+  }
+
+  const distance = Math.sqrt(distanceSq) || 1;
+  return {
+    normalX: dx / distance,
+    normalY: dy / distance,
+    overlap: radius - distance
+  };
+}
+
+function sweptCircleRectHit(previousX, previousY, x, y, radius, rect) {
+  return sweptCircleBoundsHit(previousX, previousY, x, y, radius, rect.x, rect.y, rect.width, rect.height);
+}
+
+function sweptCircleBoundsHit(previousX, previousY, x, y, radius, boundsX, boundsY, width, height) {
+  const dx = x - previousX;
+  const dy = y - previousY;
+  const minX = boundsX - radius;
+  const minY = boundsY - radius;
+  const maxX = boundsX + width + radius;
+  const maxY = boundsY + height + radius;
+  const axisX = sweptAxisInterval(previousX, dx, minX, maxX);
+  const axisY = sweptAxisInterval(previousY, dy, minY, maxY);
+  if (!axisX || !axisY) {
+    return null;
+  }
+
+  const entry = Math.max(axisX.entry, axisY.entry);
+  const exit = Math.min(axisX.exit, axisY.exit);
+  if (entry > exit || entry < 0 || entry > 1) {
+    return null;
+  }
+
+  const hitX = previousX + dx * entry;
+  const hitY = previousY + dy * entry;
+  const normal = axisX.entry > axisY.entry
+    ? { x: dx > 0 ? -1 : 1, y: 0 }
+    : { x: 0, y: dy > 0 ? -1 : 1 };
+
+  return {
+    time: entry,
+    x: hitX,
+    y: hitY,
+    normalX: normal.x,
+    normalY: normal.y,
+    overlap: 0
+  };
+}
+
+function sweptAxisInterval(position, delta, min, max) {
+  if (Math.abs(delta) < 0.000001) {
+    return position >= min && position <= max
+      ? { entry: Number.NEGATIVE_INFINITY, exit: Number.POSITIVE_INFINITY }
+      : null;
+  }
+
+  const t1 = (min - position) / delta;
+  const t2 = (max - position) / delta;
+  return {
+    entry: Math.min(t1, t2),
+    exit: Math.max(t1, t2)
+  };
+}
+
+function sweptCircleCircleHit(previousX, previousY, x, y, radius, target) {
+  const targetRadius = target.radius || 0;
+  const combinedRadius = radius + targetRadius;
+  const dx = x - previousX;
+  const dy = y - previousY;
+  const sx = previousX - target.x;
+  const sy = previousY - target.y;
+  const a = dx * dx + dy * dy;
+  const c = sx * sx + sy * sy - combinedRadius * combinedRadius;
+
+  if (c <= 0) {
+    const distance = Math.hypot(sx, sy);
+    const normal = distance > 0
+      ? { x: sx / distance, y: sy / distance }
+      : { x: -1, y: 0 };
+    return {
+      time: 0,
+      x: previousX,
+      y: previousY,
+      normalX: normal.x,
+      normalY: normal.y,
+      overlap: -c
+    };
+  }
+
+  if (a <= 0.000001) {
+    return null;
+  }
+
+  const b = 2 * (sx * dx + sy * dy);
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) {
+    return null;
+  }
+
+  const time = (-b - Math.sqrt(discriminant)) / (2 * a);
+  if (time < 0 || time > 1) {
+    return null;
+  }
+
+  const hitX = previousX + dx * time;
+  const hitY = previousY + dy * time;
+  const nx = hitX - target.x;
+  const ny = hitY - target.y;
+  const distance = Math.hypot(nx, ny) || 1;
+  return {
+    time,
+    x: hitX,
+    y: hitY,
+    normalX: nx / distance,
+    normalY: ny / distance,
+    overlap: 0
+  };
 }
 
 function recordEliminations(snapshot, timeSeconds) {

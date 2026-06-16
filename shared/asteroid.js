@@ -348,13 +348,25 @@ export function blockingTilesNearCircle(asteroid, x, y, radius, options = {}) {
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
       if (isBlockingTile(asteroid, tileX, tileY, options)) {
-        tiles.push({
-          tileX,
-          tileY,
-          x: tileX * asteroid.tileSize,
-          y: tileY * asteroid.tileSize,
-          size: asteroid.tileSize
-        });
+        tiles.push(blockingTileDescriptor(asteroid, tileX, tileY));
+      }
+    }
+  }
+
+  return tiles;
+}
+
+export function blockingTilesAlongSegment(asteroid, startX, startY, endX, endY, radius, options = {}) {
+  const minTileX = Math.floor((Math.min(startX, endX) - radius) / asteroid.tileSize) - 1;
+  const maxTileX = Math.floor((Math.max(startX, endX) + radius) / asteroid.tileSize) + 1;
+  const minTileY = Math.floor((Math.min(startY, endY) - radius) / asteroid.tileSize) - 1;
+  const maxTileY = Math.floor((Math.max(startY, endY) + radius) / asteroid.tileSize) + 1;
+  const tiles = [];
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (isBlockingTile(asteroid, tileX, tileY, options)) {
+        tiles.push(blockingTileDescriptor(asteroid, tileX, tileY));
       }
     }
   }
@@ -452,6 +464,20 @@ function isBlockingTile(asteroid, tileX, tileY, options = {}) {
   const index = tileY * asteroid.widthTiles + tileX;
   return isAsteroidRockTile(asteroid.tiles[index]) ||
     (options.blockNonPlayable !== false && !isPlayableCell(asteroid, index));
+}
+
+function blockingTileDescriptor(asteroid, tileX, tileY) {
+  const inBounds = tileX >= 0 && tileY >= 0 && tileX < asteroid.widthTiles && tileY < asteroid.heightTiles;
+  const index = inBounds ? tileY * asteroid.widthTiles + tileX : null;
+  return {
+    tileX,
+    tileY,
+    index,
+    key: `${tileX}:${tileY}`,
+    x: tileX * asteroid.tileSize,
+    y: tileY * asteroid.tileSize,
+    size: asteroid.tileSize
+  };
 }
 
 function isPlayableCell(asteroid, index) {

@@ -1,9 +1,11 @@
 import { ENGINE, RENDER } from "./constants.js";
 import {
   ASTEROID_TILE,
+  blockingTilesAlongSegment,
   STORM_STATE,
   blockingTilesNearCircle,
   createAsteroid,
+  isAsteroidRockTile,
   raycastAsteroid,
   serializeAsteroid
 } from "./asteroid.js";
@@ -51,6 +53,7 @@ export function createArena(options = {}) {
     },
     // Extension channels are intentionally empty until the game design is explicit.
     entities: new Map(),
+    huckRockButtonHits: [],
     effects: []
   };
 }
@@ -82,6 +85,7 @@ export function addPlayer(arena, playerOptions) {
     buttonTargetId: null,
     buttonTargetSeconds: 0,
     buttonTargetActivated: false,
+    huckRockCooldownSeconds: 0,
     miningTargetIndex: null,
     miningPhase: null,
     miningProgress: 0,
@@ -289,6 +293,7 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate) {
     }
   }
 
+  stepHuckRocks(arena, dtSeconds);
   resolvePlayerCollisions(arena);
   processMining(arena, dtSeconds);
 }
@@ -302,7 +307,7 @@ export function snapshotArena(arena) {
     world: ENGINE.world,
     players: Array.from(arena.players.values()).map(snapshotPlayer),
     asteroidMining: snapshotAsteroidMining(arena),
-    entities: Array.from(arena.entities.values()),
+    entities: Array.from(arena.entities.values()).filter((entity) => entity.destroyed !== true),
     effects: arena.effects
   };
 }
@@ -379,6 +384,7 @@ function stepPlayer(arena, player, dtSeconds) {
   }
 
   player.aimAngle = player.input.aimAngle;
+  processHuckRockInput(arena, player, dtSeconds);
   player.mining = player.input.mining;
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
@@ -443,6 +449,703 @@ function resolveAsteroidCollisions(asteroid, player, options = {}) {
 
   clampPlayerVelocity(player);
   return impact;
+}
+
+function processHuckRockInput(arena, player, dtSeconds) {
+  player.huckRockCooldownSeconds = Math.max(0, (player.huckRockCooldownSeconds || 0) - dtSeconds);
+
+  if (
+    !player.input.huckRock ||
+    player.input.mining ||
+    !arena.asteroid ||
+    player.huckRockCooldownSeconds > 0
+  ) {
+    return;
+  }
+
+  const config = ENGINE.huckRock;
+  if (arena.rules.playerDamage) {
+    const cost = config.costRock || 0;
+    if ((player.resources.rock || 0) < cost) {
+      return;
+    }
+    player.resources.rock = clamp(player.resources.rock - cost, 0, ENGINE.player.maxResourceAmount);
+  }
+
+  const angle = player.aimAngle ?? player.angle;
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const id = `huck-rock:${player.id}:${arena.tick}`;
+  const random = createSeededRandom(`${arena.seed}:${id}`);
+
+  arena.entities.set(id, {
+    id,
+    type: "huckRock",
+    ownerId: player.id,
+    shapeSeed: `${arena.seed}:${id}:shape`,
+    x: roundForSnapshot(player.x + direction.x * config.spawnOffset),
+    y: roundForSnapshot(player.y + direction.y * config.spawnOffset),
+    vx: roundForSnapshot(player.vx + direction.x * config.speed),
+    vy: roundForSnapshot(player.vy + direction.y * config.speed),
+    radius: config.radius,
+    angleX: random() * Math.PI * 2,
+    angleY: random() * Math.PI * 2,
+    angleZ: random() * Math.PI * 2,
+    spinX: (random() - 0.5) * 2.2,
+    spinY: (random() - 0.5) * 2.2,
+    spinZ: (random() - 0.5) * 1.2,
+    bounceCount: 0,
+    ageSeconds: 0,
+    bornTick: arena.tick
+  });
+  player.huckRockCooldownSeconds = config.fireIntervalSeconds;
+  trimHuckRocks(arena);
+}
+
+function stepHuckRocks(arena, dtSeconds) {
+  const config = ENGINE.huckRock;
+  arena.huckRockButtonHits = [];
+  const rocks = Array.from(arena.entities.values()).filter((entity) => entity.type === "huckRock");
+
+  for (const entity of rocks) {
+    entity.ageSeconds = (entity.ageSeconds || 0) + dtSeconds;
+    if (entity.ageSeconds > (entity.lifetimeSeconds || config.lifetimeSeconds)) {
+      entity.destroyed = true;
+      arena.entities.delete(entity.id);
+      continue;
+    }
+
+    const previousX = entity.x;
+    const previousY = entity.y;
+    entity.previousX = previousX;
+    entity.previousY = previousY;
+    entity.x += entity.vx * dtSeconds;
+    entity.y += entity.vy * dtSeconds;
+    entity.angleX = normalizeAngle((entity.angleX || 0) + (entity.spinX || 0) * dtSeconds);
+    entity.angleY = normalizeAngle((entity.angleY || 0) + (entity.spinY || 0) * dtSeconds);
+    entity.angleZ = normalizeAngle((entity.angleZ || 0) + (entity.spinZ || 0) * dtSeconds);
+  }
+
+  resolveHuckRockContacts(arena, rocks);
+
+  for (const entity of rocks) {
+    if (entity.destroyed) {
+      arena.entities.delete(entity.id);
+      continue;
+    }
+
+    if (entity.fragment) {
+      if (huckRockFragmentTerrainHit(arena, entity, entity.previousX, entity.previousY)) {
+        arena.entities.delete(entity.id);
+        continue;
+      }
+      roundHuckRockForSnapshot(entity);
+      continue;
+    }
+
+    if (huckRockPlayerHit(arena, entity, entity.previousX, entity.previousY)) {
+      arena.entities.delete(entity.id);
+      continue;
+    }
+    if (resolveHuckRockCollisions(arena, entity, entity.previousX, entity.previousY)) {
+      arena.entities.delete(entity.id);
+      continue;
+    }
+    roundHuckRockForSnapshot(entity);
+  }
+}
+
+function roundHuckRockForSnapshot(rock) {
+  rock.x = roundForSnapshot(rock.x);
+  rock.y = roundForSnapshot(rock.y);
+  rock.vx = roundForSnapshot(rock.vx);
+  rock.vy = roundForSnapshot(rock.vy);
+  rock.angleX = roundForSnapshot(rock.angleX);
+  rock.angleY = roundForSnapshot(rock.angleY);
+  rock.angleZ = roundForSnapshot(rock.angleZ);
+}
+
+function resolveHuckRockContacts(arena, rocks) {
+  for (let index = 0; index < rocks.length; index += 1) {
+    const a = rocks[index];
+    if (a.destroyed || a.fragment) {
+      continue;
+    }
+
+    for (let otherIndex = index + 1; otherIndex < rocks.length; otherIndex += 1) {
+      const b = rocks[otherIndex];
+      if (b.destroyed || b.fragment || !huckRocksOverlap(a, b)) {
+        continue;
+      }
+
+      bounceHuckRocks(arena, a, b);
+      if (a.destroyed) {
+        break;
+      }
+    }
+  }
+}
+
+function huckRocksOverlap(a, b) {
+  const radius = (a.radius || ENGINE.huckRock.radius) + (b.radius || ENGINE.huckRock.radius);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return dx * dx + dy * dy < radius * radius;
+}
+
+function bounceHuckRocks(arena, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const distance = Math.hypot(dx, dy);
+  const normal = distance > 0
+    ? { x: dx / distance, y: dy / distance }
+    : deterministicContactNormal(a.id, b.id);
+  const minDistance = (a.radius || ENGINE.huckRock.radius) + (b.radius || ENGINE.huckRock.radius);
+  const overlap = Math.max(0, minDistance - distance);
+
+  if (overlap > 0) {
+    a.x -= normal.x * overlap * 0.5;
+    a.y -= normal.y * overlap * 0.5;
+    b.x += normal.x * overlap * 0.5;
+    b.y += normal.y * overlap * 0.5;
+  }
+
+  const relativeSpeed = (b.vx - a.vx) * normal.x + (b.vy - a.vy) * normal.y;
+  if (relativeSpeed < 0) {
+    const impulse = (-(1 + ENGINE.huckRock.restitution) * relativeSpeed) / 2;
+    a.vx -= normal.x * impulse;
+    a.vy -= normal.y * impulse;
+    b.vx += normal.x * impulse;
+    b.vy += normal.y * impulse;
+  }
+
+  consumeHuckRockBounce(arena, a, "rock");
+  consumeHuckRockBounce(arena, b, "rock");
+}
+
+function consumeHuckRockBounce(arena, rock, reason) {
+  if ((rock.bounceCount || 0) >= 1) {
+    breakHuckRock(arena, rock, reason);
+    return;
+  }
+
+  rock.bounceCount = 1;
+}
+
+function breakHuckRock(arena, rock, reason = "break") {
+  if (!rock.fragment && !rock.fragmentsSpawned) {
+    rock.fragmentsSpawned = true;
+    spawnHuckRockFragments(arena, rock, reason);
+  }
+  rock.destroyed = true;
+}
+
+function spawnHuckRockFragments(arena, rock, reason) {
+  const config = ENGINE.huckRock.fragments;
+  const random = createSeededRandom(`${arena.seed}:${rock.id}:fragments:${arena.tick}:${reason}`);
+  const count = config.minCount + Math.floor(random() * (config.maxCount - config.minCount + 1));
+  const speed = Math.hypot(rock.vx || 0, rock.vy || 0);
+  const baseAngle = speed > 0.001
+    ? Math.atan2(rock.vy, rock.vx)
+    : Number(rock.angleZ) || 0;
+  const fragments = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const scale = config.minRadiusScale + random() * (config.maxRadiusScale - config.minRadiusScale);
+    const radius = Math.max(1.25, (rock.radius || ENGINE.huckRock.radius) * scale);
+    const angle = baseAngle + (random() * 2 - 1) * config.spreadRadians;
+    const fragmentSpeed = Math.max(
+      18,
+      speed * (config.minSpeedScale + random() * (config.maxSpeedScale - config.minSpeedScale))
+    );
+    const sideAngle = baseAngle + Math.PI / 2;
+    const sideJitter = (random() * 2 - 1) * config.spawnJitter;
+    const outwardJitter = random() * config.spawnJitter;
+    const id = `${rock.id}:fragment:${arena.tick}:${index}`;
+    const fragment = {
+      id,
+      type: "huckRock",
+      fragment: true,
+      ownerId: rock.ownerId,
+      shapeSeed: `${rock.shapeSeed || rock.id}:fragment:${index}`,
+      x: roundForSnapshot(
+        rock.x +
+        Math.cos(baseAngle) * outwardJitter +
+        Math.cos(sideAngle) * sideJitter
+      ),
+      y: roundForSnapshot(
+        rock.y +
+        Math.sin(baseAngle) * outwardJitter +
+        Math.sin(sideAngle) * sideJitter
+      ),
+      vx: roundForSnapshot(Math.cos(angle) * fragmentSpeed),
+      vy: roundForSnapshot(Math.sin(angle) * fragmentSpeed),
+      radius: roundForSnapshot(radius),
+      angleX: random() * Math.PI * 2,
+      angleY: random() * Math.PI * 2,
+      angleZ: random() * Math.PI * 2,
+      spinX: (random() - 0.5) * 5.5,
+      spinY: (random() - 0.5) * 5.5,
+      spinZ: (random() - 0.5) * 3.2,
+      bounceCount: 2,
+      ageSeconds: 0,
+      lifetimeSeconds: config.minLifetimeSeconds +
+        random() * (config.maxLifetimeSeconds - config.minLifetimeSeconds),
+      bornTick: arena.tick
+    };
+
+    if (!huckRockFragmentTerrainHit(arena, fragment, fragment.x, fragment.y)) {
+      fragments.push(fragment);
+    }
+  }
+
+  preserveHuckRockFragmentMomentum(fragments, rock.vx || 0, rock.vy || 0);
+  for (const fragment of fragments) {
+    fragment.vx = roundForSnapshot(fragment.vx);
+    fragment.vy = roundForSnapshot(fragment.vy);
+    arena.entities.set(fragment.id, fragment);
+  }
+}
+
+function preserveHuckRockFragmentMomentum(fragments, targetVx, targetVy) {
+  const totalMass = fragments.reduce((sum, fragment) => sum + huckRockFragmentMass(fragment), 0);
+  if (totalMass <= 0) {
+    return;
+  }
+
+  let currentVx = 0;
+  let currentVy = 0;
+  for (const fragment of fragments) {
+    const mass = huckRockFragmentMass(fragment);
+    currentVx += fragment.vx * mass;
+    currentVy += fragment.vy * mass;
+  }
+
+  currentVx /= totalMass;
+  currentVy /= totalMass;
+  const correctionX = targetVx - currentVx;
+  const correctionY = targetVy - currentVy;
+  for (const fragment of fragments) {
+    fragment.vx += correctionX;
+    fragment.vy += correctionY;
+  }
+}
+
+function huckRockFragmentMass(fragment) {
+  const radius = Math.max(0.1, fragment.radius || ENGINE.huckRock.radius);
+  return radius * radius;
+}
+
+function deterministicContactNormal(a, b) {
+  const seed = `${a}:${b}`;
+  let hash = 2166136261;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  const angle = ((hash >>> 0) / 4294967296) * Math.PI * 2;
+  return {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+}
+
+function resolveHuckRockCollisions(arena, rock, previousX = rock.x, previousY = rock.y) {
+  if (!arena.asteroid) {
+    return false;
+  }
+
+  for (const entity of arena.entities.values()) {
+    if (entity.type !== "lobbyButton") {
+      continue;
+    }
+
+    const hit = sweptCircleRectHit(previousX, previousY, rock.x, rock.y, rock.radius, entity) ||
+      circleRectOverlap(rock, entity);
+    if (!hit) {
+      continue;
+    }
+
+    bounceHuckRock(rock, hit);
+    breakHuckRock(arena, rock, "button");
+    arena.huckRockButtonHits.push({
+      targetId: entity.id,
+      ownerId: rock.ownerId
+    });
+    return true;
+  }
+
+  const hit = nearestHuckRockAsteroidHit(arena, rock, previousX, previousY);
+  if (!hit) {
+    return false;
+  }
+
+  if (hit.destroy) {
+    rock.destroyed = true;
+    return true;
+  }
+
+  if (bounceHuckRock(rock, hit)) {
+    if ((rock.bounceCount || 0) >= 1) {
+      breakHuckRock(arena, rock, "wall");
+      return true;
+    }
+    rock.bounceCount = 1;
+  }
+
+  return false;
+}
+
+function huckRockPlayerHit(arena, rock, previousX = rock.x, previousY = rock.y) {
+  for (const player of arena.players.values()) {
+    if (!player.alive) {
+      continue;
+    }
+
+    if (player.id === rock.ownerId && (rock.ageSeconds || 0) < 0.15 && (rock.bounceCount || 0) === 0) {
+      continue;
+    }
+
+    const hit = sweptCircleCircleHit(previousX, previousY, rock.x, rock.y, rock.radius, player);
+    if (!hit) {
+      continue;
+    }
+
+    const relativeSpeed = Math.hypot(rock.vx - player.vx, rock.vy - player.vy);
+    applyHuckRockPlayerImpulse(rock, player, hit);
+    addShake(player, Math.max(ENGINE.collision.shakeThreshold + 10, relativeSpeed * 0.35));
+    if (arena.rules.playerDamage) {
+      damagePlayer(player, ENGINE.huckRock.damage, arena.tick, rock.ownerId);
+    }
+    breakHuckRock(arena, rock, "player");
+    return true;
+  }
+
+  return false;
+}
+
+function applyHuckRockPlayerImpulse(rock, player, hit) {
+  const normalX = Number.isFinite(hit.normalX) ? hit.normalX : 0;
+  const normalY = Number.isFinite(hit.normalY) ? hit.normalY : 0;
+  if (normalX === 0 && normalY === 0) {
+    return;
+  }
+
+  if (Number.isFinite(hit.x) && Number.isFinite(hit.y)) {
+    rock.x = hit.x + normalX * 0.01;
+    rock.y = hit.y + normalY * 0.01;
+  } else if (Number.isFinite(hit.overlap) && hit.overlap > 0) {
+    rock.x += normalX * hit.overlap;
+    rock.y += normalY * hit.overlap;
+  }
+
+  const relativeNormalSpeed = (rock.vx - player.vx) * normalX + (rock.vy - player.vy) * normalY;
+  if (relativeNormalSpeed >= 0) {
+    return;
+  }
+
+  const rockMass = huckRockBodyMass(rock);
+  const playerMass = playerBodyMass(player);
+  const impulse = (-(1 + ENGINE.huckRock.restitution) * relativeNormalSpeed) /
+    ((1 / rockMass) + (1 / playerMass));
+
+  rock.vx += (impulse / rockMass) * normalX;
+  rock.vy += (impulse / rockMass) * normalY;
+  player.vx -= (impulse / playerMass) * normalX;
+  player.vy -= (impulse / playerMass) * normalY;
+}
+
+function huckRockBodyMass(rock) {
+  const radius = Math.max(0.1, rock.radius || ENGINE.huckRock.radius);
+  return radius * radius;
+}
+
+function playerBodyMass(player) {
+  const radius = Math.max(0.1, player.radius || ENGINE.ship.radius);
+  return radius * radius * (ENGINE.huckRock.shipMassScale || 1);
+}
+
+function huckRockFragmentTerrainHit(arena, rock, previousX = rock.x, previousY = rock.y) {
+  if (!arena.asteroid) {
+    return false;
+  }
+
+  return Boolean(nearestHuckRockAsteroidHit(arena, rock, previousX, previousY));
+}
+
+function nearestHuckRockAsteroidHit(arena, rock, previousX, previousY) {
+  const options = huckRockCollisionOptions(arena);
+  const blockers = blockingTilesAlongSegment(
+    arena.asteroid,
+    previousX,
+    previousY,
+    rock.x,
+    rock.y,
+    rock.radius,
+    options
+  );
+  const seen = new Set();
+  let nearest = null;
+  let buried = false;
+
+  for (const blocker of blockers) {
+    const key = blocker.key ?? `${blocker.tileX}:${blocker.tileY}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    const hit = sweptCircleBoundsHit(
+      previousX,
+      previousY,
+      rock.x,
+      rock.y,
+      rock.radius,
+      blocker.x,
+      blocker.y,
+      blocker.size,
+      blocker.size
+    ) || circleTileOverlap(rock, blocker);
+    if (!hit) {
+      continue;
+    }
+
+    if (!isExposedBlockFace(arena.asteroid, blocker, hit, options)) {
+      buried = true;
+      continue;
+    }
+
+    if (nearest && hitTime(hit) >= hitTime(nearest)) {
+      continue;
+    }
+
+    nearest = hit;
+  }
+
+  return nearest || (buried ? { destroy: true } : null);
+}
+
+function huckRockCollisionOptions(arena) {
+  return {
+    blockNonPlayable: !arena.storm
+  };
+}
+
+function bounceHuckRock(rock, hit) {
+  if (hit.destroy) {
+    rock.destroyed = true;
+    return true;
+  }
+
+  if (Number.isFinite(hit.x) && Number.isFinite(hit.y)) {
+    rock.x = hit.x + hit.normalX * 0.01;
+    rock.y = hit.y + hit.normalY * 0.01;
+  } else {
+    rock.x += hit.normalX * hit.overlap;
+    rock.y += hit.normalY * hit.overlap;
+  }
+
+  const normalSpeed = rock.vx * hit.normalX + rock.vy * hit.normalY;
+  if (normalSpeed < 0) {
+    rock.vx -= (1 + ENGINE.huckRock.restitution) * normalSpeed * hit.normalX;
+    rock.vy -= (1 + ENGINE.huckRock.restitution) * normalSpeed * hit.normalY;
+    return true;
+  }
+
+  return false;
+}
+
+function isExposedBlockFace(asteroid, blocker, hit, options = {}) {
+  const normalX = Math.abs(hit.normalX) >= Math.abs(hit.normalY) ? Math.sign(hit.normalX) : 0;
+  const normalY = normalX === 0 ? Math.sign(hit.normalY) : 0;
+  if (normalX === 0 && normalY === 0) {
+    return true;
+  }
+
+  return !isBlockingAsteroidTile(asteroid, blocker.tileX + normalX, blocker.tileY + normalY, options);
+}
+
+function isBlockingAsteroidTile(asteroid, tileX, tileY, options = {}) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return options.blockNonPlayable !== false;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  return isAsteroidRockTile(asteroid.tiles[index]) ||
+    (options.blockNonPlayable !== false && !(asteroid.playable[index] === true || asteroid.playable[index] === "1"));
+}
+
+function hitTime(hit) {
+  return Number.isFinite(hit.time) ? hit.time : 1;
+}
+
+function circleRectOverlap(circle, rect) {
+  return circleBoundsOverlap(circle, rect.x, rect.y, rect.width, rect.height);
+}
+
+function circleBoundsOverlap(circle, x, y, width, height) {
+  const right = x + width;
+  const bottom = y + height;
+  const closestX = clamp(circle.x, x, right);
+  const closestY = clamp(circle.y, y, bottom);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+  const distanceSq = dx * dx + dy * dy;
+
+  if (distanceSq > 0) {
+    if (distanceSq >= circle.radius * circle.radius) {
+      return null;
+    }
+
+    const distance = Math.sqrt(distanceSq);
+    return {
+      normalX: dx / distance,
+      normalY: dy / distance,
+      overlap: circle.radius - distance
+    };
+  }
+
+  const left = circle.x - x;
+  const rightDistance = right - circle.x;
+  const top = circle.y - y;
+  const bottomDistance = bottom - circle.y;
+  const nearest = Math.min(left, rightDistance, top, bottomDistance);
+
+  if (nearest === left) {
+    return { normalX: -1, normalY: 0, overlap: circle.radius + left };
+  }
+
+  if (nearest === rightDistance) {
+    return { normalX: 1, normalY: 0, overlap: circle.radius + rightDistance };
+  }
+
+  if (nearest === top) {
+    return { normalX: 0, normalY: -1, overlap: circle.radius + top };
+  }
+
+  return { normalX: 0, normalY: 1, overlap: circle.radius + bottomDistance };
+}
+
+function sweptCircleRectHit(previousX, previousY, x, y, radius, rect) {
+  return sweptCircleBoundsHit(previousX, previousY, x, y, radius, rect.x, rect.y, rect.width, rect.height);
+}
+
+function sweptCircleBoundsHit(previousX, previousY, x, y, radius, boundsX, boundsY, width, height) {
+  const dx = x - previousX;
+  const dy = y - previousY;
+  const minX = boundsX - radius;
+  const minY = boundsY - radius;
+  const maxX = boundsX + width + radius;
+  const maxY = boundsY + height + radius;
+  const axisX = sweptAxisInterval(previousX, dx, minX, maxX);
+  const axisY = sweptAxisInterval(previousY, dy, minY, maxY);
+  if (!axisX || !axisY) {
+    return null;
+  }
+
+  const entry = Math.max(axisX.entry, axisY.entry);
+  const exit = Math.min(axisX.exit, axisY.exit);
+  if (entry > exit || entry < 0 || entry > 1) {
+    return null;
+  }
+
+  const hitX = previousX + dx * entry;
+  const hitY = previousY + dy * entry;
+  const normal = axisX.entry > axisY.entry
+    ? { x: dx > 0 ? -1 : 1, y: 0 }
+    : { x: 0, y: dy > 0 ? -1 : 1 };
+
+  return {
+    time: entry,
+    x: hitX,
+    y: hitY,
+    normalX: normal.x,
+    normalY: normal.y,
+    overlap: 0
+  };
+}
+
+function sweptAxisInterval(position, delta, min, max) {
+  if (Math.abs(delta) < 0.000001) {
+    return position >= min && position <= max
+      ? { entry: Number.NEGATIVE_INFINITY, exit: Number.POSITIVE_INFINITY }
+      : null;
+  }
+
+  const t1 = (min - position) / delta;
+  const t2 = (max - position) / delta;
+  return {
+    entry: Math.min(t1, t2),
+    exit: Math.max(t1, t2)
+  };
+}
+
+function sweptCircleCircleHit(previousX, previousY, x, y, radius, target) {
+  const targetRadius = target.radius || 0;
+  const combinedRadius = radius + targetRadius;
+  const dx = x - previousX;
+  const dy = y - previousY;
+  const sx = previousX - target.x;
+  const sy = previousY - target.y;
+  const a = dx * dx + dy * dy;
+  const c = sx * sx + sy * sy - combinedRadius * combinedRadius;
+
+  if (c <= 0) {
+    const distance = Math.hypot(sx, sy);
+    const normal = distance > 0
+      ? { x: sx / distance, y: sy / distance }
+      : { x: -1, y: 0 };
+    return {
+      time: 0,
+      x: previousX,
+      y: previousY,
+      normalX: normal.x,
+      normalY: normal.y,
+      overlap: -c
+    };
+  }
+
+  if (a <= 0.000001) {
+    return null;
+  }
+
+  const b = 2 * (sx * dx + sy * dy);
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) {
+    return null;
+  }
+
+  const time = (-b - Math.sqrt(discriminant)) / (2 * a);
+  if (time < 0 || time > 1) {
+    return null;
+  }
+
+  const hitX = previousX + dx * time;
+  const hitY = previousY + dy * time;
+  const nx = hitX - target.x;
+  const ny = hitY - target.y;
+  const distance = Math.hypot(nx, ny) || 1;
+  return {
+    time,
+    x: hitX,
+    y: hitY,
+    normalX: nx / distance,
+    normalY: ny / distance,
+    overlap: 0
+  };
+}
+
+function trimHuckRocks(arena) {
+  const rocks = Array.from(arena.entities.values())
+    .filter((entity) => entity.type === "huckRock")
+    .sort((a, b) => (a.bornTick || 0) - (b.bornTick || 0));
+  const excess = rocks.length - ENGINE.huckRock.maxLobbyRocks;
+
+  for (let index = 0; index < excess; index += 1) {
+    arena.entities.delete(rocks[index].id);
+  }
 }
 
 function processMining(arena, dtSeconds) {

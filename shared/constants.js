@@ -65,6 +65,30 @@ export const ENGINE = Object.freeze({
     wallCostRock: 4,
     radiusTiles: 4
   },
+  huckRock: {
+    radius: 5,
+    speed: 190,
+    spawnOffset: 14,
+    fireIntervalSeconds: 0.55,
+    costRock: 1,
+    damage: 12,
+    restitution: 0.78,
+    shipMassScale: 4,
+    lifetimeSeconds: 7,
+    maxLobbyRocks: 32,
+    fragments: {
+      minCount: 2,
+      maxCount: 3,
+      minRadiusScale: 0.33,
+      maxRadiusScale: 0.5,
+      minLifetimeSeconds: 0,
+      maxLifetimeSeconds: 0.22,
+      minSpeedScale: 0.35,
+      maxSpeedScale: 0.78,
+      spreadRadians: 0.85,
+      spawnJitter: 2
+    }
+  },
   collision: {
     boundaryRestitution: 0.42,
     shipRestitution: 0.55,
