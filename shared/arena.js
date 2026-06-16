@@ -87,6 +87,7 @@ export function addPlayer(arena, playerOptions) {
     buttonTargetSeconds: 0,
     buttonTargetActivated: false,
     huckRockCooldownSeconds: 0,
+    huckRockEngineCutoutSeconds: 0,
     miningTargetIndex: null,
     miningPhase: null,
     miningProgress: 0,
@@ -373,21 +374,25 @@ export function sanitizeTalkText(text) {
 
 function stepPlayer(arena, player, dtSeconds) {
   player.shake = Math.max(0, player.shake - ENGINE.collision.shakeDecay * dtSeconds);
+  player.huckRockEngineCutoutSeconds = Math.max(0, (player.huckRockEngineCutoutSeconds || 0) - dtSeconds);
   syncPlayerDerivedStats(player);
   const effects = aggregateUpgradeEffects(player.upgrades);
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
-  const isMoving = move.x !== 0 || move.y !== 0;
-  player.thrusting = isMoving;
+  const hasMoveIntent = move.x !== 0 || move.y !== 0;
+  const canThrust = hasMoveIntent && player.huckRockEngineCutoutSeconds <= 0;
+  player.thrusting = canThrust;
 
-  if (isMoving) {
+  if (hasMoveIntent) {
     player.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  }
+
+  if (canThrust) {
     player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
     player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
   }
 
   player.aimAngle = player.input.aimAngle;
-  processHuckRockInput(arena, player, dtSeconds);
   player.mining = player.input.mining;
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
@@ -405,6 +410,8 @@ function stepPlayer(arena, player, dtSeconds) {
   const velocity = clampMagnitude(player.vx, player.vy, playerMaxSpeed(player, effects));
   player.vx = velocity.x;
   player.vy = velocity.y;
+
+  processHuckRockInput(arena, player, dtSeconds);
 
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
@@ -503,7 +510,10 @@ function processHuckRockInput(arena, player, dtSeconds) {
     ageSeconds: 0,
     bornTick: arena.tick
   });
+  applyHuckRockRecoil(player, direction);
   player.huckRockCooldownSeconds = config.fireIntervalSeconds;
+  player.huckRockEngineCutoutSeconds = config.engineCutoutSeconds || 0;
+  player.thrusting = false;
   trimHuckRocks(arena);
 }
 
@@ -526,6 +536,22 @@ function huckRockLaunchAngle(player) {
     spawnOffset: ENGINE.huckRock.spawnOffset,
     fallbackAngle
   });
+}
+
+function applyHuckRockRecoil(player, direction) {
+  const impulse = huckRockRecoilImpulse(player);
+  player.vx -= direction.x * impulse;
+  player.vy -= direction.y * impulse;
+}
+
+function huckRockRecoilImpulse(player) {
+  const config = ENGINE.huckRock;
+  const rockMass = config.radius * config.radius;
+  const shipRadius = Math.max(0.1, player.radius || ENGINE.ship.radius);
+  const shipMass = shipRadius * shipRadius * (config.shipMassScale || 1);
+  const hitImpulse = ((1 + config.restitution) * config.speed) /
+    ((1 / rockMass) + (1 / shipMass));
+  return (hitImpulse / shipMass) * (config.recoilImpulseScale ?? 1);
 }
 
 function stepHuckRocks(arena, dtSeconds) {
@@ -2148,6 +2174,8 @@ function snapshotPlayer(player) {
     angle: roundForSnapshot(player.angle),
     aimAngle: roundForSnapshot(player.aimAngle),
     mining: player.mining,
+    huckRockCooldownSeconds: roundForSnapshot(player.huckRockCooldownSeconds || 0),
+    huckRockEngineCutoutSeconds: roundForSnapshot(player.huckRockEngineCutoutSeconds || 0),
     miningRay: player.miningRay,
     rayExtension: roundForSnapshot(player.rayExtension || 0),
     thrusting: player.thrusting,

@@ -71,10 +71,12 @@ export const ENGINE = Object.freeze({
     speed: 190,
     spawnOffset: 14,
     fireIntervalSeconds: 0.55,
+    engineCutoutSeconds: 0.2,
     costRock: 1,
     damage: 12,
     restitution: 0.78,
-    shipMassScale: 4,
+    recoilImpulseScale: 1,
+    shipMassScale: 3,
     lifetimeSeconds: 7,
     maxLobbyRocks: 32,
     fragments: {

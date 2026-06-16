@@ -109,7 +109,8 @@ const state = {
   asteroid: null,
   prediction: {
     player: null,
-    lastTimeSeconds: 0
+    lastTimeSeconds: 0,
+    huckRockCooldownSeconds: 0
   },
   entitySmoothing: {
     byId: new Map()
@@ -210,6 +211,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
     state.snapshot = null;
     state.asteroid = null;
     state.prediction.player = null;
+    state.prediction.huckRockCooldownSeconds = 0;
     resetEntitySmoothing();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
@@ -230,6 +232,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
     state.build.active = false;
     resetLocalDamageAudioState();
     resetEntitySmoothing();
+    state.prediction.huckRockCooldownSeconds = 0;
     cancelMiningRay();
   }
   if (room?.state === "menu") {
@@ -1010,6 +1013,7 @@ function createMenuPlayer(asteroid) {
     miningRay: null,
     miningHoldSeconds: 0,
     rayExtension: 0,
+    huckRockEngineCutoutSeconds: 0,
     thrusting: false,
     shake: 0,
     radius: ENGINE.ship.radius,
@@ -1079,6 +1083,7 @@ function enterMenuRoom(room) {
   player.miningRay = null;
   player.miningHoldSeconds = 0;
   player.rayExtension = 0;
+  player.huckRockEngineCutoutSeconds = 0;
   player.thrusting = false;
 }
 
@@ -1088,20 +1093,29 @@ function updateMenuSimulation(timeSeconds) {
   const dtSeconds = clamp(timeSeconds - previousTime, 0, 1 / 15) || 1 / ENGINE.tickRate;
   state.menu.lastTimeSeconds = timeSeconds;
   state.menu.tick += 1;
+  player.shake = Math.max(0, (player.shake || 0) - ENGINE.collision.shakeDecay * dtSeconds);
+  player.huckRockEngineCutoutSeconds = Math.max(
+    0,
+    (player.huckRockEngineCutoutSeconds || 0) - dtSeconds
+  );
 
   updateMenuAim(player);
 
   const move = state.chat.active ? { x: 0, y: 0 } : readMoveVector();
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const moving = move.x !== 0 || move.y !== 0;
+  const hasMoveIntent = move.x !== 0 || move.y !== 0;
+  const canThrust = hasMoveIntent && player.huckRockEngineCutoutSeconds <= 0;
 
-  if (moving) {
+  if (hasMoveIntent) {
     player.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  }
+
+  if (canThrust) {
     player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
     player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
   }
 
-  player.thrusting = moving;
+  player.thrusting = canThrust;
   player.mining = state.mouse.down && !state.chat.active;
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
@@ -1300,6 +1314,10 @@ function updateMenuHuckRocks(player, dtSeconds) {
       if (state.menu.room !== roomAtStart) {
         return;
       }
+      continue;
+    }
+
+    if (menuHuckRockPlayerHit(player, rock, rock.previousX, rock.previousY, spawnedFragments)) {
       continue;
     }
 
@@ -1535,6 +1553,9 @@ function spawnMenuHuckRock(player) {
     ageSeconds: 0,
     bornTick: state.menu.tick
   });
+  applyHuckRockRecoil(player, direction);
+  player.huckRockEngineCutoutSeconds = ENGINE.huckRock.engineCutoutSeconds || 0;
+  player.thrusting = false;
 
   while (state.menu.huckRocks.length > ENGINE.huckRock.maxLobbyRocks) {
     state.menu.huckRocks.shift();
@@ -1576,6 +1597,70 @@ function menuHuckRockEntityHit(rock, previousX = rock.x, previousY = rock.y, spa
   }
 
   return false;
+}
+
+function menuHuckRockPlayerHit(player, rock, previousX = rock.x, previousY = rock.y, spawnedFragments = []) {
+  if (rock.ownerId === MENU_PLAYER_ID && (rock.ageSeconds || 0) < 0.15 && (rock.bounceCount || 0) === 0) {
+    return false;
+  }
+
+  const hit = sweptCircleCircleHit(previousX, previousY, rock.x, rock.y, rock.radius, player) ||
+    circleCircleOverlap(rock, player);
+  if (!hit) {
+    return false;
+  }
+
+  const relativeSpeed = Math.hypot(rock.vx - player.vx, rock.vy - player.vy);
+  applyMenuHuckRockPlayerImpulse(rock, player, hit);
+  player.shake = clamp(
+    (player.shake || 0) + Math.max(0, relativeSpeed - ENGINE.collision.shakeThreshold) * ENGINE.collision.shakeScale,
+    0,
+    ENGINE.collision.maxShake
+  );
+  requestCollisionClunk(relativeSpeed);
+  breakMenuHuckRock(rock, null, spawnedFragments, "player");
+  return true;
+}
+
+function applyMenuHuckRockPlayerImpulse(rock, player, hit) {
+  const normalX = Number.isFinite(hit.normalX) ? hit.normalX : 0;
+  const normalY = Number.isFinite(hit.normalY) ? hit.normalY : 0;
+  if (normalX === 0 && normalY === 0) {
+    return;
+  }
+
+  if (Number.isFinite(hit.x) && Number.isFinite(hit.y)) {
+    rock.x = hit.x + normalX * 0.01;
+    rock.y = hit.y + normalY * 0.01;
+  } else if (Number.isFinite(hit.overlap) && hit.overlap > 0) {
+    rock.x += normalX * hit.overlap;
+    rock.y += normalY * hit.overlap;
+  }
+
+  const relativeNormalSpeed = (rock.vx - player.vx) * normalX + (rock.vy - player.vy) * normalY;
+  if (relativeNormalSpeed >= 0) {
+    return;
+  }
+
+  const rockMass = menuHuckRockBodyMass(rock);
+  const playerMass = menuPlayerBodyMass(player);
+  const impulse = (-(1 + ENGINE.huckRock.restitution) * relativeNormalSpeed) /
+    ((1 / rockMass) + (1 / playerMass));
+
+  rock.vx += (impulse / rockMass) * normalX;
+  rock.vy += (impulse / rockMass) * normalY;
+  player.vx -= (impulse / playerMass) * normalX;
+  player.vy -= (impulse / playerMass) * normalY;
+}
+
+function menuHuckRockBodyMass(rock) {
+  const radius = Math.max(0.1, rock.radius || ENGINE.huckRock.radius);
+  return radius * radius;
+}
+
+function menuPlayerBodyMass(player) {
+  const radius = Math.max(0.1, player.radius || ENGINE.ship.radius);
+  return radius * radius * (ENGINE.huckRock.shipMassScale || 1);
 }
 
 function resolveMenuHuckRockAsteroidCollisions(rock, previousX = rock.x, previousY = rock.y, spawnedFragments = []) {
@@ -2661,6 +2746,20 @@ function readInput() {
 }
 
 function readHuckRockInput() {
+  if (!huckRockInputAllowed()) {
+    return false;
+  }
+
+  const now = performance.now() / 1000;
+  if (now >= state.nextHuckRockThunkAtSeconds) {
+    requestHuckRockThunk();
+    state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
+  }
+
+  return true;
+}
+
+function huckRockInputAllowed() {
   const roomState = state.room?.state;
   if (
     !keys.has("Space") ||
@@ -2677,12 +2776,6 @@ function readHuckRockInput() {
     if ((player?.resources?.rock || 0) < (ENGINE.huckRock.costRock || 0)) {
       return false;
     }
-  }
-
-  const now = performance.now() / 1000;
-  if (now >= state.nextHuckRockThunkAtSeconds) {
-    requestHuckRockThunk();
-    state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
   }
 
   return true;
@@ -2719,6 +2812,22 @@ function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
   });
 }
 
+function applyHuckRockRecoil(player, direction) {
+  const impulse = huckRockRecoilImpulse(player);
+  player.vx -= direction.x * impulse;
+  player.vy -= direction.y * impulse;
+}
+
+function huckRockRecoilImpulse(player) {
+  const config = ENGINE.huckRock;
+  const rockMass = config.radius * config.radius;
+  const shipRadius = Math.max(0.1, player.radius || ENGINE.ship.radius);
+  const shipMass = shipRadius * shipRadius * (config.shipMassScale || 1);
+  const hitImpulse = ((1 + config.restitution) * config.speed) /
+    ((1 / rockMass) + (1 / shipMass));
+  return (hitImpulse / shipMass) * (config.recoilImpulseScale ?? 1);
+}
+
 function readMoveVector() {
   const x = axis("KeyD", "ArrowRight", "KeyA", "ArrowLeft");
   const y = axis("KeyS", "ArrowDown", "KeyW", "ArrowUp");
@@ -2742,12 +2851,14 @@ function reconcilePrediction(snapshot, timeSeconds) {
   const authoritative = snapshot.players.find((candidate) => candidate.id === state.playerId);
   if (!authoritative || !authoritative.alive) {
     state.prediction.player = null;
+    state.prediction.huckRockCooldownSeconds = 0;
     state.prediction.lastTimeSeconds = timeSeconds;
     return;
   }
 
   if (!state.prediction.player || state.prediction.player.id !== authoritative.id) {
     state.prediction.player = { ...authoritative };
+    state.prediction.huckRockCooldownSeconds = Number(authoritative.huckRockCooldownSeconds) || 0;
     state.prediction.lastTimeSeconds = timeSeconds;
     return;
   }
@@ -2759,9 +2870,15 @@ function reconcilePrediction(snapshot, timeSeconds) {
 
   if (distance > PREDICTION_SNAP_DISTANCE) {
     state.prediction.player = { ...authoritative };
+    state.prediction.huckRockCooldownSeconds = Number(authoritative.huckRockCooldownSeconds) || 0;
     state.prediction.lastTimeSeconds = timeSeconds;
     return;
   }
+
+  state.prediction.huckRockCooldownSeconds = Math.max(
+    state.prediction.huckRockCooldownSeconds,
+    Number(authoritative.huckRockCooldownSeconds) || 0
+  );
 
   state.prediction.player = {
     ...authoritative,
@@ -2792,10 +2909,18 @@ function updatePrediction(timeSeconds) {
     ? { x: 0, y: 0 }
     : readMoveVector();
   const effects = aggregateUpgradeEffects(predicted.upgrades);
-  const isMoving = move.x !== 0 || move.y !== 0;
+  predicted.huckRockEngineCutoutSeconds = Math.max(
+    0,
+    (predicted.huckRockEngineCutoutSeconds || 0) - dtSeconds
+  );
+  const hasMoveIntent = move.x !== 0 || move.y !== 0;
+  const canThrust = hasMoveIntent && predicted.huckRockEngineCutoutSeconds <= 0;
 
-  if (isMoving) {
+  if (hasMoveIntent) {
     predicted.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  }
+
+  if (canThrust) {
     predicted.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
     predicted.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
   }
@@ -2808,7 +2933,7 @@ function updatePrediction(timeSeconds) {
     predicted.miningHoldSeconds = 0;
   }
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
-  predicted.thrusting = isMoving;
+  predicted.thrusting = canThrust;
 
   const fixedStepSeconds = 1 / ENGINE.tickRate;
   const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
@@ -2818,6 +2943,7 @@ function updatePrediction(timeSeconds) {
   const velocity = clampMagnitude(predicted.vx, predicted.vy, ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier);
   predicted.vx = velocity.x;
   predicted.vy = velocity.y;
+  applyPredictedHuckRockRecoil(predicted, dtSeconds);
   predicted.x += predicted.vx * dtSeconds;
   predicted.y += predicted.vy * dtSeconds;
   resolvePredictionCollisions(predicted, effects);
@@ -2841,8 +2967,32 @@ function predictedLocalPlayer() {
     mining: predicted.mining,
     miningHoldSeconds: predicted.miningHoldSeconds,
     rayExtension: predicted.rayExtension,
+    huckRockCooldownSeconds: state.prediction.huckRockCooldownSeconds,
+    huckRockEngineCutoutSeconds: predicted.huckRockEngineCutoutSeconds,
     thrusting: predicted.thrusting
   };
+}
+
+function applyPredictedHuckRockRecoil(predicted, dtSeconds) {
+  state.prediction.huckRockCooldownSeconds = Math.max(
+    0,
+    state.prediction.huckRockCooldownSeconds - dtSeconds
+  );
+
+  if (!huckRockInputAllowed() || state.prediction.huckRockCooldownSeconds > 0) {
+    return;
+  }
+
+  const target = huckRockTargetForPlayer(predicted);
+  const angle = huckRockLaunchAngleForPlayer(predicted, target?.x, target?.y);
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  applyHuckRockRecoil(predicted, direction);
+  predicted.huckRockEngineCutoutSeconds = ENGINE.huckRock.engineCutoutSeconds || 0;
+  predicted.thrusting = false;
+  state.prediction.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
 }
 
 function renderSnapshot(timeSeconds) {
