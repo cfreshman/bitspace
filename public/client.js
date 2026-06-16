@@ -1098,6 +1098,7 @@ function updateMenuSimulation(timeSeconds) {
     0,
     (player.huckRockEngineCutoutSeconds || 0) - dtSeconds
   );
+  applyShipFriction(player, dtSeconds);
 
   updateMenuAim(player);
 
@@ -1111,8 +1112,7 @@ function updateMenuSimulation(timeSeconds) {
   }
 
   if (canThrust) {
-    player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
-    player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+    applyThrusterAcceleration(player, move, effects, dtSeconds);
   }
 
   player.thrusting = canThrust;
@@ -1124,14 +1124,6 @@ function updateMenuSimulation(timeSeconds) {
   }
   player.rayExtension = miningRayExtension(player.mining, player.miningHoldSeconds);
 
-  const fixedStepSeconds = 1 / ENGINE.tickRate;
-  const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
-  player.vx *= drag;
-  player.vy *= drag;
-
-  const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier);
-  player.vx = velocity.x;
-  player.vy = velocity.y;
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
   resolveMenuAsteroidCollisions(player);
@@ -2493,7 +2485,7 @@ function updateLocalShipAudio(player, timeSeconds) {
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
   const speed = alive ? Math.hypot(player.vx || 0, player.vy || 0) : 0;
-  const speedLevel = clamp(speed / Math.max(1, ENGINE.ship.maxSpeed), 0, 1);
+  const speedLevel = clamp(speed / Math.max(1, ENGINE.ship.audioSpeedReference), 0, 1);
   const engineLevel = alive && player.thrusting ? Math.max(0.28, speedLevel) : 0;
   const miningActive = alive && player.mining === true;
   const miningContact = miningActive && player.miningRay?.hit === true;
@@ -2818,6 +2810,18 @@ function applyHuckRockRecoil(player, direction) {
   player.vy -= direction.y * impulse;
 }
 
+function applyShipFriction(player, dtSeconds) {
+  const fixedStepSeconds = 1 / ENGINE.tickRate;
+  const friction = Math.pow(ENGINE.ship.friction, dtSeconds / fixedStepSeconds);
+  player.vx *= friction;
+  player.vy *= friction;
+}
+
+function applyThrusterAcceleration(player, move, effects, dtSeconds) {
+  player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+  player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+}
+
 function huckRockRecoilImpulse(player) {
   const config = ENGINE.huckRock;
   const rockMass = config.radius * config.radius;
@@ -2913,6 +2917,7 @@ function updatePrediction(timeSeconds) {
     0,
     (predicted.huckRockEngineCutoutSeconds || 0) - dtSeconds
   );
+  applyShipFriction(predicted, dtSeconds);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent && predicted.huckRockEngineCutoutSeconds <= 0;
 
@@ -2921,8 +2926,7 @@ function updatePrediction(timeSeconds) {
   }
 
   if (canThrust) {
-    predicted.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
-    predicted.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+    applyThrusterAcceleration(predicted, move, effects, dtSeconds);
   }
 
   predicted.aimAngle = state.mouse.aimAngle;
@@ -2935,18 +2939,10 @@ function updatePrediction(timeSeconds) {
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
   predicted.thrusting = canThrust;
 
-  const fixedStepSeconds = 1 / ENGINE.tickRate;
-  const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
-  predicted.vx *= drag;
-  predicted.vy *= drag;
-
-  const velocity = clampMagnitude(predicted.vx, predicted.vy, ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier);
-  predicted.vx = velocity.x;
-  predicted.vy = velocity.y;
   applyPredictedHuckRockRecoil(predicted, dtSeconds);
   predicted.x += predicted.vx * dtSeconds;
   predicted.y += predicted.vy * dtSeconds;
-  resolvePredictionCollisions(predicted, effects);
+  resolvePredictionCollisions(predicted);
 }
 
 function predictedLocalPlayer() {
@@ -3311,12 +3307,9 @@ function resetEntitySmoothing() {
   state.entitySmoothing.byId.clear();
 }
 
-function resolvePredictionCollisions(player, effects) {
+function resolvePredictionCollisions(player) {
   resolvePredictionAsteroidCollisions(player);
   resolvePredictionPlayerCollisions(player);
-  const velocity = clampMagnitude(player.vx, player.vy, ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier);
-  player.vx = velocity.x;
-  player.vy = velocity.y;
 }
 
 function resolvePredictionAsteroidCollisions(player) {

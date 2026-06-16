@@ -11,8 +11,17 @@ export const RENDER = Object.freeze({
   background: "#1f2433"
 });
 
+const ENGINE_TICK_RATE = 60;
+const SHIP_THRUST = 360;
+const SHIP_BASE_TERMINAL_SPEED = 56;
+// Per-tick friction is derived so continuous base thrust settles at the intended speed.
+const SHIP_FRICTION = Math.max(
+  0,
+  Math.min(0.999, 1 - (SHIP_THRUST / ENGINE_TICK_RATE) / SHIP_BASE_TERMINAL_SPEED)
+);
+
 export const ENGINE = Object.freeze({
-  tickRate: 60,
+  tickRate: ENGINE_TICK_RATE,
   snapshotRate: 60,
   maxPlayers: 8,
   heartbeat: {
@@ -41,9 +50,10 @@ export const ENGINE = Object.freeze({
   },
   ship: {
     radius: 7,
-    thrust: 460,
-    drag: 0.9,
-    maxSpeed: 72
+    thrust: SHIP_THRUST,
+    baseTerminalSpeed: SHIP_BASE_TERMINAL_SPEED,
+    friction: SHIP_FRICTION,
+    audioSpeedReference: SHIP_BASE_TERMINAL_SPEED
   },
   player: {
     startingHealthBars: 3,

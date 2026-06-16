@@ -12,34 +12,34 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     label: "SPEED",
     code: "SPEED",
     maxLevel: 5,
-    description: "SHIP THRUST AND TOP SPEED",
-    baseStatText: "100% THRUST / 100% SPEED",
+    description: "SHIP SPEED",
+    baseStatText: "100% SPEED",
     visual: "Longer shared thruster plume.",
     levels: Object.freeze([
       {
         cost: CORE_UPGRADE_COSTS[0],
-        effectText: "+45% THRUST / +32% SPEED",
-        effects: { thrustMultiplier: 1.45, maxSpeedMultiplier: 1.32, thrusterParticleMultiplier: 1.35 }
+        effectText: "+45% SPEED",
+        effects: { thrustMultiplier: 1.45, thrusterParticleMultiplier: 1.35 }
       },
       {
         cost: CORE_UPGRADE_COSTS[1],
-        effectText: "+75% THRUST / +58% SPEED",
-        effects: { thrustMultiplier: 1.75, maxSpeedMultiplier: 1.58, thrusterParticleMultiplier: 1.55 }
+        effectText: "+75% SPEED",
+        effects: { thrustMultiplier: 1.75, thrusterParticleMultiplier: 1.55 }
       },
       {
         cost: CORE_UPGRADE_COSTS[2],
-        effectText: "+105% THRUST / +82% SPEED",
-        effects: { thrustMultiplier: 2.05, maxSpeedMultiplier: 1.82, thrusterParticleMultiplier: 1.75 }
+        effectText: "+105% SPEED",
+        effects: { thrustMultiplier: 2.05, thrusterParticleMultiplier: 1.75 }
       },
       {
         cost: CORE_UPGRADE_COSTS[3],
-        effectText: "+135% THRUST / +105% SPEED",
-        effects: { thrustMultiplier: 2.35, maxSpeedMultiplier: 2.05, thrusterParticleMultiplier: 1.95 }
+        effectText: "+135% SPEED",
+        effects: { thrustMultiplier: 2.35, thrusterParticleMultiplier: 1.95 }
       },
       {
         cost: CORE_UPGRADE_COSTS[4],
-        effectText: "+170% THRUST / +128% SPEED",
-        effects: { thrustMultiplier: 2.7, maxSpeedMultiplier: 2.28, thrusterParticleMultiplier: 2.2 }
+        effectText: "+170% SPEED",
+        effects: { thrustMultiplier: 2.7, thrusterParticleMultiplier: 2.2 }
       }
     ])
   },
@@ -156,8 +156,6 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
 const UPGRADE_IDS = new Set(UPGRADE_DEFINITIONS.map((upgrade) => upgrade.id));
 const DEFAULT_EFFECTS = Object.freeze({
   thrustMultiplier: 1,
-  maxSpeedMultiplier: 1,
-  dragMultiplier: 1,
   rayLengthBonus: 0,
   miningPowerMultiplier: 1,
   rayDamageMultiplier: 1,

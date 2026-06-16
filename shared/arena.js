@@ -377,6 +377,7 @@ function stepPlayer(arena, player, dtSeconds) {
   player.huckRockEngineCutoutSeconds = Math.max(0, (player.huckRockEngineCutoutSeconds || 0) - dtSeconds);
   syncPlayerDerivedStats(player);
   const effects = aggregateUpgradeEffects(player.upgrades);
+  applyShipFriction(player, dtSeconds);
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
@@ -388,8 +389,7 @@ function stepPlayer(arena, player, dtSeconds) {
   }
 
   if (canThrust) {
-    player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
-    player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+    applyThrusterAcceleration(player, move, effects, dtSeconds);
   }
 
   player.aimAngle = player.input.aimAngle;
@@ -401,15 +401,6 @@ function stepPlayer(arena, player, dtSeconds) {
   }
   player.rayExtension = miningRayExtension(player.mining, player.miningHoldSeconds);
   rechargePlayerHealth(arena, player, dtSeconds, effects);
-
-  const fixedStepSeconds = 1 / ENGINE.tickRate;
-  const drag = Math.pow(ENGINE.ship.drag * effects.dragMultiplier, dtSeconds / fixedStepSeconds);
-  player.vx *= drag;
-  player.vy *= drag;
-
-  const velocity = clampMagnitude(player.vx, player.vy, playerMaxSpeed(player, effects));
-  player.vx = velocity.x;
-  player.vy = velocity.y;
 
   processHuckRockInput(arena, player, dtSeconds);
 
@@ -457,7 +448,6 @@ function resolveAsteroidCollisions(asteroid, player, options = {}) {
     }
   }
 
-  clampPlayerVelocity(player);
   return impact;
 }
 
@@ -542,6 +532,18 @@ function applyHuckRockRecoil(player, direction) {
   const impulse = huckRockRecoilImpulse(player);
   player.vx -= direction.x * impulse;
   player.vy -= direction.y * impulse;
+}
+
+function applyShipFriction(player, dtSeconds) {
+  const fixedStepSeconds = 1 / ENGINE.tickRate;
+  const friction = Math.pow(ENGINE.ship.friction, dtSeconds / fixedStepSeconds);
+  player.vx *= friction;
+  player.vy *= friction;
+}
+
+function applyThrusterAcceleration(player, move, effects, dtSeconds) {
+  player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+  player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
 }
 
 function huckRockRecoilImpulse(player) {
@@ -1959,10 +1961,6 @@ function playerHealthBars(player) {
   );
 }
 
-function playerMaxSpeed(player, effects = aggregateUpgradeEffects(player.upgrades)) {
-  return ENGINE.ship.maxSpeed * effects.maxSpeedMultiplier;
-}
-
 function playerMiningRayLength(player, effects = aggregateUpgradeEffects(player.upgrades)) {
   return ENGINE.mining.rayLength + effects.rayLengthBonus;
 }
@@ -2103,16 +2101,8 @@ function resolvePlayerPair(a, b, fallbackSeed) {
     b.vy += ny * ENGINE.collision.shipPush;
   }
 
-  clampPlayerVelocity(a);
-  clampPlayerVelocity(b);
   addShake(a, impact);
   addShake(b, impact);
-}
-
-function clampPlayerVelocity(player) {
-  const velocity = clampMagnitude(player.vx, player.vy, playerMaxSpeed(player));
-  player.vx = velocity.x;
-  player.vy = velocity.y;
 }
 
 function addShake(player, impact) {
