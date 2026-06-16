@@ -56,9 +56,9 @@ export const ENGINE = Object.freeze({
     rayLength: 28,
     rayExtendSeconds: 0,
     buttonSeconds: 0.1,
-    playerDamagePerSecond: 45,
+    playerDamagePerSecond: 22.5,
     rockSeconds: 0.5,
-    oreSeconds: 0.5,
+    oreSeconds: 1,
     diamondSeconds: 5
   },
   build: {

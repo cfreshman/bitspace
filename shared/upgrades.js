@@ -1,9 +1,9 @@
 const CORE_UPGRADE_COSTS = Object.freeze([
-  Object.freeze({ ore: 12 }),
-  Object.freeze({ ore: 26, diamond: 1 }),
-  Object.freeze({ ore: 45, diamond: 2 }),
-  Object.freeze({ ore: 70, diamond: 3 }),
-  Object.freeze({ ore: 100, diamond: 4 })
+  Object.freeze({ ore: 6 }),
+  Object.freeze({ ore: 13, diamond: 1 }),
+  Object.freeze({ ore: 23, diamond: 2 }),
+  Object.freeze({ ore: 35, diamond: 3 }),
+  Object.freeze({ ore: 50, diamond: 4 })
 ]);
 
 export const UPGRADE_DEFINITIONS = Object.freeze([
