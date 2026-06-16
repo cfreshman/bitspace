@@ -312,6 +312,9 @@ export function createRoomManager(options = {}) {
         const countdownBeepEvent = maybeFinalCountdownBeep(room);
         if (countdownBeepEvent) {
           events.push(countdownBeepEvent);
+          if (countdownBeepEvent.secondsLeft === 0) {
+            continue;
+          }
         }
 
         if (room.participants.size >= ENGINE.lobby.minPlayers && now() >= room.autoStartAtMs) {
@@ -518,7 +521,7 @@ export function createRoomManager(options = {}) {
 
     room.countdownLastBeepSecond = secondsLeft;
     room.countdownBeepSeq += 1;
-    return { type: "countdown", room };
+    return { type: "countdown", room, secondsLeft };
   }
 
   function startWaitingRoom(room, reason) {
