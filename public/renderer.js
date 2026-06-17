@@ -59,7 +59,6 @@ const MINING_RAY_BASE_SPIN_RATE = 2.5;
 const MAX_PARTICLES = 260;
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
-const MENU_THEME_BACKING_COLOR = "#000000";
 const ORE_RING_STEPS = 16;
 const ORE_MINING_ROTATION = 0.26;
 const ORE_OCCLUSION_PADDING = 0.85;
@@ -143,7 +142,8 @@ const BITMAP_GLYPHS = Object.freeze({
   "=": ["00000", "11111", "00000", "00000", "11111", "00000", "00000"],
   "@": ["01110", "10001", "10111", "10101", "10111", "10000", "01111"],
   "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
-  "&": ["01100", "10010", "10100", "01000", "10101", "10010", "01101"]
+  "&": ["01100", "10010", "10100", "01000", "10101", "10010", "01101"],
+  "⌂": ["0001000", "0010100", "0100010", "1111111", "0100010", "0101010", "0111110"]
 });
 
 export function createRenderer(canvas) {
@@ -2635,11 +2635,12 @@ function drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer) {
   const selected = entity.selected === true;
   const background = entity.background || colors.background;
   const foreground = entity.foreground || colors.foreground;
+  const backing = entity.backing || colors.backing || "#000000";
   const fillColor = selected ? foreground : background;
   const detailColor = selected ? background : foreground;
 
   if (!selected) {
-    ctx.fillStyle = MENU_THEME_BACKING_COLOR;
+    ctx.fillStyle = backing;
     fillSolidDisk(ctx, x, y, radius + 4);
   }
 

@@ -56,15 +56,21 @@ const MENU_BUTTON_GAP = 24;
 const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 76;
 const THEME_ASTEROID_GAP = 24;
+const THEME_RANDOM_ID = "menu-theme-random";
+const THEME_BACK_ID = "menu-theme-back";
 const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
   { id: "blue", label: "BLUE", background: "#231f33", foreground: "#74acef" },
   { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff", backing: "#100810" },
-  { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
-  { id: "purple", label: "PURPLE", background: "#3d2945", foreground: "#65ceff" },
-  { id: "tan", label: "TAN", background: "#555452", foreground: "#ffc366" },
-  { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" },
+  // { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
+  { id: "ember", label: "EMBER", background: "#211c26", foreground: "#ff6f4f" },
+  // { id: "tan", label: "TAN", background: "#555452", foreground: "#ffc366" },
+  { id: "rose", label: "ROSE", background: "#34222c", foreground: "#ff72b6" },
+  // { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" },
+  // { id: "ice", label: "ICE", background: "#1f353d", foreground: "#9bf7ff" },
+  // { id: "sodium", label: "SODIUM", background: "#202419", foreground: "#ffd84a" },
+  { id: "amber", label: "AMBER", background: "#18110d", foreground: "#ffb24a" },
   { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" }
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
@@ -1177,44 +1183,9 @@ function updateMenuSimulation(timeSeconds) {
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
   resolveMenuAsteroidCollisions(player);
-  updateThemeRoomSelection(player);
 
   updateMenuMiningRay(player, dtSeconds);
   updateMenuHuckRocks(player, dtSeconds);
-}
-
-function updateThemeRoomSelection(player) {
-  if (state.menu.room !== MENU_ROOMS.theme) {
-    return;
-  }
-
-  const preset = closestThemePresetToPoint(player.x, player.y, menuCenter(state.menu.asteroid));
-  if (preset && !themeMatchesPreset(state.theme, preset)) {
-    setTheme(preset);
-  }
-}
-
-function closestThemePresetToPoint(x, y, center) {
-  const startAngle = -Math.PI / 2;
-  let closest = null;
-  let closestDistance = Number.POSITIVE_INFINITY;
-  let nextDistance = Number.POSITIVE_INFINITY;
-
-  for (let index = 0; index < THEME_PRESETS.length; index += 1) {
-    const angle = startAngle + (index * Math.PI * 2) / THEME_PRESETS.length;
-    const swatchX = center.x + Math.cos(angle) * THEME_SWATCH_RING_RADIUS;
-    const swatchY = center.y + Math.sin(angle) * THEME_SWATCH_RING_RADIUS;
-    const distance = Math.hypot(x - swatchX, y - swatchY);
-    if (distance < closestDistance) {
-      nextDistance = closestDistance;
-      closestDistance = distance;
-      closest = THEME_PRESETS[index];
-    } else if (distance < nextDistance) {
-      nextDistance = distance;
-    }
-  }
-
-  return nextDistance - closestDistance >= 2 ? closest : null;
 }
 
 function updateMenuAim(player) {
@@ -1929,12 +1900,17 @@ function activateMenuEntity(entity) {
     return;
   }
 
+  if (entity.action === "random-theme") {
+    setTheme(randomTheme());
+    return;
+  }
+
   if (entity.action === "select-theme") {
     const preset = THEME_PRESETS.find((candidate) => candidate.id === entity.themeId);
-    if (preset) {
-      setTheme(preset);
+    if (!preset) {
+      return;
     }
-    enterMenuRoom(MENU_ROOMS.ready);
+    setTheme(preset);
     return;
   }
 
@@ -2103,23 +2079,76 @@ function menuButton(id, action, label, x, y, width) {
 
 function themeSwatchEntities(center) {
   const startAngle = -Math.PI / 2;
-  return THEME_PRESETS.map((preset, index) => {
-    const angle = startAngle + (index * Math.PI * 2) / THEME_PRESETS.length;
+  const presetItems = THEME_PRESETS.map((preset, index) => ({ type: "preset", preset, themeNumber: index + 1 }));
+  const ringItems = [
+    { type: "home" },
+    presetItems[0],
+    presetItems[1],
+    presetItems[2],
+    { type: "random" },
+    presetItems[3],
+    presetItems[4],
+    presetItems[5]
+  ].filter(Boolean);
+  const entities = ringItems.map((item, index) => {
+    const angle = startAngle + (index * Math.PI * 2) / ringItems.length;
+    const x = center.x + Math.cos(angle) * THEME_SWATCH_RING_RADIUS;
+    const y = center.y + Math.sin(angle) * THEME_SWATCH_RING_RADIUS;
+
+    if (item.type === "random") {
+      return {
+        id: THEME_RANDOM_ID,
+        type: "themeSwatch",
+        action: "random-theme",
+        label: "?",
+        background: "#202020",
+        foreground: "#f2f2f2",
+        backing: "#000000",
+        x,
+        y,
+        radius: THEME_SWATCH_RADIUS,
+        active: state.menu.activeTargetId === THEME_RANDOM_ID,
+        selected: false
+      };
+    }
+
+    if (item.type === "home") {
+      return {
+        id: THEME_BACK_ID,
+        type: "themeSwatch",
+        action: "back",
+        label: "⌂",
+        background: state.theme.background,
+        foreground: state.theme.foreground,
+        backing: state.theme.backing || "#000000",
+        x,
+        y,
+        radius: THEME_SWATCH_RADIUS,
+        active: state.menu.activeTargetId === THEME_BACK_ID,
+        selected: false
+      };
+    }
+
+    const { preset } = item;
+    const id = `menu-theme-${preset.id}`;
     return {
-      id: `menu-theme-${preset.id}`,
+      id,
       type: "themeSwatch",
       action: "select-theme",
-      label: String(index + 1),
+      label: String(item.themeNumber),
       themeId: preset.id,
       background: preset.background,
       foreground: preset.foreground,
-      x: center.x + Math.cos(angle) * THEME_SWATCH_RING_RADIUS,
-      y: center.y + Math.sin(angle) * THEME_SWATCH_RING_RADIUS,
+      backing: preset.backing || "#000000",
+      x,
+      y,
       radius: THEME_SWATCH_RADIUS,
-      active: state.menu.activeTargetId === `menu-theme-${preset.id}`,
+      active: state.menu.activeTargetId === id,
       selected: themeMatchesPreset(state.theme, preset)
     };
   });
+
+  return entities;
 }
 
 function menuCenter(asteroid) {
@@ -2163,6 +2192,123 @@ function setTheme(theme) {
   state.theme = normalizeTheme(theme);
   applyThemeToSource(state.theme);
   saveTheme();
+}
+
+function randomTheme() {
+  const candidates = [];
+
+  for (let index = 0; index < 96; index += 1) {
+    const candidate = randomThemeCandidate();
+    const score = themeCandidateScore(candidate);
+    if (Number.isFinite(score)) {
+      candidates.push({
+        theme: candidate,
+        weight: Math.max(0.05, score)
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return defaultTheme();
+  }
+
+  let remainingWeight = candidates.reduce((total, candidate) => total + candidate.weight, 0) * Math.random();
+  for (const candidate of candidates) {
+    remainingWeight -= candidate.weight;
+    if (remainingWeight <= 0) {
+      return candidate.theme;
+    }
+  }
+
+  return candidates[candidates.length - 1].theme;
+}
+
+function randomThemeCandidate() {
+  const hue = Math.random() * 360;
+  const direction = Math.random() < 0.5 ? -1 : 1;
+
+  switch (Math.floor(Math.random() * 5)) {
+    case 0:
+      return sampledTheme(
+        hue,
+        hue + direction * randomBetween(22, 70),
+        randomBetween(16, 34),
+        randomBetween(12, 30),
+        randomBetween(44, 82),
+        randomBetween(58, 84)
+      );
+    case 1:
+      return sampledTheme(
+        hue,
+        hue + direction * randomBetween(90, 170),
+        randomBetween(24, 56),
+        randomBetween(10, 26),
+        randomBetween(48, 88),
+        randomBetween(60, 86)
+      );
+    case 2:
+      return sampledTheme(
+        hue + randomBetween(-24, 24),
+        Math.random() * 360,
+        randomBetween(6, 24),
+        randomBetween(14, 32),
+        randomBetween(68, 96),
+        randomBetween(56, 82)
+      );
+    case 3:
+      return sampledTheme(
+        hue,
+        hue + direction * randomBetween(35, 215),
+        randomBetween(30, 66),
+        randomBetween(8, 23),
+        randomBetween(30, 62),
+        randomBetween(68, 88)
+      );
+    default:
+      return sampledTheme(
+        hue,
+        Math.random() * 360,
+        randomBetween(0, 14),
+        randomBetween(9, 25),
+        randomBetween(50, 92),
+        randomBetween(58, 88)
+      );
+  }
+}
+
+function sampledTheme(backgroundHue, foregroundHue, backgroundSaturation, backgroundLightness, foregroundSaturation, foregroundLightness) {
+  return {
+    background: hslToHex(backgroundHue, backgroundSaturation, backgroundLightness),
+    foreground: hslToHex(foregroundHue, foregroundSaturation, foregroundLightness),
+    backing: "#000000"
+  };
+}
+
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function themeCandidateScore(theme) {
+  const background = hexToRgb(theme.background);
+  const foreground = hexToRgb(theme.foreground);
+  if (!background || !foreground) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const backgroundLuminance = relativeLuminance(background);
+  const foregroundLuminance = relativeLuminance(foreground);
+  const colorDistance = Math.hypot(
+    foreground.r - background.r,
+    foreground.g - background.g,
+    foreground.b - background.b
+  ) / Math.hypot(255, 255, 255);
+
+  const contrast = foregroundLuminance - backgroundLuminance;
+  if (backgroundLuminance > 0.3 || foregroundLuminance < 0.32 || contrast < 0.24 || colorDistance < 0.24) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  return contrast * 1.8 + colorDistance * 1.2;
 }
 
 function adjacentThemePreset(theme, direction) {
@@ -2258,6 +2404,78 @@ function normalizeTheme(theme) {
 
 function rgbToHex(color) {
   return `#${hexByte(color.r)}${hexByte(color.g)}${hexByte(color.b)}`;
+}
+
+function hslToHex(hue, saturation, lightness) {
+  return rgbToHex(hslToRgb(hue, saturation, lightness));
+}
+
+function hslToRgb(hue, saturation, lightness) {
+  const h = normalizeHue(hue) / 360;
+  const s = clamp(saturation, 0, 100) / 100;
+  const l = clamp(lightness, 0, 100) / 100;
+
+  if (s <= 0) {
+    const value = Math.round(l * 255);
+    return { r: value, g: value, b: value };
+  }
+
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r: Math.round(hueToRgb(p, q, h + 1 / 3) * 255),
+    g: Math.round(hueToRgb(p, q, h) * 255),
+    b: Math.round(hueToRgb(p, q, h - 1 / 3) * 255)
+  };
+}
+
+function hueToRgb(p, q, t) {
+  let value = t;
+  if (value < 0) {
+    value += 1;
+  }
+  if (value > 1) {
+    value -= 1;
+  }
+  if (value < 1 / 6) {
+    return p + (q - p) * 6 * value;
+  }
+  if (value < 1 / 2) {
+    return q;
+  }
+  if (value < 2 / 3) {
+    return p + (q - p) * (2 / 3 - value) * 6;
+  }
+  return p;
+}
+
+function normalizeHue(value) {
+  return ((value % 360) + 360) % 360;
+}
+
+function hexToRgb(value) {
+  if (!isHexColor(value)) {
+    return null;
+  }
+
+  return {
+    r: Number.parseInt(value.slice(1, 3), 16),
+    g: Number.parseInt(value.slice(3, 5), 16),
+    b: Number.parseInt(value.slice(5, 7), 16)
+  };
+}
+
+function relativeLuminance(color) {
+  return 0.2126 * linearSrgb(color.r) +
+    0.7152 * linearSrgb(color.g) +
+    0.0722 * linearSrgb(color.b);
+}
+
+function linearSrgb(value) {
+  const channel = clamp(value, 0, 255) / 255;
+  return channel <= 0.03928
+    ? channel / 12.92
+    : ((channel + 0.055) / 1.055) ** 2.4;
 }
 
 function cssColorToHex(value) {
