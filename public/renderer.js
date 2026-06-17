@@ -14,6 +14,8 @@ const CANVAS_EDGE_PADDING_EM = 1;
 const MIN_RENDER_ASPECT = 2 / 3;
 const MAX_RENDER_ASPECT = 3 / 2;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
+const WORLD_LENS_NOISE_RADIAL = 0.28;
+const WORLD_LENS_NOISE_TANGENTIAL = 0.16;
 const STAR_CELL_SIZE = 13;
 const STAR_PARALLAX = 0.22;
 const MENU_STAR_SEED = "bitspace-menu";
@@ -434,6 +436,8 @@ function createWorldLens(width, height) {
     radius,
     edgeScale,
     maxSourceRadius: radius * edgeScale,
+    noiseRadial: WORLD_LENS_NOISE_RADIAL,
+    noiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
     sourcePadding
   };
 }
@@ -461,11 +465,26 @@ function projectLensPixel(x, y, lens) {
 
   const t = clamp(sourceRadius / lens.maxSourceRadius, 0, 1);
   const scale = 1 + (lens.edgeScale - 1) * t * t;
+  const screenRadius = sourceRadius / scale;
+  const noiseWeight = t * t;
+  const radialNoise = lensNoiseAt(x, y, 0x4f1bbcdc) * lens.noiseRadial * noiseWeight;
+  const tangentNoise = lensNoiseAt(x, y, 0x8ab23d31) * lens.noiseTangential * noiseWeight;
+  const unitX = dx / sourceRadius;
+  const unitY = dy / sourceRadius;
 
   return {
-    x: Math.floor(lens.centerX + dx / scale),
-    y: Math.floor(lens.centerY + dy / scale)
+    x: Math.floor(lens.centerX + unitX * (screenRadius + radialNoise) - unitY * tangentNoise),
+    y: Math.floor(lens.centerY + unitY * (screenRadius + radialNoise) + unitX * tangentNoise)
   };
+}
+
+function lensNoiseAt(x, y, salt) {
+  let value = Math.imul(Math.floor(x), 374761393) ^
+    Math.imul(Math.floor(y), 668265263) ^
+    salt;
+  value = Math.imul(value ^ (value >>> 13), 1274126177);
+  value = Math.imul(value ^ (value >>> 16), 2246822519);
+  return (((value ^ (value >>> 15)) >>> 0) / 2147483647.5) - 1;
 }
 
 function createPixelTextRenderer(width, height) {
