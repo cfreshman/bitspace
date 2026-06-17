@@ -52,6 +52,7 @@ const CONTROLLER_UPGRADE_NAV_INITIAL_DELAY_SECONDS = 0.28;
 const CONTROLLER_UPGRADE_NAV_REPEAT_SECONDS = 0.11;
 const CONTROLLER_DPAD_NAV_THRESHOLD = 0.5;
 const HUD_RESOURCE_FLASH_SECONDS = 0.55;
+const BUILD_REPEAT_SECONDS = 0.08;
 const MENU_PLAYER_ID = "menu-player";
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
@@ -164,7 +165,9 @@ const state = {
     selectedIndex: 0
   },
   build: {
-    active: false
+    active: false,
+    nextAttemptSeconds: 0,
+    lastTargetKey: ""
   },
   menu: {
     ...createMenuState()
@@ -260,7 +263,7 @@ function applyServerRoom(room) {
     state.eliminationNotices = [];
     state.playerAliveById.clear();
     state.upgrades.active = false;
-    state.build.active = false;
+    closeBuildMode();
     state.menu.readySent = false;
     state.menu.activeTargetId = null;
     resetLocalDamageAudioState();
@@ -273,7 +276,7 @@ function applyServerRoom(room) {
   if (previousState !== room.state || previousRoomId !== nextRoomId) {
     releaseSpaceUntilKeyup();
     state.upgrades.active = false;
-    state.build.active = false;
+    closeBuildMode();
     resetLocalDamageAudioState();
     resetEntitySmoothing();
     state.prediction.huckRockCooldownSeconds = 0;
@@ -486,7 +489,7 @@ talkInput.addEventListener("keydown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   updateMouse(event);
-  if (state.mouse.down && !isMouseInPhysicalViewport()) {
+  if (state.mouse.down && !state.build.active && !isMouseInPhysicalViewport()) {
     state.mouse.down = false;
   }
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
@@ -525,14 +528,14 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
 
-  if (!isMouseInPhysicalViewport()) {
-    state.mouse.down = false;
+  if (state.build.active) {
+    state.mouse.down = true;
+    buildWallAtMouse({ force: true });
     canvas.setPointerCapture(event.pointerId);
     return;
   }
 
-  if (state.build.active) {
-    buildWallAtMouse();
+  if (!isMouseInPhysicalViewport()) {
     state.mouse.down = false;
     canvas.setPointerCapture(event.pointerId);
     return;
@@ -608,6 +611,7 @@ function draw(now = 0) {
   const screenPointer = screenPointerPoint();
   state.uiHoverId = screenRoomButtonAtPoint(screenPointer.x, screenPointer.y);
   const buildTarget = buildTargetFromMouse();
+  updateHeldBuild(buildTarget, timeSeconds);
   const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
@@ -716,7 +720,7 @@ function handleControllerActions(input) {
     }
 
     if (state.build.active) {
-      state.build.active = false;
+      closeBuildMode();
       return;
     }
   }
@@ -730,7 +734,7 @@ function handleControllerActions(input) {
   }
 
   if ((input.pressed.select || input.pressed.mining) && state.build.active) {
-    buildWallAtMouse();
+    buildWallAtMouse({ force: true });
     return;
   }
 
@@ -2806,6 +2810,7 @@ function activateTalk() {
 
   state.chat.active = true;
   state.upgrades.active = false;
+  closeBuildMode();
   state.mouse.down = false;
   keys.clear();
   talkInput.value = currentTalkText();
@@ -2828,7 +2833,7 @@ function activateUpgrades(options = {}) {
   }
 
   state.upgrades.active = true;
-  state.build.active = false;
+  closeBuildMode();
   state.mouse.down = false;
   resetControllerUpgradeNav();
   if (!options.controller) {
@@ -2855,9 +2860,19 @@ function toggleBuildMode() {
     return;
   }
 
-  state.build.active = !state.build.active;
+  if (state.build.active) {
+    closeBuildMode();
+  } else {
+    state.build.active = true;
+    resetBuildHold();
+  }
   state.upgrades.active = false;
   state.mouse.down = false;
+}
+
+function closeBuildMode() {
+  state.build.active = false;
+  resetBuildHold();
 }
 
 function handleUpgradeKey(event) {
@@ -4771,7 +4786,30 @@ function buySelectedUpgrade() {
   }
 }
 
-function buildWallAtMouse() {
+function updateHeldBuild(target, timeSeconds) {
+  if (!buildHoldActive()) {
+    resetBuildHold();
+    return;
+  }
+
+  buildWallAtMouse({ target, timeSeconds });
+}
+
+function buildHoldActive() {
+  if (!state.build.active || state.chat.active || state.upgrades.active || state.room?.state !== "active") {
+    return false;
+  }
+
+  return state.mouse.down ||
+    (state.controller.connected && state.controller.mining);
+}
+
+function resetBuildHold() {
+  state.build.lastTargetKey = "";
+  state.build.nextAttemptSeconds = 0;
+}
+
+function buildWallAtMouse(options = {}) {
   const player = predictedLocalPlayer() || localPlayerFromSnapshot();
   if (
     state.build.active &&
@@ -4781,7 +4819,17 @@ function buildWallAtMouse() {
     flashRockHud();
   }
 
-  const target = buildTargetFromMouse();
+  const target = options.target || buildTargetFromMouse();
+  const targetKey = target ? buildTargetKey(target.tileX, target.tileY) : "";
+  const timeSeconds = options.timeSeconds ?? performance.now() / 1000;
+  const targetChanged = targetKey && targetKey !== state.build.lastTargetKey;
+  if (!options.force && !targetChanged && timeSeconds < state.build.nextAttemptSeconds) {
+    return;
+  }
+
+  state.build.lastTargetKey = targetKey;
+  state.build.nextAttemptSeconds = timeSeconds + BUILD_REPEAT_SECONDS;
+
   if (!target?.valid || !socket.connected) {
     return;
   }
@@ -4790,6 +4838,10 @@ function buildWallAtMouse() {
     tileX: target.tileX,
     tileY: target.tileY
   });
+}
+
+function buildTargetKey(tileX, tileY) {
+  return `${tileX},${tileY}`;
 }
 
 function buildTargetFromMouse() {
@@ -4836,17 +4888,13 @@ function buildTargetFromMouse() {
 }
 
 function buildAngleForPlayer(player) {
-  if (state.controller.connected && state.build.active) {
+  if (state.controller.connected && state.build.active && !state.mouse.down) {
     return state.controller.aimAngle;
   }
 
-  if (!isMouseInPhysicalViewport()) {
-    return null;
-  }
-
-  const worldPoint = lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
-  const dx = worldPoint.x - player.x;
-  const dy = worldPoint.y - player.y;
+  const frame = framebufferSize();
+  const dx = state.mouse.x - frame.width / 2;
+  const dy = state.mouse.y - frame.height / 2;
   return dx !== 0 || dy !== 0 ? Math.atan2(dy, dx) : null;
 }
 
