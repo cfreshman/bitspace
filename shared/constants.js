@@ -7,6 +7,7 @@ export const RENDER = Object.freeze({
   height: 384,
   tileSize: 16,
   viewportTiles: 24,
+  lensEdgeScale: 1.14,
   foreground: "#74cbef",
   background: "#1f2433"
 });

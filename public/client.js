@@ -38,6 +38,7 @@ const ENTITY_VELOCITY_CORRECTION = 0.32;
 const ENTITY_MAX_EXTRAPOLATION_SECONDS = 0.22;
 const ELIMINATION_NOTICE_SECONDS = 4;
 const ELIMINATION_NOTICE_MAX = 3;
+const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
 const MINING_AUDIO_MAX_GAIN = 0.022;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
@@ -2826,11 +2827,7 @@ function huckRockTargetForPlayer(player) {
     return null;
   }
 
-  const frame = framebufferSize();
-  return {
-    x: player.x - frame.width / 2 + state.mouse.x,
-    y: player.y - frame.height / 2 + state.mouse.y
-  };
+  return lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
 }
 
 function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
@@ -4068,13 +4065,9 @@ function buildTargetFromMouse() {
   }
 
   const tileSize = state.asteroid.tileSize || 16;
-  const frame = framebufferSize();
-  const camera = {
-    x: player.x - frame.width / 2,
-    y: player.y - frame.height / 2
-  };
-  const tileX = Math.floor((camera.x + state.mouse.x) / tileSize);
-  const tileY = Math.floor((camera.y + state.mouse.y) / tileSize);
+  const worldPoint = lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
+  const tileX = Math.floor(worldPoint.x / tileSize);
+  const tileY = Math.floor(worldPoint.y / tileSize);
   const index = tileY * state.asteroid.widthTiles + tileX;
   const inBounds = tileX >= 0 &&
     tileY >= 0 &&
@@ -4215,6 +4208,26 @@ function eventToFramebufferPoint(event) {
 
 function isMouseInPhysicalViewport() {
   return isPointInPhysicalViewport(state.mouse.x, state.mouse.y, state.mouse.inFrame);
+}
+
+function lensScreenPointToWorld(player, screenX, screenY) {
+  const frame = framebufferSize();
+  const centerX = frame.width / 2;
+  const centerY = frame.height / 2;
+  const dx = screenX - centerX;
+  const dy = screenY - centerY;
+  const radius = Math.min(frame.width, frame.height) / 2;
+  const distance = Math.hypot(dx, dy);
+  if (distance === 0 || radius <= 0) {
+    return { x: player.x, y: player.y };
+  }
+
+  const t = clamp(distance / radius, 0, 1);
+  const scale = 1 + (Math.max(1, WORLD_LENS_EDGE_SCALE) - 1) * t * t;
+  return {
+    x: player.x + dx * scale,
+    y: player.y + dy * scale
+  };
 }
 
 function isPointInPhysicalViewport(x, y, inFrame = true) {

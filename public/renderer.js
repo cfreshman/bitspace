@@ -13,6 +13,7 @@ const ENTITY_PIXEL_SIZE = 1;
 const CANVAS_EDGE_PADDING_EM = 1;
 const MIN_RENDER_ASPECT = 2 / 3;
 const MAX_RENDER_ASPECT = 3 / 2;
+const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
 const STAR_CELL_SIZE = 13;
 const STAR_PARALLAX = 0.22;
 const MENU_STAR_SEED = "bitspace-menu";
@@ -236,6 +237,7 @@ function createPixelSurface(canvasContext, width, height) {
   const circleClip = createCircleClipSpans(width, height);
   let currentColor = packColor(RENDER.foreground);
   let activeClip = null;
+  let activeLens = null;
 
   return {
     width,
@@ -250,14 +252,56 @@ function createPixelSurface(canvasContext, width, height) {
     beginCircleClip() {
       activeClip = circleClip;
     },
+    beginLens(lens) {
+      activeLens = lens;
+    },
+    endLens() {
+      activeLens = null;
+    },
     endClip() {
       activeClip = null;
     },
     fillRect(x, y, rectWidth, rectHeight) {
-      const x0 = Math.max(0, Math.floor(x));
-      const y0 = Math.max(0, Math.floor(y));
-      const x1 = Math.min(width, Math.ceil(x + rectWidth));
-      const y1 = Math.min(height, Math.ceil(y + rectHeight));
+      const rawX0 = Math.floor(x);
+      const rawY0 = Math.floor(y);
+      const rawX1 = Math.ceil(x + rectWidth);
+      const rawY1 = Math.ceil(y + rectHeight);
+
+      if (activeLens) {
+        const sourcePadding = activeLens.sourcePadding || 0;
+        const x0 = Math.max(-sourcePadding, rawX0);
+        const y0 = Math.max(-sourcePadding, rawY0);
+        const x1 = Math.min(width + sourcePadding, rawX1);
+        const y1 = Math.min(height + sourcePadding, rawY1);
+
+        if (x0 >= x1 || y0 >= y1) {
+          return;
+        }
+
+        for (let py = y0; py < y1; py += 1) {
+          for (let px = x0; px < x1; px += 1) {
+            const projected = projectLensPixel(px, py, activeLens);
+            if (!projected || projected.x < 0 || projected.y < 0 || projected.x >= width || projected.y >= height) {
+              continue;
+            }
+
+            if (activeClip && (
+              projected.x < activeClip.starts[projected.y] ||
+              projected.x >= activeClip.ends[projected.y]
+            )) {
+              continue;
+            }
+
+            pixels[projected.y * width + projected.x] = currentColor;
+          }
+        }
+        return;
+      }
+
+      const x0 = Math.max(0, rawX0);
+      const y0 = Math.max(0, rawY0);
+      const x1 = Math.min(width, rawX1);
+      const y1 = Math.min(height, rawY1);
 
       if (x0 >= x1 || y0 >= y1) {
         return;
@@ -320,6 +364,51 @@ function createCircleClipSpans(width, height) {
   }
 
   return { starts, ends };
+}
+
+function createWorldLens(width, height) {
+  const radius = Math.min(width, height) / 2;
+  const edgeScale = Math.max(1, WORLD_LENS_EDGE_SCALE);
+  const sourcePadding = worldLensSourcePadding(width, height);
+
+  return {
+    centerX: width / 2,
+    centerY: height / 2,
+    radius,
+    edgeScale,
+    maxSourceRadius: radius * edgeScale,
+    sourcePadding
+  };
+}
+
+function worldLensSourcePadding(width, height) {
+  const radius = Math.min(width, height) / 2;
+  return Math.ceil(radius * (Math.max(1, WORLD_LENS_EDGE_SCALE) - 1)) + RENDER.tileSize * 2;
+}
+
+function projectLensPixel(x, y, lens) {
+  const dx = x + 0.5 - lens.centerX;
+  const dy = y + 0.5 - lens.centerY;
+  const sourceRadius = Math.hypot(dx, dy);
+
+  if (sourceRadius > lens.maxSourceRadius) {
+    return null;
+  }
+
+  if (sourceRadius === 0) {
+    return {
+      x: Math.floor(lens.centerX),
+      y: Math.floor(lens.centerY)
+    };
+  }
+
+  const t = clamp(sourceRadius / lens.maxSourceRadius, 0, 1);
+  const scale = 1 + (lens.edgeScale - 1) * t * t;
+
+  return {
+    x: Math.floor(lens.centerX + dx / scale),
+    y: Math.floor(lens.centerY + dy / scale)
+  };
 }
 
 function createPixelTextRenderer(width, height) {
@@ -540,10 +629,12 @@ function beginWorldViewport(ctx, colors) {
   ctx.beginCircleClip();
   ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, ctx.width, ctx.height);
+  ctx.beginLens(createWorldLens(ctx.width, ctx.height));
   ctx.fillStyle = colors.foreground;
 }
 
 function endWorldViewport(ctx) {
+  ctx.endLens();
   ctx.endClip();
 }
 
@@ -769,7 +860,8 @@ function cameraForSnapshot(
 
   return {
     x: target.x - viewportWidth / 2 + shake.x,
-    y: target.y - viewportHeight / 2 + shake.y
+    y: target.y - viewportHeight / 2 + shake.y,
+    lensSourcePadding: worldLensSourcePadding(viewportWidth, viewportHeight)
   };
 }
 
@@ -782,6 +874,10 @@ function shakeOffset(amount, timeSeconds) {
     x: Math.round(Math.sin(timeSeconds * 91.7) * amount),
     y: Math.round(Math.cos(timeSeconds * 83.3) * amount)
   };
+}
+
+function cameraCullPadding(camera) {
+  return camera?.lensSourcePadding || 0;
 }
 
 function asteroidMiningTargetMap(snapshot) {
@@ -832,15 +928,16 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
   }
 
   const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const padding = cameraCullPadding(camera);
+  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
   );
-  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
   );
 
   ctx.fillStyle = colors.foreground;
@@ -958,15 +1055,16 @@ function stormNoiseForSeed(seed) {
 
 function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const padding = cameraCullPadding(camera);
+  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
   );
-  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
   );
 
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
@@ -1703,15 +1801,16 @@ function projectPoint3D(point, centerX, centerY) {
 
 function drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const padding = cameraCullPadding(camera);
+  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
   );
-  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
   );
 
   ctx.fillStyle = colors.foreground;
@@ -1782,15 +1881,16 @@ function drawStormBoundaryHorizontal(ctx, asteroid, x, y, length, worldX, worldY
 
 function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
+  const padding = cameraCullPadding(camera);
+  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
   );
-  const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
+  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
   );
 
   ctx.fillStyle = colors.foreground;
@@ -1907,27 +2007,28 @@ function drawWorldBounds(ctx, snapshot, camera) {
   const top = Math.round(-camera.y);
   const right = Math.round(snapshot.world.width - camera.x);
   const bottom = Math.round(snapshot.world.height - camera.y);
+  const padding = cameraCullPadding(camera);
 
-  if (left >= 0 && left < ctx.width) {
-    drawDashedVerticalLine(ctx, left, top, bottom, camera.y);
+  if (left >= -padding && left < ctx.width + padding) {
+    drawDashedVerticalLine(ctx, left, top, bottom, camera.y, padding);
   }
 
-  if (top >= 0 && top < ctx.height) {
-    drawDashedHorizontalLine(ctx, top, left, right, camera.x);
+  if (top >= -padding && top < ctx.height + padding) {
+    drawDashedHorizontalLine(ctx, top, left, right, camera.x, padding);
   }
 
-  if (right >= 0 && right < ctx.width) {
-    drawDashedVerticalLine(ctx, right, top, bottom, camera.y);
+  if (right >= -padding && right < ctx.width + padding) {
+    drawDashedVerticalLine(ctx, right, top, bottom, camera.y, padding);
   }
 
-  if (bottom >= 0 && bottom < ctx.height) {
-    drawDashedHorizontalLine(ctx, bottom, left, right, camera.x);
+  if (bottom >= -padding && bottom < ctx.height + padding) {
+    drawDashedHorizontalLine(ctx, bottom, left, right, camera.x, padding);
   }
 }
 
-function drawDashedVerticalLine(ctx, x, worldTop, worldBottom, cameraY) {
-  const start = Math.max(0, worldTop);
-  const end = Math.min(ctx.height - 1, worldBottom);
+function drawDashedVerticalLine(ctx, x, worldTop, worldBottom, cameraY, padding = 0) {
+  const start = Math.max(-padding, worldTop);
+  const end = Math.min(ctx.height - 1 + padding, worldBottom);
 
   for (let y = start; y <= end; y += 1) {
     if (positiveModulo(Math.floor(cameraY + y), 8) < 4) {
@@ -1936,9 +2037,9 @@ function drawDashedVerticalLine(ctx, x, worldTop, worldBottom, cameraY) {
   }
 }
 
-function drawDashedHorizontalLine(ctx, y, worldLeft, worldRight, cameraX) {
-  const start = Math.max(0, worldLeft);
-  const end = Math.min(ctx.width - 1, worldRight);
+function drawDashedHorizontalLine(ctx, y, worldLeft, worldRight, cameraX, padding = 0) {
+  const start = Math.max(-padding, worldLeft);
+  const end = Math.min(ctx.width - 1 + padding, worldRight);
 
   for (let x = start; x <= end; x += 1) {
     if (positiveModulo(Math.floor(cameraX + x), 8) < 4) {
@@ -1954,22 +2055,25 @@ function positiveModulo(value, divisor) {
 function drawStars(ctx, snapshot, camera) {
   drawStarLayer(ctx, snapshot.arenaId, {
     x: camera.x * STAR_PARALLAX,
-    y: camera.y * STAR_PARALLAX
+    y: camera.y * STAR_PARALLAX,
+    lensSourcePadding: cameraCullPadding(camera)
   });
 }
 
 function drawMenuStars(ctx, timeSeconds) {
   drawStarLayer(ctx, MENU_STAR_SEED, {
     x: timeSeconds * MENU_STAR_SCROLL_SPEED,
-    y: 0
+    y: 0,
+    lensSourcePadding: worldLensSourcePadding(ctx.width, ctx.height)
   });
 }
 
 function drawStarLayer(ctx, seed, starCamera) {
-  const minCellX = Math.floor(starCamera.x / STAR_CELL_SIZE) - 1;
-  const maxCellX = Math.ceil((starCamera.x + ctx.width) / STAR_CELL_SIZE) + 1;
-  const minCellY = Math.floor(starCamera.y / STAR_CELL_SIZE) - 1;
-  const maxCellY = Math.ceil((starCamera.y + ctx.height) / STAR_CELL_SIZE) + 1;
+  const padding = starCamera.lensSourcePadding || 0;
+  const minCellX = Math.floor((starCamera.x - padding) / STAR_CELL_SIZE) - 1;
+  const maxCellX = Math.ceil((starCamera.x + ctx.width + padding) / STAR_CELL_SIZE) + 1;
+  const minCellY = Math.floor((starCamera.y - padding) / STAR_CELL_SIZE) - 1;
+  const maxCellY = Math.ceil((starCamera.y + ctx.height + padding) / STAR_CELL_SIZE) + 1;
 
   for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
     for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
@@ -1978,7 +2082,12 @@ function drawStarLayer(ctx, seed, starCamera) {
       const y = cellY * STAR_CELL_SIZE + ((hash >>> 8) % STAR_CELL_SIZE);
       const screen = worldToScreen({ x, y }, starCamera);
 
-      if (screen.x < 0 || screen.x >= ctx.width || screen.y < 0 || screen.y >= ctx.height) {
+      if (
+        screen.x < -padding ||
+        screen.x >= ctx.width + padding ||
+        screen.y < -padding ||
+        screen.y >= ctx.height + padding
+      ) {
         continue;
       }
 
