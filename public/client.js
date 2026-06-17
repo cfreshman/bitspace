@@ -123,6 +123,7 @@ const state = {
   mouse: {
     x: 0,
     y: 0,
+    inFrame: true,
     down: false,
     aimAngle: 0
   },
@@ -145,7 +146,10 @@ const state = {
   },
   theme: loadTheme(),
   uiHoverId: null,
-  lastReattachRequestAt: 0
+  lastReattachRequestAt: 0,
+  resumePending: false,
+  deferredMenuRoom: null,
+  resumeFallbackTimer: null
 };
 
 const mapGenMode = isMapGenMode();
@@ -188,7 +192,21 @@ socket.on("connect", () => {
   emitHeartbeat();
 });
 
-socket.on(SERVER_EVENTS.room, (room) => {
+socket.on(SERVER_EVENTS.room, handleServerRoom);
+
+function handleServerRoom(room) {
+  if (state.resumePending && room?.state === "menu" && storedRoomId()) {
+    state.deferredMenuRoom = room;
+    return;
+  }
+
+  state.resumePending = false;
+  state.deferredMenuRoom = null;
+  clearResumeFallbackTimer();
+  applyServerRoom(room);
+}
+
+function applyServerRoom(room) {
   const previousState = state.room?.state;
   const previousRoomId = state.lastRoomId;
   const nextRoomId = room?.roomId || null;
@@ -238,7 +256,7 @@ socket.on(SERVER_EVENTS.room, (room) => {
   if (room?.state === "menu") {
     state.menu.readySent = false;
   }
-});
+}
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   const receivedAtSeconds = performance.now() / 1000;
@@ -441,6 +459,9 @@ talkInput.addEventListener("keydown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   updateMouse(event);
+  if (state.mouse.down && !isMouseInPhysicalViewport()) {
+    state.mouse.down = false;
+  }
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   if (state.upgrades.active) {
     updateUpgradeSelectionFromMouse();
@@ -458,8 +479,15 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
 
+  if (state.upgrades.active) {
+    updateUpgradeSelectionFromMouse();
+    buySelectedUpgrade();
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+
   if (isReadyMenu()) {
-    state.mouse.down = true;
+    state.mouse.down = isMouseInPhysicalViewport();
     canvas.setPointerCapture(event.pointerId);
     return;
   }
@@ -470,9 +498,8 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
 
-  if (state.upgrades.active) {
-    updateUpgradeSelectionFromMouse();
-    buySelectedUpgrade();
+  if (!isMouseInPhysicalViewport()) {
+    state.mouse.down = false;
     canvas.setPointerCapture(event.pointerId);
     return;
   }
@@ -536,11 +563,14 @@ function emitHeartbeat() {
 
 function draw(now = 0) {
   const timeSeconds = now / 1000;
+  const loadingRoom = isLoadingRoom();
   const readyMenu = isReadyMenu();
 
   syncThemeFromCss();
   pruneEliminationNotices(timeSeconds);
-  if (readyMenu) {
+  if (loadingRoom) {
+    state.mouse.down = false;
+  } else if (readyMenu) {
     updateMenuSimulation(timeSeconds);
   } else {
     updatePrediction(timeSeconds);
@@ -549,7 +579,7 @@ function draw(now = 0) {
   const cameraPlayerId = cameraPlayerIdForRoom();
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   const buildTarget = buildTargetFromMouse();
-  const snapshot = readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
+  const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
@@ -574,7 +604,12 @@ function draw(now = 0) {
     aimAngle: menuPlayer?.aimAngle ?? state.mouse.aimAngle,
     mining: readyMenu
       ? menuPlayer?.mining === true
-      : state.mouse.down && !state.chat.active && !state.upgrades.active && !state.build.active && !isInputBlocked(),
+      : state.mouse.down &&
+        isMouseInPhysicalViewport() &&
+        !state.chat.active &&
+        !state.upgrades.active &&
+        !state.build.active &&
+        !isInputBlocked(),
     predictedPlayer: readyMenu ? null : predictedLocalPlayer(),
     eliminationNotices: state.eliminationNotices,
     theme: state.theme,
@@ -1122,7 +1157,7 @@ function updateMenuSimulation(timeSeconds) {
   }
 
   player.thrusting = canThrust;
-  player.mining = state.mouse.down && !state.chat.active;
+  player.mining = state.mouse.down && isMouseInPhysicalViewport() && !state.chat.active;
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
   } else {
@@ -1174,8 +1209,13 @@ function closestThemePresetToPoint(x, y, center) {
 }
 
 function updateMenuAim(player) {
-  const dx = state.mouse.x - RENDER.width / 2;
-  const dy = state.mouse.y - RENDER.height / 2;
+  if (!isMouseInPhysicalViewport()) {
+    return;
+  }
+
+  const frame = framebufferSize();
+  const dx = state.mouse.x - frame.width / 2;
+  const dy = state.mouse.y - frame.height / 2;
   if (dx !== 0 || dy !== 0) {
     player.aimAngle = Math.atan2(dy, dx);
     state.mouse.aimAngle = player.aimAngle;
@@ -1989,7 +2029,11 @@ function menuSnapshot() {
 }
 
 function isReadyMenu() {
-  return !state.room || state.room.state === "menu";
+  return state.room?.state === "menu";
+}
+
+function isLoadingRoom() {
+  return state.room === null;
 }
 
 function menuEntities() {
@@ -2494,10 +2538,9 @@ function updateLocalShipAudio(player, timeSeconds) {
   const speedLevel = clamp(speed / Math.max(1, ENGINE.ship.audioSpeedReference), 0, 1);
   const engineLevel = alive && player.thrusting ? Math.max(0.28, speedLevel) : 0;
   const miningActive = alive && player.mining === true;
-  const miningContact = miningActive && player.miningRay?.hit === true;
 
   updateEngineAudio(context, engineLevel, speedLevel, timeSeconds);
-  updateMiningAudio(context, miningActive, miningContact, timeSeconds);
+  updateMiningAudio(context, miningActive, timeSeconds);
   flushPendingDamageClunk(timeSeconds);
 }
 
@@ -2614,13 +2657,11 @@ function updateEngineAudio(context, engineLevel, speedLevel, timeSeconds) {
   setAudioTarget(shipAudio.engineOscillatorGain.gain, engineLevel > 0 ? 0.006 : 0.0001, now, 0.05);
 }
 
-function updateMiningAudio(context, active, contact, timeSeconds) {
+function updateMiningAudio(context, active, timeSeconds) {
   const shipAudio = audio.ship;
   const now = context.currentTime;
-  const targetGain = active
-    ? MINING_AUDIO_MAX_GAIN * (contact ? 1 : 0.74)
-    : 0.0001;
-  const baseFrequency = 310 + Math.sin(timeSeconds * 7.5) * 18 + (contact ? 32 : 0);
+  const targetGain = active ? MINING_AUDIO_MAX_GAIN : 0.0001;
+  const baseFrequency = 310 + Math.sin(timeSeconds * 7.5) * 18;
 
   setAudioTarget(shipAudio.miningGain.gain, targetGain, now, 0.025);
   shipAudio.miningOscillators.forEach(({ oscillator, ratio }, index) => {
@@ -2734,7 +2775,7 @@ function readInput() {
     moveX: move.x,
     moveY: move.y,
     aimAngle: state.mouse.aimAngle,
-    mining: state.mouse.down && !state.upgrades.active && !state.build.active,
+    mining: state.mouse.down && isMouseInPhysicalViewport() && !state.upgrades.active && !state.build.active,
     huckRock,
     huckRockTargetX: huckRockTarget?.x ?? null,
     huckRockTargetY: huckRockTarget?.y ?? null,
@@ -2761,6 +2802,7 @@ function huckRockInputAllowed() {
   const roomState = state.room?.state;
   if (
     !keys.has("Space") ||
+    !isMouseInPhysicalViewport() ||
     state.mouse.down ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
@@ -2784,10 +2826,10 @@ function huckRockTargetForPlayer(player) {
     return null;
   }
 
-  const render = state.snapshot?.render || RENDER;
+  const frame = framebufferSize();
   return {
-    x: player.x - render.width / 2 + state.mouse.x,
-    y: player.y - render.height / 2 + state.mouse.y
+    x: player.x - frame.width / 2 + state.mouse.x,
+    y: player.y - frame.height / 2 + state.mouse.y
   };
 }
 
@@ -2976,7 +3018,12 @@ function reconcilePrediction(snapshot, timeSeconds) {
     pendingFacingSignY: predicted.pendingFacingSignY,
     pendingFacingSeconds: predicted.pendingFacingSeconds,
     aimAngle: state.mouse.aimAngle,
-    mining: state.mouse.down && !state.chat.active && !state.upgrades.active && !state.build.active && !isInputBlocked()
+    mining: state.mouse.down &&
+      isMouseInPhysicalViewport() &&
+      !state.chat.active &&
+      !state.upgrades.active &&
+      !state.build.active &&
+      !isInputBlocked()
   };
 }
 
@@ -3023,7 +3070,12 @@ function updatePrediction(timeSeconds) {
   }
 
   predicted.aimAngle = state.mouse.aimAngle;
-  predicted.mining = state.mouse.down && !state.chat.active && !state.upgrades.active && !state.build.active && !isInputBlocked();
+  predicted.mining = state.mouse.down &&
+    isMouseInPhysicalViewport() &&
+    !state.chat.active &&
+    !state.upgrades.active &&
+    !state.build.active &&
+    !isInputBlocked();
   if (predicted.mining) {
     predicted.miningHoldSeconds = (predicted.miningHoldSeconds || 0) + dtSeconds;
   } else {
@@ -3801,6 +3853,7 @@ function updateMouse(event) {
   const point = eventToFramebufferPoint(event);
   state.mouse.x = point.x;
   state.mouse.y = point.y;
+  state.mouse.inFrame = point.inFrame;
   updateAimFromSnapshot();
 }
 
@@ -3836,7 +3889,36 @@ function requestRoomReattach(now = performance.now(), silent = true) {
   }
 
   state.lastReattachRequestAt = now;
+  state.resumePending = true;
+  scheduleResumeFallback();
   socket.emit(CLIENT_EVENTS.resume, { roomId, silent });
+}
+
+function scheduleResumeFallback() {
+  clearResumeFallbackTimer();
+  state.resumeFallbackTimer = window.setTimeout(() => {
+    if (!state.resumePending) {
+      return;
+    }
+
+    const room = state.deferredMenuRoom || {
+      state: "menu",
+      clientId: state.clientId
+    };
+    state.resumePending = false;
+    state.deferredMenuRoom = null;
+    state.resumeFallbackTimer = null;
+    applyServerRoom(room);
+  }, 700);
+}
+
+function clearResumeFallbackTimer() {
+  if (!state.resumeFallbackTimer) {
+    return;
+  }
+
+  window.clearTimeout(state.resumeFallbackTimer);
+  state.resumeFallbackTimer = null;
 }
 
 function needsReattachRepair() {
@@ -3883,14 +3965,22 @@ function activeRoomButtons() {
   }
 
   if (room.state === "active" && isLocalPlayerEliminated()) {
-    return { leaveSpectating: ROOM_BUTTONS.leaveSpectating };
+    return { leaveSpectating: centeredRoomButton(ROOM_BUTTONS.leaveSpectating) };
   }
 
   if (room.state === "ended") {
-    return { leaveEnded: ROOM_BUTTONS.leaveEnded };
+    return { leaveEnded: centeredRoomButton(ROOM_BUTTONS.leaveEnded) };
   }
 
   return {};
+}
+
+function centeredRoomButton(rect) {
+  const frame = framebufferSize();
+  return {
+    ...rect,
+    x: Math.round((frame.width - rect.width) / 2)
+  };
 }
 
 function screenRoomButtonAtPoint(x, y) {
@@ -3962,7 +4052,13 @@ function buildWallAtMouse() {
 }
 
 function buildTargetFromMouse() {
-  if (!state.build.active || state.room?.state !== "active" || !state.asteroid || !state.snapshot) {
+  if (
+    !state.build.active ||
+    !isMouseInPhysicalViewport() ||
+    state.room?.state !== "active" ||
+    !state.asteroid ||
+    !state.snapshot
+  ) {
     return null;
   }
 
@@ -3972,9 +4068,10 @@ function buildTargetFromMouse() {
   }
 
   const tileSize = state.asteroid.tileSize || 16;
+  const frame = framebufferSize();
   const camera = {
-    x: player.x - state.snapshot.render.width / 2,
-    y: player.y - state.snapshot.render.height / 2
+    x: player.x - frame.width / 2,
+    y: player.y - frame.height / 2
   };
   const tileX = Math.floor((camera.x + state.mouse.x) / tileSize);
   const tileY = Math.floor((camera.y + state.mouse.y) / tileSize);
@@ -4077,6 +4174,10 @@ function upgradeIndexAtPoint(x, y) {
 }
 
 function updateAimFromSnapshot() {
+  if (!isMouseInPhysicalViewport()) {
+    return;
+  }
+
   const snapshot = state.snapshot;
   if (!snapshot || !state.playerId) {
     return;
@@ -4107,14 +4208,41 @@ function eventToFramebufferPoint(event) {
 
   return {
     x: clamp(x / scale, 0, canvas.width),
-    y: clamp(y / scale, 0, canvas.height)
+    y: clamp(y / scale, 0, canvas.height),
+    inFrame: x >= 0 && x <= width && y >= 0 && y <= height
   };
 }
 
+function isMouseInPhysicalViewport() {
+  return isPointInPhysicalViewport(state.mouse.x, state.mouse.y, state.mouse.inFrame);
+}
+
+function isPointInPhysicalViewport(x, y, inFrame = true) {
+  if (!inFrame) {
+    return false;
+  }
+
+  const frame = framebufferSize();
+  const centerX = frame.width / 2;
+  const centerY = frame.height / 2;
+  const radius = Math.min(frame.width, frame.height) / 2;
+  const dx = x - centerX;
+  const dy = y - centerY;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
 function cameraForPlayer(snapshot, player) {
+  const frame = framebufferSize();
   return {
-    x: player.x - snapshot.render.width / 2,
-    y: player.y - snapshot.render.height / 2
+    x: player.x - frame.width / 2,
+    y: player.y - frame.height / 2
+  };
+}
+
+function framebufferSize() {
+  return {
+    width: canvas.width || RENDER.width,
+    height: canvas.height || RENDER.height
   };
 }
 

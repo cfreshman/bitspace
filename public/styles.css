@@ -1,3 +1,7 @@
+:root {
+  --scene-edge-padding: 1em;
+}
+
 html,
 body {
   margin: 0;
@@ -7,7 +11,7 @@ body {
 
 #scene {
   position: fixed;
-  inset: 0 auto auto 0;
+  inset: var(--scene-edge-padding) auto auto var(--scene-edge-padding);
   display: block;
   object-fit: contain;
   background: #000000;

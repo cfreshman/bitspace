@@ -10,6 +10,9 @@ import {
 } from "/shared/upgrades.js";
 
 const ENTITY_PIXEL_SIZE = 1;
+const CANVAS_EDGE_PADDING_EM = 1;
+const MIN_RENDER_ASPECT = 2 / 3;
+const MAX_RENDER_ASPECT = 3 / 2;
 const STAR_CELL_SIZE = 13;
 const STAR_PARALLAX = 0.22;
 const MENU_STAR_SEED = "bitspace-menu";
@@ -136,14 +139,13 @@ const BITMAP_GLYPHS = Object.freeze({
 });
 
 export function createRenderer(canvas) {
-  canvas.width = RENDER.width;
-  canvas.height = RENDER.height;
   const canvasContext = canvas.getContext("2d", { alpha: false });
-  const surface = createPixelSurface(canvasContext, RENDER.width, RENDER.height);
-  const textRenderer = createPixelTextRenderer(RENDER.width, RENDER.height);
+  let surface = null;
+  let textRenderer = null;
   const colors = {
     foreground: RENDER.foreground,
-    background: RENDER.background
+    background: RENDER.background,
+    backing: "#000000"
   };
   const particles = [];
   const miningParticles = [];
@@ -153,8 +155,21 @@ export function createRenderer(canvas) {
 
   function sizeCanvasBox() {
     const viewport = getViewportSize();
+    resizeRenderSurface(viewport);
     canvas.style.width = `${viewport.width}px`;
     canvas.style.height = `${viewport.height}px`;
+  }
+
+  function resizeRenderSurface(viewport = getViewportSize()) {
+    const size = renderSizeForViewport(viewport);
+    if (canvas.width === size.width && canvas.height === size.height && surface && textRenderer) {
+      return;
+    }
+
+    canvas.width = size.width;
+    canvas.height = size.height;
+    surface = createPixelSurface(canvasContext, size.width, size.height);
+    textRenderer = createPixelTextRenderer(size.width, size.height);
   }
 
   sizeCanvasBox();
@@ -164,6 +179,7 @@ export function createRenderer(canvas) {
 
   return {
     draw(snapshot, options = {}) {
+      resizeRenderSurface();
       const timeSeconds = options.timeSeconds ?? snapshot?.tick / 60 ?? performance.now() / 1000;
       const dtSeconds =
         lastFrameTime === null ? 1 / 60 : clamp(timeSeconds - lastFrameTime, 0, 1 / 15);
@@ -176,6 +192,7 @@ export function createRenderer(canvas) {
       if (options.theme) {
         colors.foreground = options.theme.foreground || colors.foreground;
         colors.background = options.theme.background || colors.background;
+        colors.backing = options.theme.backing || colors.backing;
       }
 
       drawFrame(surface, snapshot, { ...options, timeSeconds, dtSeconds }, colors, textRenderer, {
@@ -192,19 +209,49 @@ export function createRenderer(canvas) {
   };
 }
 
+function renderSizeForViewport(viewport) {
+  const aspect = clamp(viewport.width / Math.max(1, viewport.height), MIN_RENDER_ASPECT, MAX_RENDER_ASPECT);
+  const diameter = Math.min(RENDER.width, RENDER.height);
+  if (aspect >= 1) {
+    return {
+      width: roundEven(diameter * aspect),
+      height: diameter
+    };
+  }
+
+  return {
+    width: diameter,
+    height: roundEven(diameter / aspect)
+  };
+}
+
+function roundEven(value) {
+  return Math.max(2, Math.round(value / 2) * 2);
+}
+
 function createPixelSurface(canvasContext, width, height) {
   const imageData = canvasContext.createImageData(width, height);
   const pixels = new Uint32Array(imageData.data.buffer);
   const colorCache = new Map();
+  const circleClip = createCircleClipSpans(width, height);
   let currentColor = packColor(RENDER.foreground);
+  let activeClip = null;
 
   return {
+    width,
+    height,
     imageSmoothingEnabled: false,
     set fillStyle(value) {
       currentColor = colorFor(value, colorCache);
     },
     get fillStyle() {
       return currentColor;
+    },
+    beginCircleClip() {
+      activeClip = circleClip;
+    },
+    endClip() {
+      activeClip = null;
     },
     fillRect(x, y, rectWidth, rectHeight) {
       const x0 = Math.max(0, Math.floor(x));
@@ -213,6 +260,22 @@ function createPixelSurface(canvasContext, width, height) {
       const y1 = Math.min(height, Math.ceil(y + rectHeight));
 
       if (x0 >= x1 || y0 >= y1) {
+        return;
+      }
+
+      if (activeClip) {
+        for (let py = y0; py < y1; py += 1) {
+          const start = Math.max(x0, activeClip.starts[py]);
+          const end = Math.min(x1, activeClip.ends[py]);
+          if (start >= end) {
+            continue;
+          }
+
+          const row = py * width;
+          for (let px = start; px < end; px += 1) {
+            pixels[row + px] = currentColor;
+          }
+        }
         return;
       }
 
@@ -232,6 +295,31 @@ function createPixelSurface(canvasContext, width, height) {
       canvasContext.putImageData(imageData, 0, 0);
     }
   };
+}
+
+function createCircleClipSpans(width, height) {
+  const starts = new Int16Array(height);
+  const ends = new Int16Array(height);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.min(width, height) / 2;
+  const radiusSquared = radius * radius;
+
+  for (let y = 0; y < height; y += 1) {
+    const dy = y + 0.5 - centerY;
+    const horizontalSquared = radiusSquared - dy * dy;
+    if (horizontalSquared < 0) {
+      starts[y] = width;
+      ends[y] = 0;
+      continue;
+    }
+
+    const horizontal = Math.sqrt(horizontalSquared);
+    starts[y] = clamp(Math.ceil(centerX - horizontal - 0.5), 0, width);
+    ends[y] = clamp(Math.floor(centerX + horizontal - 0.5) + 1, 0, width);
+  }
+
+  return { starts, ends };
 }
 
 function createPixelTextRenderer(width, height) {
@@ -338,26 +426,29 @@ function packColor(hex) {
 
 function getViewportSize() {
   const viewport = window.visualViewport;
+  const padding = canvasEdgePaddingPx();
   return {
-    width: Math.max(1, Math.floor(viewport?.width || window.innerWidth)),
-    height: Math.max(1, Math.floor(viewport?.height || window.innerHeight))
+    width: Math.max(1, Math.floor((viewport?.width || window.innerWidth) - padding * 2)),
+    height: Math.max(1, Math.floor((viewport?.height || window.innerHeight) - padding * 2))
   };
+}
+
+function canvasEdgePaddingPx() {
+  const fontSize = Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize);
+  return (Number.isFinite(fontSize) ? fontSize : 16) * CANVAS_EDGE_PADDING_EM;
 }
 
 function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) {
   ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = colors.background;
-  ctx.fillRect(0, 0, RENDER.width, RENDER.height);
+  ctx.fillStyle = colors.backing || "#000000";
+  ctx.fillRect(0, 0, ctx.width, ctx.height);
   ctx.fillStyle = colors.foreground;
 
   if (!snapshot) {
+    beginWorldViewport(ctx, colors);
+    endWorldViewport(ctx);
     if (options.room || Object.keys(options.roomButtons || {}).length > 0) {
-      if ((options.room?.state || "menu") === "menu") {
-        drawMenuStars(ctx, options.timeSeconds || 0);
-      }
       drawRoomOverlay(ctx, options, null, colors, textRenderer);
-    } else {
-      drawBootMark(ctx);
     }
     return;
   }
@@ -379,9 +470,12 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     options.cameraPlayerId || options.playerId,
     options.timeSeconds,
     predictedPlayer,
-    renderPlayers
+    renderPlayers,
+    ctx.width,
+    ctx.height
   );
   const asteroidMiningTargets = asteroidMiningTargetMap(snapshot);
+  beginWorldViewport(ctx, colors);
   drawStars(ctx, snapshot, camera);
   if (options.asteroid) {
     drawAsteroid(ctx, options.asteroid, camera, colors, options.timeSeconds ?? snapshot.tick / 60, asteroidMiningTargets);
@@ -425,6 +519,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   for (const renderPlayer of renderPlayers) {
     drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
   }
+  endWorldViewport(ctx);
 
   if (options.room?.state === "active") {
     drawPlayerHud(
@@ -439,6 +534,17 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
   drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
   drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
+}
+
+function beginWorldViewport(ctx, colors) {
+  ctx.beginCircleClip();
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(0, 0, ctx.width, ctx.height);
+  ctx.fillStyle = colors.foreground;
+}
+
+function endWorldViewport(ctx) {
+  ctx.endClip();
 }
 
 function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
@@ -480,17 +586,17 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
     return;
   }
 
-  const panel = { x: 86, y: 20, width: 212, height: 35 };
+  const panel = { x: Math.round((ctx.width - 212) / 2), y: 20, width: 212, height: 35 };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, `WAITING ${count}/${maxPlayers}`, RENDER.width / 2, panel.y + 8, {
+  drawCenteredText(ctx, textRenderer, `WAITING ${count}/${maxPlayers}`, ctx.width / 2, panel.y + 8, {
     fontSize: 8,
     color: colors.foreground
   });
   const status = count < minPlayers
     ? `NEED ${minPlayers} PLAYERS`
     : `START ${formatClock(secondsLeft)}`;
-  drawCenteredText(ctx, textRenderer, status, RENDER.width / 2, panel.y + 21, {
+  drawCenteredText(ctx, textRenderer, status, ctx.width / 2, panel.y + 21, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -504,16 +610,16 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
     color: colors.foreground
   };
   const textWidth = textRenderer.measure(label, textOptions);
-  const panelWidth = Math.min(RENDER.width - 24, textWidth + 24);
+  const panelWidth = Math.min(ctx.width - 24, textWidth + 24);
   const panel = {
-    x: Math.round((RENDER.width - panelWidth) / 2),
+    x: Math.round((ctx.width - panelWidth) / 2),
     y: 18,
     width: panelWidth,
     height: 39
   };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, label, RENDER.width / 2, panel.y + 9, textOptions);
+  drawCenteredText(ctx, textRenderer, label, ctx.width / 2, panel.y + 9, textOptions);
   drawRoomButtons(ctx, options, colors, textRenderer);
 }
 
@@ -521,14 +627,14 @@ function drawSpectatorOverlay(ctx, options, localPlayer, colors, textRenderer) {
   const watchedId = localPlayer.killedById || options.cameraPlayerId;
   const watched = options.snapshot?.players?.find((player) => player.id === watchedId);
   const label = watched?.name ? `WATCHING ${watched.name}` : "WATCHING";
-  const panel = { x: 88, y: 122, width: 208, height: 70 };
+  const panel = { x: Math.round((ctx.width - 208) / 2), y: 122, width: 208, height: 70 };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, "ELIMINATED", RENDER.width / 2, panel.y + 13, {
+  drawCenteredText(ctx, textRenderer, "ELIMINATED", ctx.width / 2, panel.y + 13, {
     fontSize: 10,
     color: colors.foreground
   });
-  drawCenteredText(ctx, textRenderer, label, RENDER.width / 2, panel.y + 36, {
+  drawCenteredText(ctx, textRenderer, label, ctx.width / 2, panel.y + 36, {
     fontSize: 8,
     color: colors.foreground,
     width: panel.width - 12
@@ -539,10 +645,10 @@ function drawSpectatorOverlay(ctx, options, localPlayer, colors, textRenderer) {
 function drawEndedOverlay(ctx, room, options, colors, textRenderer) {
   const won = room.winnerId && room.winnerId === options.playerId;
   const title = won ? "YOU WON!" : "GAME OVER";
-  const panel = { x: 96, y: 128, width: 192, height: 54 };
+  const panel = { x: Math.round((ctx.width - 192) / 2), y: 128, width: 192, height: 54 };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, title, RENDER.width / 2, panel.y + 19, {
+  drawCenteredText(ctx, textRenderer, title, ctx.width / 2, panel.y + 19, {
     fontSize: 10,
     color: colors.foreground
   });
@@ -561,9 +667,9 @@ function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds 
 
   activeNotices.forEach((notice, index) => {
     const textWidth = textRenderer.measure(notice.text, textOptions);
-    const panelWidth = Math.min(RENDER.width - 16, textWidth + 10);
+    const panelWidth = Math.min(ctx.width - 16, textWidth + 10);
     const panelHeight = 15;
-    const x = RENDER.width - panelWidth - 8;
+    const x = ctx.width - panelWidth - 8;
     const y = 8 + index * (panelHeight + 3);
 
     drawPanel(ctx, x, y, panelWidth, panelHeight, colors);
@@ -626,7 +732,7 @@ function drawPanel(ctx, x, y, width, height, colors) {
 }
 
 function drawCenteredText(ctx, textRenderer, text, centerX, y, options = {}) {
-  const width = options.width || RENDER.width;
+  const width = options.width || ctx.width;
   const textWidth = textRenderer.measure(text, options);
   textRenderer.draw(ctx, text, Math.round(centerX - textWidth / 2), y, {
     ...options,
@@ -641,7 +747,15 @@ function formatClock(seconds) {
   return `${minutes}:${remainder}`;
 }
 
-function cameraForSnapshot(snapshot, playerId, timeSeconds = 0, predictedPlayer = null, renderedPlayers = null) {
+function cameraForSnapshot(
+  snapshot,
+  playerId,
+  timeSeconds = 0,
+  predictedPlayer = null,
+  renderedPlayers = null,
+  viewportWidth = RENDER.width,
+  viewportHeight = RENDER.height
+) {
   const players = renderedPlayers || snapshot.players;
   const target =
     predictedPlayer?.id === playerId ? predictedPlayer :
@@ -654,8 +768,8 @@ function cameraForSnapshot(snapshot, playerId, timeSeconds = 0, predictedPlayer 
   const shake = shakeOffset(target.shake || 0, timeSeconds);
 
   return {
-    x: target.x - RENDER.width / 2 + shake.x,
-    y: target.y - RENDER.height / 2 + shake.y
+    x: target.x - viewportWidth / 2 + shake.x,
+    y: target.y - viewportHeight / 2 + shake.y
   };
 }
 
@@ -721,12 +835,12 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width) / tileSize) + 1
   );
   const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height) / tileSize) + 1
   );
 
   ctx.fillStyle = colors.foreground;
@@ -847,12 +961,12 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidM
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width) / tileSize) + 1
   );
   const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height) / tileSize) + 1
   );
 
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
@@ -1592,12 +1706,12 @@ function drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds) {
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width) / tileSize) + 1
   );
   const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height) / tileSize) + 1
   );
 
   ctx.fillStyle = colors.foreground;
@@ -1671,12 +1785,12 @@ function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
   const minTileX = Math.max(0, Math.floor(camera.x / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + RENDER.width) / tileSize) + 1
+    Math.ceil((camera.x + ctx.width) / tileSize) + 1
   );
   const minTileY = Math.max(0, Math.floor(camera.y / tileSize) - 1);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + RENDER.height) / tileSize) + 1
+    Math.ceil((camera.y + ctx.height) / tileSize) + 1
   );
 
   ctx.fillStyle = colors.foreground;
@@ -1794,26 +1908,26 @@ function drawWorldBounds(ctx, snapshot, camera) {
   const right = Math.round(snapshot.world.width - camera.x);
   const bottom = Math.round(snapshot.world.height - camera.y);
 
-  if (left >= 0 && left < RENDER.width) {
+  if (left >= 0 && left < ctx.width) {
     drawDashedVerticalLine(ctx, left, top, bottom, camera.y);
   }
 
-  if (top >= 0 && top < RENDER.height) {
+  if (top >= 0 && top < ctx.height) {
     drawDashedHorizontalLine(ctx, top, left, right, camera.x);
   }
 
-  if (right >= 0 && right < RENDER.width) {
+  if (right >= 0 && right < ctx.width) {
     drawDashedVerticalLine(ctx, right, top, bottom, camera.y);
   }
 
-  if (bottom >= 0 && bottom < RENDER.height) {
+  if (bottom >= 0 && bottom < ctx.height) {
     drawDashedHorizontalLine(ctx, bottom, left, right, camera.x);
   }
 }
 
 function drawDashedVerticalLine(ctx, x, worldTop, worldBottom, cameraY) {
   const start = Math.max(0, worldTop);
-  const end = Math.min(RENDER.height - 1, worldBottom);
+  const end = Math.min(ctx.height - 1, worldBottom);
 
   for (let y = start; y <= end; y += 1) {
     if (positiveModulo(Math.floor(cameraY + y), 8) < 4) {
@@ -1824,7 +1938,7 @@ function drawDashedVerticalLine(ctx, x, worldTop, worldBottom, cameraY) {
 
 function drawDashedHorizontalLine(ctx, y, worldLeft, worldRight, cameraX) {
   const start = Math.max(0, worldLeft);
-  const end = Math.min(RENDER.width - 1, worldRight);
+  const end = Math.min(ctx.width - 1, worldRight);
 
   for (let x = start; x <= end; x += 1) {
     if (positiveModulo(Math.floor(cameraX + x), 8) < 4) {
@@ -1853,9 +1967,9 @@ function drawMenuStars(ctx, timeSeconds) {
 
 function drawStarLayer(ctx, seed, starCamera) {
   const minCellX = Math.floor(starCamera.x / STAR_CELL_SIZE) - 1;
-  const maxCellX = Math.ceil((starCamera.x + RENDER.width) / STAR_CELL_SIZE) + 1;
+  const maxCellX = Math.ceil((starCamera.x + ctx.width) / STAR_CELL_SIZE) + 1;
   const minCellY = Math.floor(starCamera.y / STAR_CELL_SIZE) - 1;
-  const maxCellY = Math.ceil((starCamera.y + RENDER.height) / STAR_CELL_SIZE) + 1;
+  const maxCellY = Math.ceil((starCamera.y + ctx.height) / STAR_CELL_SIZE) + 1;
 
   for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
     for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
@@ -1864,7 +1978,7 @@ function drawStarLayer(ctx, seed, starCamera) {
       const y = cellY * STAR_CELL_SIZE + ((hash >>> 8) % STAR_CELL_SIZE);
       const screen = worldToScreen({ x, y }, starCamera);
 
-      if (screen.x < 0 || screen.x >= RENDER.width || screen.y < 0 || screen.y >= RENDER.height) {
+      if (screen.x < 0 || screen.x >= ctx.width || screen.y < 0 || screen.y >= ctx.height) {
         continue;
       }
 
@@ -2308,8 +2422,8 @@ function drawTalkBubble(ctx, player, camera, colors, textRenderer) {
   const textWidth = Math.max(...lines.map((line) => textRenderer.measure(line, { fontSize: 10 })));
   const width = Math.min(maxTextWidth + 8, textWidth + 8);
   const height = lines.length * lineHeight + 6;
-  const x = clamp(Math.round(screen.x - width / 2), 2, RENDER.width - width - 2);
-  const y = clamp(Math.round(screen.y - player.radius - height - 9), 2, RENDER.height - height - 2);
+  const x = clamp(Math.round(screen.x - width / 2), 2, ctx.width - width - 2);
+  const y = clamp(Math.round(screen.y - player.radius - height - 9), 2, ctx.height - height - 2);
 
   ctx.fillStyle = colors.foreground;
   ctx.fillRect(x, y, width, height);
@@ -2332,8 +2446,8 @@ function drawChatOverlay(ctx, chat, colors, textRenderer, timeSeconds) {
   }
 
   const panelX = 10;
-  const panelY = RENDER.height - 43;
-  const panelWidth = RENDER.width - panelX * 2;
+  const panelY = ctx.height - 43;
+  const panelWidth = ctx.width - panelX * 2;
   const panelHeight = 33;
   const prompt = "type to talk, enter to send";
   const draft = chat.draft || "";
@@ -2980,8 +3094,8 @@ function isOccluded(x, y, occluders) {
 }
 
 function drawBootMark(ctx) {
-  const x = Math.floor(RENDER.width / 2);
-  const y = Math.floor(RENDER.height / 2);
+  const x = Math.floor(ctx.width / 2);
+  const y = Math.floor(ctx.height / 2);
   ctx.fillRect(x - 18, y, 36, 1);
   ctx.fillRect(x, y - 18, 1, 36);
   ctx.fillRect(x - 3, y - 3, 7, 7);
