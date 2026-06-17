@@ -721,6 +721,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawShip(ctx, renderPlayer, camera, colors, options.timeSeconds ?? snapshot.tick / 60, textRenderer);
   }
 
+  drawControllerAimCursor(ctx, localPlayer, camera, options.controllerAimCursor, colors);
+
   drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
 
   for (const renderPlayer of renderPlayers) {
@@ -735,12 +737,13 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       colors,
       textRenderer
     );
-    drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer);
-    drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer);
+    drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
+    drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
   }
   drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
   drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
   drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
+  drawControllerCursor(ctx, options.controllerCursor, colors);
 }
 
 function beginWorldViewport(ctx, colors) {
@@ -2494,15 +2497,19 @@ function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {
     color: colors.foreground
   };
 
-  rows.slice(0, 3).forEach((row, index) => {
+  rows.slice(0, 4).forEach((row, index) => {
     const input = String(row.input || "").toUpperCase();
     const action = String(row.action || "").toUpperCase();
     const rowY = y + index * 11;
     const actionWidth = textRenderer.measure(action, textOptions);
-    textRenderer.draw(ctx, input, x + 10, rowY, {
-      ...textOptions,
-      width: Math.floor(width / 2) - 16
-    });
+    if (row.inputIcon) {
+      drawControllerFaceButtons(ctx, x + 26, rowY + 5, row.inputIcon, colors);
+    } else {
+      textRenderer.draw(ctx, input, x + 10, rowY, {
+        ...textOptions,
+        width: Math.floor(width / 2) - 16
+      });
+    }
     textRenderer.draw(ctx, action, x + width - actionWidth - 10, rowY, {
       ...textOptions,
       width: actionWidth + 2
@@ -2906,6 +2913,47 @@ function drawChatOverlay(ctx, chat, colors, textRenderer, timeSeconds) {
   }
 }
 
+function drawControllerCursor(ctx, cursor, colors) {
+  if (!cursor) {
+    return;
+  }
+
+  const x = Math.round(cursor.x);
+  const y = Math.round(cursor.y);
+  ctx.fillStyle = colors.background;
+  fillSolidDisk(ctx, x, y, 5);
+  ctx.fillStyle = colors.foreground;
+  drawCircle(ctx, x, y, 5);
+  fillSolidDisk(ctx, x, y, 1);
+}
+
+function drawControllerAimCursor(ctx, player, camera, cursor, colors) {
+  if (!player || player.alive === false || !cursor) {
+    return;
+  }
+
+  const cursorDistance = Number(cursor.distance);
+  const cursorAngle = Number(cursor.angle);
+  const distance = Number.isFinite(cursorDistance) && cursorDistance > 0
+    ? cursorDistance
+    : Number(player.radius ?? ENGINE.ship.radius ?? 0) + ENGINE.mining.rayLength;
+  const angle = Number.isFinite(cursorAngle)
+    ? cursorAngle
+    : player.aimAngle ?? player.angle ?? 0;
+  const point = worldToScreen({
+    x: player.x + Math.cos(angle) * distance,
+    y: player.y + Math.sin(angle) * distance
+  }, camera);
+  const x = Math.round(point.x);
+  const y = Math.round(point.y);
+
+  ctx.fillStyle = colors.background;
+  fillSolidDisk(ctx, x, y, 4);
+  ctx.fillStyle = colors.foreground;
+  drawCircle(ctx, x, y, 4);
+  fillSolidDisk(ctx, x, y, 1);
+}
+
 function drawPlayerHud(ctx, player, colors, textRenderer) {
   if (!player) {
     return;
@@ -2946,12 +2994,17 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
   drawHudResource(ctx, "DIAMOND", resources.diamond || 0, contentX, contentRight, rowY + rowStep * 2, textRenderer, colors);
 }
 
-function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer) {
+function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
   if (!player) {
     return;
   }
 
   if (!upgradesUi?.active) {
+    if (controllerActive) {
+      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 62, colors, textRenderer);
+      return;
+    }
+
     textRenderer.draw(ctx, "Q - UPGRADES", 10, 62, {
       fontSize: 8,
       color: colors.foreground
@@ -2959,11 +3012,24 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer) {
     return;
   }
 
-  drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer);
+  drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive);
 }
 
-function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer) {
+function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false) {
   if (!player || upgradesUi?.active) {
+    return;
+  }
+
+  if (controllerActive) {
+    drawControllerHudAction(
+      ctx,
+      "faceLeft",
+      buildUi?.active ? "MINING RAY" : "BUILDER ARM",
+      10,
+      78,
+      colors,
+      textRenderer
+    );
     return;
   }
 
@@ -2973,7 +3039,7 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer) {
   });
 }
 
-function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
+function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
   const width = UPGRADE_MENU_LAYOUT.width;
   const height = upgradeMenuHeight();
   const x = UPGRADE_MENU_LAYOUT.x;
@@ -3055,7 +3121,7 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
     ? `COST: ${formatUpgradeCostLong(selectedCost)}`
     : "COST: MAX LEVEL";
   const actionText = selectedCost
-    ? affordable ? "CLICK BUY" : "NEED RESOURCES"
+    ? affordable ? controllerActive ? "SELECT BUY" : "CLICK BUY" : "NEED RESOURCES"
     : "MAXED";
 
   ctx.fillStyle = colors.foreground;
@@ -3072,6 +3138,45 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer) {
     color: colors.foreground,
     width: width - UPGRADE_MENU_LAYOUT.padding * 2
   });
+}
+
+function drawControllerHudAction(ctx, buttonPosition, label, x, y, colors, textRenderer) {
+  drawControllerFaceButtons(ctx, x + 7, y + 5, buttonPosition, colors);
+  textRenderer.draw(ctx, label, x + 19, y, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: 120
+  });
+}
+
+function drawControllerFaceButtons(ctx, cx, cy, selectedPosition, colors) {
+  const buttons = [
+    { position: "faceTop", x: 0, y: -4 },
+    { position: "faceRight", x: 4, y: 0 },
+    { position: "faceBottom", x: 0, y: 4 },
+    { position: "faceLeft", x: -4, y: 0 }
+  ];
+
+  for (const button of buttons) {
+    const x = Math.round(cx + button.x);
+    const y = Math.round(cy + button.y);
+    drawControllerButtonGlyph(ctx, x, y, button.position === selectedPosition, colors);
+  }
+}
+
+function drawControllerButtonGlyph(ctx, x, y, selected, colors) {
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x - 1, y - 1, 3, 3);
+  ctx.fillStyle = colors.foreground;
+  if (selected) {
+    ctx.fillRect(x - 1, y - 1, 3, 3);
+    return;
+  }
+
+  ctx.fillRect(x - 1, y, 1, 1);
+  ctx.fillRect(x + 1, y, 1, 1);
+  ctx.fillRect(x, y - 1, 1, 1);
+  ctx.fillRect(x, y + 1, 1, 1);
 }
 
 function upgradeMenuHeight() {

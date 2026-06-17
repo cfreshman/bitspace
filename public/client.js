@@ -18,6 +18,7 @@ import {
   nextUpgradeCost,
   UPGRADE_DEFINITIONS
 } from "/shared/upgrades.js";
+import { createGamepadControls } from "/gamepad.js";
 import { createRenderer } from "/renderer.js";
 
 const TALK_MAX_CHARS = 36;
@@ -44,6 +45,11 @@ const ENGINE_AUDIO_MAX_GAIN = 0.032;
 const MINING_AUDIO_MAX_GAIN = 0.022;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
 const AUDIO_COLLISION_CLUNK_SPEED = 18;
+const CONTROLLER_CURSOR_SPEED = 160;
+const CONTROLLER_HUCK_TARGET_RAY_MULTIPLIER = 2.5;
+const CONTROLLER_UPGRADE_NAV_INITIAL_DELAY_SECONDS = 0.28;
+const CONTROLLER_UPGRADE_NAV_REPEAT_SECONDS = 0.11;
+const CONTROLLER_DPAD_NAV_THRESHOLD = 0.5;
 const MENU_PLAYER_ID = "menu-player";
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
@@ -89,6 +95,7 @@ const ROOM_BUTTONS = Object.freeze({
 });
 const canvas = document.querySelector("#scene");
 const renderer = createRenderer(canvas);
+const gamepadControls = createGamepadControls();
 const talkInput = createTalkInput();
 const themeSource = document.querySelector("#bitspace-theme-source");
 const cssDefaultTheme = readThemeSource() || {
@@ -139,6 +146,7 @@ const state = {
     down: false,
     aimAngle: 0
   },
+  controller: createControllerState(),
   chat: {
     active: false,
     draft: "",
@@ -580,6 +588,7 @@ function draw(now = 0) {
   const loadingRoom = isLoadingRoom();
   const readyMenu = isReadyMenu();
 
+  updateControllerState(timeSeconds);
   syncThemeFromCss();
   pruneEliminationNotices(timeSeconds);
   if (loadingRoom) {
@@ -591,7 +600,8 @@ function draw(now = 0) {
     updateAimFromSnapshot();
   }
   const cameraPlayerId = cameraPlayerIdForRoom();
-  state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  const screenPointer = screenPointerPoint();
+  state.uiHoverId = screenRoomButtonAtPoint(screenPointer.x, screenPointer.y);
   const buildTarget = buildTargetFromMouse();
   const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
@@ -613,23 +623,191 @@ function draw(now = 0) {
     room: state.room,
     clientId: state.clientId,
     roomButtons: activeRoomButtons(),
-    uiRayActive: state.mouse.down,
+    uiRayActive: physicalMiningInputActive(),
     uiTargetId: state.uiHoverId,
     aimAngle: menuPlayer?.aimAngle ?? state.mouse.aimAngle,
     mining: readyMenu
       ? menuPlayer?.mining === true
-      : state.mouse.down &&
-        isMouseInPhysicalViewport() &&
+      : physicalMiningInputActive() &&
         !state.chat.active &&
         !state.upgrades.active &&
         !state.build.active &&
         !isInputBlocked(),
     predictedPlayer: readyMenu ? null : predictedLocalPlayer(),
     eliminationNotices: state.eliminationNotices,
+    controllerActive: state.controller.connected,
+    controllerCursor: controllerCursorRenderState(),
+    controllerAimCursor: controllerAimCursorRenderState(),
     theme: state.theme,
     timeSeconds
   });
   requestAnimationFrame(draw);
+}
+
+function updateControllerState(timeSeconds) {
+  const input = gamepadControls.update();
+  const previousVisible = state.controller.cursor.visible;
+  const previousTime = state.controller.lastTimeSeconds || timeSeconds;
+  const dtSeconds = clamp(timeSeconds - previousTime, 0, 1 / 15) || 1 / ENGINE.tickRate;
+  state.controller.lastTimeSeconds = timeSeconds;
+  state.controller.connected = input.connected;
+  state.controller.id = input.id || "";
+  state.controller.leftStick = input.leftStick;
+  state.controller.dpad = input.dpad;
+  state.controller.move = input.move;
+  state.controller.menuMove = input.menuMove;
+  state.controller.mining = input.buttons.mining;
+  state.controller.huckRock = input.buttons.huckRock;
+  state.controller.selectPressed = input.pressed.select;
+  state.controller.buildPressed = input.pressed.build;
+  state.controller.upgradesPressed = input.pressed.upgrades;
+
+  if (input.aim.active) {
+    state.controller.aimActive = true;
+    state.controller.aimAngle = Math.atan2(input.aim.y, input.aim.x);
+    state.mouse.aimAngle = state.controller.aimAngle;
+  } else {
+    state.controller.aimActive = false;
+    if (input.buttons.mining || input.buttons.huckRock) {
+      state.mouse.aimAngle = state.controller.aimAngle;
+    }
+  }
+
+  const cursorVisible = controllerCursorShouldShow();
+  state.controller.cursor.visible = cursorVisible;
+  if (cursorVisible && !previousVisible) {
+    resetControllerCursorPosition();
+  }
+  if (cursorVisible) {
+    moveControllerCursor(input.menuMove, dtSeconds);
+  }
+  updateUpgradeSelectionFromControllerDpad(input.dpad, dtSeconds);
+
+  if (
+    input.pressed.select ||
+    input.pressed.build ||
+    input.pressed.upgrades ||
+    input.pressed.mining ||
+    input.pressed.huckRock
+  ) {
+    unlockAudio();
+  }
+
+  handleControllerActions(input);
+}
+
+function handleControllerActions(input) {
+  if (!input.connected || state.chat.active) {
+    return;
+  }
+
+  if (input.pressed.upgrades) {
+    toggleUpgrades({ controller: true });
+  }
+
+  if (input.pressed.build) {
+    toggleBuildMode();
+  }
+
+  if (!input.pressed.select) {
+    return;
+  }
+
+  if (state.build.active) {
+    buildWallAtMouse();
+    return;
+  }
+
+  if (state.upgrades.active) {
+    buySelectedUpgrade();
+    return;
+  }
+
+  const buttonId = state.controller.cursor.visible
+    ? screenRoomButtonAtPoint(state.controller.cursor.x, state.controller.cursor.y)
+    : null;
+  if (buttonId) {
+    handleRoomUiClick(buttonId);
+  }
+}
+
+function controllerCursorShouldShow() {
+  if (!state.controller.connected || state.chat.active || isReadyMenu()) {
+    return false;
+  }
+
+  return Object.keys(activeRoomButtons()).length > 0;
+}
+
+function resetControllerCursorPosition() {
+  const button = firstActiveRoomButton();
+  if (button) {
+    state.controller.cursor.x = button.x + button.width / 2;
+    state.controller.cursor.y = button.y + button.height / 2;
+    return;
+  }
+
+  const frame = framebufferSize();
+  state.controller.cursor.x = frame.width / 2;
+  state.controller.cursor.y = frame.height / 2;
+}
+
+function moveControllerCursor(move, dtSeconds) {
+  const frame = framebufferSize();
+  state.controller.cursor.x = clamp(
+    state.controller.cursor.x + move.x * CONTROLLER_CURSOR_SPEED * dtSeconds,
+    0,
+    frame.width
+  );
+  state.controller.cursor.y = clamp(
+    state.controller.cursor.y + move.y * CONTROLLER_CURSOR_SPEED * dtSeconds,
+    0,
+    frame.height
+  );
+}
+
+function firstActiveRoomButton() {
+  const [, rect] = Object.entries(activeRoomButtons())[0] || [];
+  return rect || null;
+}
+
+function screenPointerPoint() {
+  return state.controller.cursor.visible
+    ? state.controller.cursor
+    : state.mouse;
+}
+
+function controllerCursorRenderState() {
+  if (!state.controller.cursor.visible) {
+    return null;
+  }
+
+  return {
+    x: state.controller.cursor.x,
+    y: state.controller.cursor.y
+  };
+}
+
+function controllerAimCursorRenderState() {
+  if (
+    !state.controller.connected ||
+    !state.controller.aimActive ||
+    physicalMiningInputActive() ||
+    state.controller.cursor.visible ||
+    state.upgrades.active ||
+    state.chat.active
+  ) {
+    return null;
+  }
+
+  const player = isReadyMenu()
+    ? state.menu.player
+    : predictedLocalPlayer() || localPlayerFromSnapshot();
+
+  return {
+    angle: state.controller.aimAngle,
+    distance: playerMiningRayRange(player)
+  };
 }
 
 function createTalkInput() {
@@ -967,6 +1145,33 @@ function mapGenIsRockTile(tile) {
     tile === ASTEROID_TILE.wall;
 }
 
+function createControllerState() {
+  const frame = framebufferSize();
+  return {
+    connected: false,
+    id: "",
+    leftStick: { x: 0, y: 0 },
+    dpad: { x: 0, y: 0 },
+    move: { x: 0, y: 0 },
+    menuMove: { x: 0, y: 0 },
+    aimActive: false,
+    aimAngle: Math.PI / 2,
+    mining: false,
+    huckRock: false,
+    selectPressed: false,
+    buildPressed: false,
+    upgradesPressed: false,
+    lastTimeSeconds: 0,
+    upgradeNavDirection: 0,
+    upgradeNavRepeatSeconds: 0,
+    cursor: {
+      x: frame.width / 2,
+      y: frame.height / 2,
+      visible: false
+    }
+  };
+}
+
 function createMenuState() {
   const asteroids = {
     [MENU_ROOMS.ready]: createLobbyAsteroid({ seed: "bitspace-menu" }),
@@ -1172,7 +1377,7 @@ function updateMenuSimulation(timeSeconds) {
   }
 
   player.thrusting = canThrust;
-  player.mining = state.mouse.down && isMouseInPhysicalViewport() && !state.chat.active;
+  player.mining = physicalMiningInputActive() && !state.chat.active;
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
   } else {
@@ -1189,6 +1394,12 @@ function updateMenuSimulation(timeSeconds) {
 }
 
 function updateMenuAim(player) {
+  if (controllerShouldHoldAim()) {
+    player.aimAngle = state.controller.aimAngle;
+    state.mouse.aimAngle = player.aimAngle;
+    return;
+  }
+
   if (!isMouseInPhysicalViewport()) {
     return;
   }
@@ -1351,8 +1562,8 @@ function updateMenuHuckRocks(player, dtSeconds) {
   if (
     !activatedEntityThisFrame &&
     !state.chat.active &&
-    !state.mouse.down &&
-    keys.has("Space") &&
+    !physicalMiningInputActive() &&
+    (keys.has("Space") || state.controller.huckRock) &&
     state.menu.huckRockCooldownSeconds <= 0
   ) {
     spawnMenuHuckRock(player);
@@ -2033,11 +2244,24 @@ function menuEntities() {
     menuTitle("menu-title", "BITSPACE", center.x, center.y - 114),
     menuButton("menu-ready", "ready", "READY", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
-    menuHint("menu-controls", [
-      { input: "WASD", action: "MOVE" },
-      { input: "CLICK + HOLD", action: "MINING RAY" },
-      { input: "SPACE", action: "HUCK ROCK" }
-    ], center.x, top + MENU_BUTTON_HEIGHT + 30)
+    menuHint("menu-controls", menuControlHintRows(), center.x, top + MENU_BUTTON_HEIGHT + 30)
+  ];
+}
+
+function menuControlHintRows() {
+  if (state.controller.connected) {
+    return [
+      { input: "L STICK", action: "MOVE" },
+      { input: "R STICK", action: "AIM" },
+      { input: "R TRIG", action: "MINING RAY" },
+      { input: "L TRIG", action: "HUCK ROCK" }
+    ];
+  }
+
+  return [
+    { input: "WASD", action: "MOVE" },
+    { input: "CLICK + HOLD", action: "MINING RAY" },
+    { input: "SPACE", action: "HUCK ROCK" }
   ];
 }
 
@@ -2059,7 +2283,7 @@ function menuHint(id, rows, x, y) {
     x,
     y,
     width: 168,
-    height: 22
+    height: rows.length * 11 - 1
   };
 }
 
@@ -2564,7 +2788,7 @@ function currentTalkText() {
   return localPlayerFromSnapshot()?.talk || "";
 }
 
-function activateUpgrades() {
+function activateUpgrades(options = {}) {
   if (isInputBlocked() || state.room?.state !== "active") {
     return;
   }
@@ -2572,11 +2796,24 @@ function activateUpgrades() {
   state.upgrades.active = true;
   state.build.active = false;
   state.mouse.down = false;
-  updateUpgradeSelectionFromMouse();
+  resetControllerUpgradeNav();
+  if (!options.controller) {
+    updateUpgradeSelectionFromMouse();
+  }
+}
+
+function toggleUpgrades(options = {}) {
+  if (state.upgrades.active) {
+    closeUpgrades();
+    return;
+  }
+
+  activateUpgrades(options);
 }
 
 function closeUpgrades() {
   state.upgrades.active = false;
+  resetControllerUpgradeNav();
 }
 
 function toggleBuildMode() {
@@ -3011,7 +3248,7 @@ function readInput() {
     moveX: move.x,
     moveY: move.y,
     aimAngle: state.mouse.aimAngle,
-    mining: state.mouse.down && isMouseInPhysicalViewport() && !state.upgrades.active && !state.build.active,
+    mining: physicalMiningInputActive() && !state.upgrades.active && !state.build.active,
     huckRock,
     huckRockTargetX: huckRockTarget?.x ?? null,
     huckRockTargetY: huckRockTarget?.y ?? null,
@@ -3036,10 +3273,13 @@ function readHuckRockInput() {
 
 function huckRockInputAllowed() {
   const roomState = state.room?.state;
+  const controllerHuck = state.controller.connected && state.controller.huckRock;
+  const keyboardHuck = keys.has("Space");
   if (
-    !keys.has("Space") ||
-    !isMouseInPhysicalViewport() ||
+    (!keyboardHuck && !controllerHuck) ||
+    (!controllerHuck && !isMouseInPhysicalViewport()) ||
     state.mouse.down ||
+    controllerMiningActive() ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
     state.build.active
@@ -3062,11 +3302,46 @@ function huckRockTargetForPlayer(player) {
     return null;
   }
 
+  if (state.controller.connected && state.controller.huckRock) {
+    return null;
+  }
+
+  if (state.controller.connected && state.controller.aimActive) {
+    return controllerAimTargetForPlayer(player);
+  }
+
   return lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
+}
+
+function physicalMiningInputActive() {
+  return (state.mouse.down && isMouseInPhysicalViewport()) || controllerMiningActive();
+}
+
+function controllerMiningActive() {
+  return state.controller.connected && state.controller.mining;
+}
+
+function controllerAimTargetForPlayer(player) {
+  const angle = state.controller.aimAngle ?? player.aimAngle ?? player.angle;
+  const distance = ENGINE.mining.rayLength * CONTROLLER_HUCK_TARGET_RAY_MULTIPLIER;
+  return {
+    x: player.x + Math.cos(angle) * distance,
+    y: player.y + Math.sin(angle) * distance
+  };
+}
+
+function playerMiningRayRange(player) {
+  const effects = aggregateUpgradeEffects(player?.upgrades);
+  const shipRadius = Number(player?.radius ?? ENGINE.ship.radius) || 0;
+  return shipRadius + ENGINE.mining.rayLength + effects.rayLengthBonus;
 }
 
 function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
   const fallbackAngle = player.aimAngle ?? player.angle;
+  if (state.controller.connected && state.controller.huckRock) {
+    return state.controller.aimAngle ?? fallbackAngle;
+  }
+
   if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
     return fallbackAngle;
   }
@@ -3186,8 +3461,11 @@ function huckRockRecoilImpulse(player) {
 }
 
 function readMoveVector() {
-  const x = axis("KeyD", "ArrowRight", "KeyA", "ArrowLeft");
-  const y = axis("KeyS", "ArrowDown", "KeyW", "ArrowUp");
+  const keyboardX = axis("KeyD", "ArrowRight", "KeyA", "ArrowLeft");
+  const keyboardY = axis("KeyS", "ArrowDown", "KeyW", "ArrowUp");
+  const controllerMove = controllerShipMoveVector();
+  const x = keyboardX + controllerMove.x;
+  const y = keyboardY + controllerMove.y;
   const magnitude = Math.hypot(x, y);
 
   if (magnitude === 0) {
@@ -3198,6 +3476,16 @@ function readMoveVector() {
     x: x / magnitude,
     y: y / magnitude
   };
+}
+
+function controllerShipMoveVector() {
+  if (!state.controller.connected) {
+    return { x: 0, y: 0 };
+  }
+
+  return state.controller.cursor.visible
+    ? state.controller.leftStick
+    : state.controller.move;
 }
 
 function isMovementKey(code) {
@@ -3251,8 +3539,7 @@ function reconcilePrediction(snapshot, timeSeconds) {
     pendingFacingSignY: predicted.pendingFacingSignY,
     pendingFacingSeconds: predicted.pendingFacingSeconds,
     aimAngle: state.mouse.aimAngle,
-    mining: state.mouse.down &&
-      isMouseInPhysicalViewport() &&
+    mining: physicalMiningInputActive() &&
       !state.chat.active &&
       !state.upgrades.active &&
       !state.build.active &&
@@ -3303,8 +3590,7 @@ function updatePrediction(timeSeconds) {
   }
 
   predicted.aimAngle = state.mouse.aimAngle;
-  predicted.mining = state.mouse.down &&
-    isMouseInPhysicalViewport() &&
+  predicted.mining = physicalMiningInputActive() &&
     !state.chat.active &&
     !state.upgrades.active &&
     !state.build.active &&
@@ -3330,6 +3616,9 @@ function predictedLocalPlayer() {
     return null;
   }
 
+  const predictionDx = predicted.x - authoritative.x;
+  const predictionDy = predicted.y - authoritative.y;
+
   return {
     ...authoritative,
     x: predicted.x,
@@ -3339,12 +3628,35 @@ function predictedLocalPlayer() {
     angle: predicted.angle,
     aimAngle: predicted.aimAngle,
     mining: predicted.mining,
+    miningRay: predicted.mining
+      ? translateMiningRay(authoritative.miningRay, predictionDx, predictionDy)
+      : null,
     miningHoldSeconds: predicted.miningHoldSeconds,
     rayExtension: predicted.rayExtension,
     huckRockCooldownSeconds: state.prediction.huckRockCooldownSeconds,
     huckRockEngineCutoutSeconds: predicted.huckRockEngineCutoutSeconds,
     thrusting: predicted.thrusting
   };
+}
+
+function translateMiningRay(miningRay, dx, dy) {
+  if (!miningRay) {
+    return null;
+  }
+
+  return {
+    ...miningRay,
+    startX: translateNumber(miningRay.startX, dx),
+    startY: translateNumber(miningRay.startY, dy),
+    endX: translateNumber(miningRay.endX, dx),
+    endY: translateNumber(miningRay.endY, dy),
+    fullEndX: translateNumber(miningRay.fullEndX, dx),
+    fullEndY: translateNumber(miningRay.fullEndY, dy)
+  };
+}
+
+function translateNumber(value, delta) {
+  return Number.isFinite(value) ? value + delta : value;
 }
 
 function applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds) {
@@ -4370,6 +4682,47 @@ function updateUpgradeSelectionFromMouse() {
   }
 }
 
+function updateUpgradeSelectionFromControllerDpad(dpad, dtSeconds) {
+  if (!state.upgrades.active || !state.controller.connected) {
+    resetControllerUpgradeNav();
+    return;
+  }
+
+  const direction = Math.abs(dpad.y) >= CONTROLLER_DPAD_NAV_THRESHOLD
+    ? Math.sign(dpad.y)
+    : 0;
+  if (direction === 0) {
+    resetControllerUpgradeNav();
+    return;
+  }
+
+  if (direction !== state.controller.upgradeNavDirection) {
+    state.controller.upgradeNavDirection = direction;
+    state.controller.upgradeNavRepeatSeconds = CONTROLLER_UPGRADE_NAV_INITIAL_DELAY_SECONDS;
+    moveUpgradeSelection(direction);
+    return;
+  }
+
+  state.controller.upgradeNavRepeatSeconds -= dtSeconds;
+  while (state.controller.upgradeNavRepeatSeconds <= 0) {
+    moveUpgradeSelection(direction);
+    state.controller.upgradeNavRepeatSeconds += CONTROLLER_UPGRADE_NAV_REPEAT_SECONDS;
+  }
+}
+
+function resetControllerUpgradeNav() {
+  state.controller.upgradeNavDirection = 0;
+  state.controller.upgradeNavRepeatSeconds = 0;
+}
+
+function moveUpgradeSelection(direction) {
+  state.upgrades.selectedIndex = clamp(
+    state.upgrades.selectedIndex + direction,
+    0,
+    UPGRADE_DEFINITIONS.length - 1
+  );
+}
+
 function buySelectedUpgrade() {
   const player = localPlayerFromSnapshot();
   const definition = UPGRADE_DEFINITIONS[state.upgrades.selectedIndex];
@@ -4398,7 +4751,6 @@ function buildWallAtMouse() {
 function buildTargetFromMouse() {
   if (
     !state.build.active ||
-    !isMouseInPhysicalViewport() ||
     state.room?.state !== "active" ||
     !state.asteroid ||
     !state.snapshot
@@ -4412,7 +4764,11 @@ function buildTargetFromMouse() {
   }
 
   const tileSize = state.asteroid.tileSize || 16;
-  const worldPoint = lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
+  const worldPoint = buildWorldPointForPlayer(player);
+  if (!worldPoint) {
+    return null;
+  }
+
   const tileX = Math.floor(worldPoint.x / tileSize);
   const tileY = Math.floor(worldPoint.y / tileSize);
   const index = tileY * state.asteroid.widthTiles + tileX;
@@ -4438,6 +4794,18 @@ function buildTargetFromMouse() {
     affordable,
     valid: inRange && empty && playable && stormSafe && clear && affordable
   };
+}
+
+function buildWorldPointForPlayer(player) {
+  if (state.controller.connected && (state.controller.aimActive || state.controller.huckRock)) {
+    return controllerAimTargetForPlayer(player);
+  }
+
+  if (!isMouseInPhysicalViewport()) {
+    return null;
+  }
+
+  return lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
 }
 
 function tileWithinBuildRadius(player, tileX, tileY, tileSize) {
@@ -4495,11 +4863,10 @@ function cameraPlayerIdForRoom() {
 }
 
 function upgradeIndexAtPoint(x, y) {
-  const menuX = UPGRADE_MENU_LAYOUT.x;
-  const menuY = UPGRADE_MENU_LAYOUT.y;
-  const rowLeft = menuX + UPGRADE_MENU_LAYOUT.rowInset;
-  const rowRight = menuX + UPGRADE_MENU_LAYOUT.width - UPGRADE_MENU_LAYOUT.rowInset;
-  const rowTop = menuY + UPGRADE_MENU_LAYOUT.rowTopOffset;
+  const rows = upgradeRowsRect();
+  const rowLeft = rows.x;
+  const rowRight = rows.x + rows.width;
+  const rowTop = rows.y;
   const rowBottom = rowTop + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
 
   if (x < rowLeft || x > rowRight || y < rowTop - UPGRADE_MENU_LAYOUT.rowHitPadding || y >= rowBottom) {
@@ -4513,7 +4880,31 @@ function upgradeIndexAtPoint(x, y) {
   );
 }
 
+function upgradeRowsRect() {
+  return {
+    x: UPGRADE_MENU_LAYOUT.x + UPGRADE_MENU_LAYOUT.rowInset,
+    y: UPGRADE_MENU_LAYOUT.y + UPGRADE_MENU_LAYOUT.rowTopOffset,
+    width: UPGRADE_MENU_LAYOUT.width - UPGRADE_MENU_LAYOUT.rowInset * 2,
+    height: UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight
+  };
+}
+
+function upgradeRowRect(index) {
+  const rows = upgradeRowsRect();
+  return {
+    x: rows.x,
+    y: rows.y + clamp(index, 0, UPGRADE_DEFINITIONS.length - 1) * UPGRADE_MENU_LAYOUT.rowHeight,
+    width: rows.width,
+    height: UPGRADE_MENU_LAYOUT.rowHeight
+  };
+}
+
 function updateAimFromSnapshot() {
+  if (controllerShouldHoldAim()) {
+    state.mouse.aimAngle = state.controller.aimAngle;
+    return;
+  }
+
   if (!isMouseInPhysicalViewport()) {
     return;
   }
@@ -4536,6 +4927,11 @@ function updateAimFromSnapshot() {
   if (dx !== 0 || dy !== 0) {
     state.mouse.aimAngle = Math.atan2(dy, dx);
   }
+}
+
+function controllerShouldHoldAim() {
+  return state.controller.connected &&
+    (state.controller.aimActive || state.controller.mining || state.controller.huckRock);
 }
 
 function eventToFramebufferPoint(event) {
