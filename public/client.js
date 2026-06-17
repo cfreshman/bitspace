@@ -39,6 +39,7 @@ const ENTITY_MAX_EXTRAPOLATION_SECONDS = 0.22;
 const ELIMINATION_NOTICE_SECONDS = 4;
 const ELIMINATION_NOTICE_MAX = 3;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
+const WORLD_LENS_POWER = RENDER.lensPower || 2;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
 const MINING_AUDIO_MAX_GAIN = 0.022;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
@@ -4223,7 +4224,7 @@ function lensScreenPointToWorld(player, screenX, screenY) {
   }
 
   const t = clamp(distance / radius, 0, 1);
-  const scale = 1 + (Math.max(1, WORLD_LENS_EDGE_SCALE) - 1) * t * t;
+  const scale = 1 + (Math.max(1, WORLD_LENS_EDGE_SCALE) - 1) * Math.pow(t, WORLD_LENS_POWER);
   return {
     x: player.x + dx * scale,
     y: player.y + dy * scale

@@ -14,8 +14,10 @@ const CANVAS_EDGE_PADDING_EM = 1;
 const MIN_RENDER_ASPECT = 2 / 3;
 const MAX_RENDER_ASPECT = 3 / 2;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
+const WORLD_LENS_POWER = RENDER.lensPower || 2;
 const WORLD_LENS_NOISE_RADIAL = 0.28;
 const WORLD_LENS_NOISE_TANGENTIAL = 0.16;
+const WORLD_LENS_DEFECT_DENSITY = 1.65;
 const STAR_CELL_SIZE = 13;
 const STAR_PARALLAX = 0.22;
 const MENU_STAR_SEED = "bitspace-menu";
@@ -250,11 +252,24 @@ function createPixelSurface(canvasContext, width, height) {
   }
 
   function writeProjectedPixel(projected) {
-    if (!projected || !canWriteProjectedPixel(projected.x, projected.y)) {
+    if (!projected) {
       return false;
     }
 
-    pixels[projected.y * width + projected.x] = currentColor;
+    let wrote = false;
+    if (projected.baseX !== projected.x || projected.baseY !== projected.y) {
+      wrote = writeProjectedPoint(projected.baseX, projected.baseY) || wrote;
+    }
+
+    return writeProjectedPoint(projected.x, projected.y) || wrote;
+  }
+
+  function writeProjectedPoint(x, y) {
+    if (!canWriteProjectedPixel(x, y)) {
+      return false;
+    }
+
+    pixels[y * width + x] = currentColor;
     return true;
   }
 
@@ -435,6 +450,7 @@ function createWorldLens(width, height) {
     centerY: height / 2,
     radius,
     edgeScale,
+    power: Math.max(1, WORLD_LENS_POWER),
     maxSourceRadius: radius * edgeScale,
     noiseRadial: WORLD_LENS_NOISE_RADIAL,
     noiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
@@ -457,34 +473,57 @@ function projectLensPixel(x, y, lens) {
   }
 
   if (sourceRadius === 0) {
+    const centerX = Math.floor(lens.centerX);
+    const centerY = Math.floor(lens.centerY);
     return {
-      x: Math.floor(lens.centerX),
-      y: Math.floor(lens.centerY)
+      baseX: centerX,
+      baseY: centerY,
+      x: centerX,
+      y: centerY
     };
   }
 
   const t = clamp(sourceRadius / lens.maxSourceRadius, 0, 1);
-  const scale = 1 + (lens.edgeScale - 1) * t * t;
+  const scale = 1 + (lens.edgeScale - 1) * Math.pow(t, lens.power);
   const screenRadius = sourceRadius / scale;
-  const noiseWeight = t * t;
-  const radialNoise = lensNoiseAt(x, y, 0x4f1bbcdc) * lens.noiseRadial * noiseWeight;
-  const tangentNoise = lensNoiseAt(x, y, 0x8ab23d31) * lens.noiseTangential * noiseWeight;
   const unitX = dx / sourceRadius;
   const unitY = dy / sourceRadius;
+  const baseX = Math.floor(lens.centerX + unitX * screenRadius);
+  const baseY = Math.floor(lens.centerY + unitY * screenRadius);
+  const lensFalloff = (scale - 1) / Math.max(0.0001, lens.edgeScale - 1);
+  const defectDensity = clamp(lensFalloff * WORLD_LENS_DEFECT_DENSITY, 0, 1);
+
+  if (lensNoiseUnitAt(x, y, 0x36d2ae31) > defectDensity) {
+    return {
+      baseX,
+      baseY,
+      x: baseX,
+      y: baseY
+    };
+  }
+
+  const radialNoise = lensNoiseAt(x, y, 0x4f1bbcdc) * lens.noiseRadial;
+  const tangentNoise = lensNoiseAt(x, y, 0x8ab23d31) * lens.noiseTangential;
 
   return {
+    baseX,
+    baseY,
     x: Math.floor(lens.centerX + unitX * (screenRadius + radialNoise) - unitY * tangentNoise),
     y: Math.floor(lens.centerY + unitY * (screenRadius + radialNoise) + unitX * tangentNoise)
   };
 }
 
 function lensNoiseAt(x, y, salt) {
+  return lensNoiseUnitAt(x, y, salt) * 2 - 1;
+}
+
+function lensNoiseUnitAt(x, y, salt) {
   let value = Math.imul(Math.floor(x), 374761393) ^
     Math.imul(Math.floor(y), 668265263) ^
     salt;
   value = Math.imul(value ^ (value >>> 13), 1274126177);
   value = Math.imul(value ^ (value >>> 16), 2246822519);
-  return (((value ^ (value >>> 15)) >>> 0) / 2147483647.5) - 1;
+  return ((value ^ (value >>> 15)) >>> 0) / 4294967295;
 }
 
 function createPixelTextRenderer(width, height) {
@@ -2405,11 +2444,11 @@ function drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer) {
 
   if (!selected) {
     ctx.fillStyle = MENU_THEME_BACKING_COLOR;
-    fillDisk(ctx, x, y, radius + 4);
+    fillSolidDisk(ctx, x, y, radius + 4);
   }
 
   ctx.fillStyle = fillColor;
-  fillDisk(ctx, x, y, radius);
+  fillSolidDisk(ctx, x, y, radius);
   ctx.fillStyle = detailColor;
   drawCenteredCircleLabel(ctx, textRenderer, String(entity.label || ""), x, y - 7, {
     fontSize: 10,
@@ -3131,6 +3170,25 @@ function fillDisk(ctx, cx, cy, radius, occluders = []) {
         ctx.fillRect(px, py, 1, 1);
       }
     }
+  }
+}
+
+function fillSolidDisk(ctx, cx, cy, radius) {
+  const radiusSq = radius * radius;
+  const minY = Math.floor(cy - radius);
+  const maxY = Math.ceil(cy + radius);
+
+  for (let py = minY; py <= maxY; py += 1) {
+    const dy = py - cy;
+    const horizontalSq = radiusSq - dy * dy;
+    if (horizontalSq < 0) {
+      continue;
+    }
+
+    const horizontal = Math.sqrt(horizontalSq);
+    const start = Math.ceil(cx - horizontal);
+    const end = Math.floor(cx + horizontal);
+    ctx.fillRect(start, py, end - start + 1, 1);
   }
 }
 
