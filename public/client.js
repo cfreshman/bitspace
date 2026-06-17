@@ -11,7 +11,7 @@ import {
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
-import { inheritedVelocityLaunchAngle } from "/shared/math.js";
+import { createSeededRandom, inheritedVelocityLaunchAngle } from "/shared/math.js";
 import {
   aggregateUpgradeEffects,
   canAffordUpgrade,
@@ -112,7 +112,9 @@ const state = {
   prediction: {
     player: null,
     lastTimeSeconds: 0,
-    huckRockCooldownSeconds: 0
+    huckRockCooldownSeconds: 0,
+    huckRocks: [],
+    huckRockSeq: 0
   },
   entitySmoothing: {
     byId: new Map()
@@ -232,6 +234,7 @@ function applyServerRoom(room) {
     state.asteroid = null;
     state.prediction.player = null;
     state.prediction.huckRockCooldownSeconds = 0;
+    clearPredictedHuckRocks();
     resetEntitySmoothing();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
@@ -253,6 +256,7 @@ function applyServerRoom(room) {
     resetLocalDamageAudioState();
     resetEntitySmoothing();
     state.prediction.huckRockCooldownSeconds = 0;
+    clearPredictedHuckRocks();
     cancelMiningRay();
   }
   if (room?.state === "menu") {
@@ -2976,6 +2980,7 @@ function reconcilePrediction(snapshot, timeSeconds) {
   if (!authoritative || !authoritative.alive) {
     state.prediction.player = null;
     state.prediction.huckRockCooldownSeconds = 0;
+    clearPredictedHuckRocks();
     state.prediction.lastTimeSeconds = timeSeconds;
     return;
   }
@@ -3083,7 +3088,7 @@ function updatePrediction(timeSeconds) {
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
   predicted.thrusting = canThrust;
 
-  applyPredictedHuckRockRecoil(predicted, dtSeconds);
+  applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds);
   predicted.x += predicted.vx * dtSeconds;
   predicted.y += predicted.vy * dtSeconds;
   resolvePredictionCollisions(predicted);
@@ -3113,7 +3118,7 @@ function predictedLocalPlayer() {
   };
 }
 
-function applyPredictedHuckRockRecoil(predicted, dtSeconds) {
+function applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds) {
   state.prediction.huckRockCooldownSeconds = Math.max(
     0,
     state.prediction.huckRockCooldownSeconds - dtSeconds
@@ -3129,10 +3134,41 @@ function applyPredictedHuckRockRecoil(predicted, dtSeconds) {
     x: Math.cos(angle),
     y: Math.sin(angle)
   };
+  spawnPredictedHuckRock(predicted, direction, timeSeconds);
   applyHuckRockRecoil(predicted, direction);
   predicted.huckRockEngineCutoutSeconds = ENGINE.huckRock.engineCutoutSeconds || 0;
   predicted.thrusting = false;
   state.prediction.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
+}
+
+function spawnPredictedHuckRock(player, direction, timeSeconds) {
+  const config = ENGINE.huckRock;
+  const id = `predicted-huck-rock:${state.playerId}:${state.prediction.huckRockSeq}`;
+  state.prediction.huckRockSeq += 1;
+  const random = createSeededRandom(`${state.clientId}:${id}`);
+  state.prediction.huckRocks.push({
+    id,
+    type: "huckRock",
+    predicted: true,
+    ownerId: state.playerId,
+    shapeSeed: `${state.clientId}:${id}:shape`,
+    x: player.x + direction.x * config.spawnOffset,
+    y: player.y + direction.y * config.spawnOffset,
+    vx: (player.vx || 0) + direction.x * config.speed,
+    vy: (player.vy || 0) + direction.y * config.speed,
+    radius: config.radius,
+    angleX: random() * Math.PI * 2,
+    angleY: random() * Math.PI * 2,
+    angleZ: random() * Math.PI * 2,
+    spinX: (random() - 0.5) * 2.2,
+    spinY: (random() - 0.5) * 2.2,
+    spinZ: (random() - 0.5) * 1.2,
+    bounceCount: 0,
+    ageSeconds: 0,
+    createdAtSeconds: timeSeconds,
+    lastTimeSeconds: timeSeconds,
+    hidden: false
+  });
 }
 
 function renderSnapshot(timeSeconds) {
@@ -3141,11 +3177,8 @@ function renderSnapshot(timeSeconds) {
   }
 
   updateEntitySmoothing(timeSeconds);
+  updatePredictedHuckRocks(timeSeconds);
   const sourceEntities = Array.isArray(state.snapshot.entities) ? state.snapshot.entities : [];
-  if (sourceEntities.length === 0) {
-    return state.snapshot;
-  }
-
   const entities = [];
   for (const entity of sourceEntities) {
     const tracked = state.entitySmoothing.byId.get(entity.id);
@@ -3159,10 +3192,92 @@ function renderSnapshot(timeSeconds) {
     }
   }
 
+  for (const rock of state.prediction.huckRocks) {
+    if (!rock.hidden) {
+      entities.push(renderEntityForFrame(rock, rock));
+    }
+  }
+
   return {
     ...state.snapshot,
     entities
   };
+}
+
+function updatePredictedHuckRocks(timeSeconds) {
+  const rocks = [];
+
+  for (const rock of state.prediction.huckRocks) {
+    if (rock.hidden || timeSeconds - rock.createdAtSeconds > 0.75) {
+      continue;
+    }
+
+    const dtSeconds = clamp(timeSeconds - rock.lastTimeSeconds, 0, 1 / 15);
+    rock.lastTimeSeconds = timeSeconds;
+    if (dtSeconds > 0) {
+      advanceRenderEntity(rock, dtSeconds);
+      const tracked = { render: rock, hidden: false };
+      resolveRenderHuckRockTerrain(tracked);
+      rock.hidden = tracked.hidden;
+    }
+
+    if (!rock.hidden) {
+      rocks.push(rock);
+    }
+  }
+
+  state.prediction.huckRocks = rocks;
+}
+
+function takePredictedHuckRockForEntity(entity, timeSeconds) {
+  if (
+    entity?.type !== "huckRock" ||
+    entity.fragment ||
+    entity.ownerId !== state.playerId ||
+    state.prediction.huckRocks.length === 0
+  ) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < state.prediction.huckRocks.length; index += 1) {
+    const rock = state.prediction.huckRocks[index];
+    const ageDelta = Math.abs((Number(entity.ageSeconds) || 0) - (rock.ageSeconds || 0));
+    if (rock.hidden || timeSeconds - rock.createdAtSeconds > 0.9 || ageDelta > 0.45) {
+      continue;
+    }
+
+    const distance = Math.hypot((entity.x || 0) - rock.x, (entity.y || 0) - rock.y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  }
+
+  if (bestIndex < 0 || bestDistance > 96) {
+    return null;
+  }
+
+  const [rock] = state.prediction.huckRocks.splice(bestIndex, 1);
+  return cloneRenderEntity({
+    ...entity,
+    x: rock.x,
+    y: rock.y,
+    vx: rock.vx,
+    vy: rock.vy,
+    angleX: rock.angleX,
+    angleY: rock.angleY,
+    angleZ: rock.angleZ,
+    spinX: rock.spinX,
+    spinY: rock.spinY,
+    spinZ: rock.spinZ,
+    ageSeconds: rock.ageSeconds
+  });
+}
+
+function clearPredictedHuckRocks() {
+  state.prediction.huckRocks = [];
 }
 
 function recordEntitySnapshot(snapshot, timeSeconds) {
@@ -3179,10 +3294,11 @@ function recordEntitySnapshot(snapshot, timeSeconds) {
     const tracked = state.entitySmoothing.byId.get(entity.id);
 
     if (!tracked || tracked.type !== entity.type || tracked.fragment !== Boolean(entity.fragment)) {
+      const predictedMatch = takePredictedHuckRockForEntity(entity, timeSeconds);
       state.entitySmoothing.byId.set(entity.id, {
         type: entity.type,
         fragment: Boolean(entity.fragment),
-        render: cloneRenderEntity(entity),
+        render: predictedMatch || cloneRenderEntity(entity),
         target,
         lastRenderTimeSeconds: timeSeconds,
         targetReceivedAtSeconds: timeSeconds,

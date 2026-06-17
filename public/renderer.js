@@ -1112,8 +1112,9 @@ function extrapolateRemotePlayer(player, snapshot, timeSeconds) {
     0,
     REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS
   );
-  const dx = (player.vx || 0) * leadSeconds;
-  const dy = (player.vy || 0) * leadSeconds;
+  const motion = remotePlayerProjectedMotion(player, leadSeconds);
+  const dx = motion.dx;
+  const dy = motion.dy;
   if (dx === 0 && dy === 0) {
     return player;
   }
@@ -1122,7 +1123,42 @@ function extrapolateRemotePlayer(player, snapshot, timeSeconds) {
     ...player,
     x: player.x + dx,
     y: player.y + dy,
+    vx: motion.vx,
+    vy: motion.vy,
     miningRay: offsetMiningRay(player.miningRay, dx, dy)
+  };
+}
+
+function remotePlayerProjectedMotion(player, seconds) {
+  const vx = player.vx || 0;
+  const vy = player.vy || 0;
+  if (seconds <= 0) {
+    return { dx: 0, dy: 0, vx, vy };
+  }
+
+  const moveMagnitude = Math.hypot(player.moveX || 0, player.moveY || 0);
+  const canThrust = player.thrusting && moveMagnitude > 0.0001;
+  if (!canThrust) {
+    return {
+      dx: vx * seconds,
+      dy: vy * seconds,
+      vx,
+      vy
+    };
+  }
+
+  const moveX = (player.moveX || 0) / moveMagnitude;
+  const moveY = (player.moveY || 0) / moveMagnitude;
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  const acceleration = ENGINE.ship.thrust * effects.thrustMultiplier;
+  const accelerationX = moveX * acceleration;
+  const accelerationY = moveY * acceleration;
+
+  return {
+    dx: vx * seconds + 0.5 * accelerationX * seconds * seconds,
+    dy: vy * seconds + 0.5 * accelerationY * seconds * seconds,
+    vx: vx + accelerationX * seconds,
+    vy: vy + accelerationY * seconds
   };
 }
 

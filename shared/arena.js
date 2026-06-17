@@ -2241,6 +2241,8 @@ function snapshotPlayer(player) {
     vy: roundForSnapshot(player.vy),
     angle: roundForSnapshot(player.angle),
     aimAngle: roundForSnapshot(player.aimAngle),
+    moveX: roundForSnapshot(player.input?.moveX || 0),
+    moveY: roundForSnapshot(player.input?.moveY || 0),
     mining: player.mining,
     huckRockCooldownSeconds: roundForSnapshot(player.huckRockCooldownSeconds || 0),
     huckRockEngineCutoutSeconds: roundForSnapshot(player.huckRockEngineCutoutSeconds || 0),
