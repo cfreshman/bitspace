@@ -30,11 +30,11 @@ const BUILD_PREVIEW_GAP = 1;
 const STORM_NOISE_SCALE = 0.15;
 const STORM_NOISE_THRESHOLD = 0.34;
 const STORM_BOUNDARY_NOISE_THRESHOLD = 0;
-const STORM_NOISE_BROAD_SCALE = 0.43;
-const STORM_NOISE_FINE_SCALE = 2.35;
 const STORM_NOISE_SPEED_X = -2;
 const STORM_NOISE_SPEED_Y = 5;
 const STORM_NOISE_SPEED_Z = 0.1;
+const STORM_PATTERN_FPS = 20;
+const STORM_PATTERN_MAX_CACHE = 4096;
 const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
   { x: -1, y: -1 },
   { x: 0, y: -1 },
@@ -64,7 +64,10 @@ const ORE_RING_STEPS = 16;
 const ORE_MINING_ROTATION = 0.26;
 const ORE_OCCLUSION_PADDING = 0.85;
 const stormNoiseCache = new Map();
+const stormPatternCache = new Map();
+let stormPatternCacheFrame = null;
 const huckRockShapeCache = new Map();
+const asteroidBoundaryContourCache = new WeakMap();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
@@ -1055,22 +1058,46 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
     Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
   );
 
-  ctx.fillStyle = colors.foreground;
+  const visibleStormTiles = [];
+  ctx.fillStyle = colors.background;
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    let runStartTileX = null;
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
       const state = stormTileStateAt(asteroid, tileX, tileY);
-      if (state !== STORM_STATE.storm) {
-        continue;
+      const isStorm = state === STORM_STATE.storm;
+      if (isStorm) {
+        visibleStormTiles.push({ tileX, tileY });
+        if (runStartTileX === null) {
+          runStartTileX = tileX;
+        }
       }
 
-      const screenX = Math.round(tileX * tileSize - camera.x);
-      const screenY = Math.round(tileY * tileSize - camera.y);
-      ctx.fillStyle = colors.background;
-      ctx.fillRect(screenX, screenY, tileSize, tileSize);
-      ctx.fillStyle = colors.foreground;
-      drawStormTilePattern(ctx, asteroid, screenX, screenY, tileSize, tileX, tileY, timeSeconds);
+      if (!isStorm && runStartTileX !== null) {
+        drawStormBackingRun(ctx, runStartTileX, tileX, tileY, tileSize, camera);
+        runStartTileX = null;
+      }
+    }
+
+    if (runStartTileX !== null) {
+      drawStormBackingRun(ctx, runStartTileX, maxTileX + 1, tileY, tileSize, camera);
     }
   }
+
+  ctx.fillStyle = colors.foreground;
+  for (const tile of visibleStormTiles) {
+    const screenX = Math.round(tile.tileX * tileSize - camera.x);
+    const screenY = Math.round(tile.tileY * tileSize - camera.y);
+    drawStormTilePattern(ctx, asteroid, screenX, screenY, tileSize, tile.tileX, tile.tileY, timeSeconds);
+  }
+}
+
+function drawStormBackingRun(ctx, startTileX, endTileX, tileY, tileSize, camera) {
+  ctx.fillRect(
+    Math.round(startTileX * tileSize - camera.x),
+    Math.round(tileY * tileSize - camera.y),
+    (endTileX - startTileX) * tileSize,
+    tileSize
+  );
 }
 
 function extrapolateRemotePlayer(player, snapshot, timeSeconds) {
@@ -1126,16 +1153,62 @@ function drawStormTilePattern(
   timeSeconds,
   threshold = STORM_NOISE_THRESHOLD
 ) {
-  const worldLeft = tileX * size;
-  const worldTop = tileY * size;
+  const rows = stormPatternRows(asteroid, tileX, tileY, size, timeSeconds, threshold);
 
   for (let py = 0; py < size; py += 1) {
-    for (let px = 0; px < size; px += 1) {
-      if (stormNoiseAt(asteroid, worldLeft + px, worldTop + py, timeSeconds) >= threshold) {
-        ctx.fillRect(x + px, y + py, 1, 1);
+    const row = rows[py] || 0;
+    let px = 0;
+    while (px < size) {
+      while (px < size && (row & (1 << px)) === 0) {
+        px += 1;
+      }
+
+      const runStart = px;
+      while (px < size && (row & (1 << px)) !== 0) {
+        px += 1;
+      }
+
+      if (px > runStart) {
+        ctx.fillRect(x + runStart, y + py, px - runStart, 1);
       }
     }
   }
+}
+
+function stormPatternRows(asteroid, tileX, tileY, size, timeSeconds, threshold) {
+  const frame = Math.floor(timeSeconds * STORM_PATTERN_FPS);
+  if (stormPatternCacheFrame !== frame) {
+    stormPatternCache.clear();
+    stormPatternCacheFrame = frame;
+  }
+
+  const cacheKey = `${asteroid.seed || "default"}:${tileX}:${tileY}:${size}:${threshold}:${frame}`;
+  const cached = stormPatternCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (stormPatternCache.size > STORM_PATTERN_MAX_CACHE) {
+    stormPatternCache.clear();
+  }
+
+  const sampleTimeSeconds = frame / STORM_PATTERN_FPS;
+  const worldLeft = tileX * size;
+  const worldTop = tileY * size;
+  const rows = new Uint32Array(size);
+
+  for (let py = 0; py < size; py += 1) {
+    let row = 0;
+    for (let px = 0; px < size; px += 1) {
+      if (stormNoiseAt(asteroid, worldLeft + px, worldTop + py, sampleTimeSeconds) >= threshold) {
+        row |= 1 << px;
+      }
+    }
+    rows[py] = row;
+  }
+
+  stormPatternCache.set(cacheKey, rows);
+  return rows;
 }
 
 function stormNoiseAt(asteroid, worldX, worldY, timeSeconds) {
@@ -1143,18 +1216,7 @@ function stormNoiseAt(asteroid, worldX, worldY, timeSeconds) {
   const sampleX = (worldX + timeSeconds * STORM_NOISE_SPEED_X) * STORM_NOISE_SCALE;
   const sampleY = (worldY + timeSeconds * STORM_NOISE_SPEED_Y) * STORM_NOISE_SCALE;
   const sampleZ = timeSeconds * STORM_NOISE_SPEED_Z;
-  const medium = noise(sampleX, sampleY, sampleZ);
-  const broad = noise(
-    sampleX * STORM_NOISE_BROAD_SCALE + 17.3,
-    sampleY * STORM_NOISE_BROAD_SCALE - 29.1,
-    sampleZ * 0.7 + 5.7
-  );
-  const fine = noise(
-    sampleX * STORM_NOISE_FINE_SCALE - 41.6,
-    sampleY * STORM_NOISE_FINE_SCALE + 13.4,
-    sampleZ * 1.6 - 9.2
-  );
-  return medium * 0.68 + broad * 0.22 + fine * 0.10;
+  return noise(sampleX, sampleY, sampleZ);
 }
 
 function stormNoiseForSeed(seed) {
@@ -1995,63 +2057,161 @@ function drawStormBoundaryHorizontal(ctx, asteroid, x, y, length, worldX, worldY
 }
 
 function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
-  const tileSize = asteroid.tileSize || RENDER.tileSize;
-  const padding = cameraCullPadding(camera);
-  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
-  const maxTileX = Math.min(
-    asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
-  );
-  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
-  const maxTileY = Math.min(
-    asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
-  );
-
   ctx.fillStyle = colors.foreground;
+  const lines = asteroidBoundaryLines(asteroid);
+  const padding = cameraCullPadding(camera);
+  const minX = camera.x - padding - 1;
+  const maxX = camera.x + ctx.width + padding + 1;
+  const minY = camera.y - padding - 1;
+  const maxY = camera.y + ctx.height + padding + 1;
 
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+  for (const line of lines) {
+    drawDashedAsteroidBoundaryLine(ctx, line, camera, minX, maxX, minY, maxY);
+  }
+}
+
+function asteroidBoundaryLines(asteroid) {
+  const cached = asteroidBoundaryContourCache.get(asteroid);
+  if (cached) {
+    return cached;
+  }
+
+  const segments = buildAsteroidBoundarySegments(asteroid);
+  const outgoingSegments = new Map();
+  const lines = [];
+
+  for (const segment of segments) {
+    const key = vertexKey(segment.x0, segment.y0);
+    if (!outgoingSegments.has(key)) {
+      outgoingSegments.set(key, []);
+    }
+
+    outgoingSegments.get(key).push(segment);
+  }
+
+  for (const segment of segments) {
+    if (segment.used) {
+      continue;
+    }
+
+    const line = traceAsteroidBoundaryLine(segments, outgoingSegments, segment);
+    if (line.length > 0) {
+      lines.push(line);
+    }
+  }
+
+  asteroidBoundaryContourCache.set(asteroid, lines);
+  return lines;
+}
+
+function buildAsteroidBoundarySegments(asteroid) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const segments = [];
+
+  for (let tileY = 0; tileY < asteroid.heightTiles; tileY += 1) {
+    for (let tileX = 0; tileX < asteroid.widthTiles; tileX += 1) {
       if (!isBoundarySafeTile(asteroid, tileX, tileY)) {
         continue;
       }
 
-      const screenX = Math.round(tileX * tileSize - camera.x);
-      const screenY = Math.round(tileY * tileSize - camera.y);
+      const x = tileX * tileSize;
+      const y = tileY * tileSize;
 
-      if (!isBoundarySafeTile(asteroid, tileX - 1, tileY)) {
-        drawDashedBoundaryVertical(ctx, screenX, screenY, tileSize, tileY * tileSize);
+      if (!isBoundarySafeTile(asteroid, tileX, tileY - 1)) {
+        segments.push(buildBoundaryLineSegment(x, y, x + tileSize, y, 0));
       }
 
       if (!isBoundarySafeTile(asteroid, tileX + 1, tileY)) {
-        drawDashedBoundaryVertical(ctx, screenX + tileSize - 1, screenY, tileSize, tileY * tileSize);
-      }
-
-      if (!isBoundarySafeTile(asteroid, tileX, tileY - 1)) {
-        drawDashedBoundaryHorizontal(ctx, screenX, screenY, tileSize, tileX * tileSize);
+        segments.push(buildBoundaryLineSegment(x + tileSize, y, x + tileSize, y + tileSize, 1));
       }
 
       if (!isBoundarySafeTile(asteroid, tileX, tileY + 1)) {
-        drawDashedBoundaryHorizontal(ctx, screenX, screenY + tileSize - 1, tileSize, tileX * tileSize);
+        segments.push(buildBoundaryLineSegment(x + tileSize, y + tileSize, x, y + tileSize, 2));
+      }
+
+      if (!isBoundarySafeTile(asteroid, tileX - 1, tileY)) {
+        segments.push(buildBoundaryLineSegment(x, y + tileSize, x, y, 3));
       }
     }
   }
+
+  return segments;
 }
 
-function drawDashedBoundaryVertical(ctx, x, y, length, worldY) {
-  for (let offset = 0; offset < length; offset += 1) {
-    if (positiveModulo(worldY + offset, ASTEROID_DASH_PERIOD) < ASTEROID_DASH_ON) {
-      ctx.fillRect(x, y + offset, 1, 1);
+function buildBoundaryLineSegment(x0, y0, x1, y1, direction) {
+  return {
+    x0,
+    y0,
+    x1,
+    y1,
+    direction,
+    length: Math.abs(x1 - x0) + Math.abs(y1 - y0),
+    used: false
+  };
+}
+
+function traceAsteroidBoundaryLine(segments, outgoingSegments, startSegment) {
+  const startKey = vertexKey(startSegment.x0, startSegment.y0);
+  let segment = startSegment;
+  const line = [];
+  let guard = segments.length + 1;
+
+  while (segment && !segment.used && guard > 0) {
+    segment.used = true;
+    line.push(segment);
+    guard -= 1;
+
+    const endKey = vertexKey(segment.x1, segment.y1);
+    if (endKey === startKey) {
+      break;
     }
+
+    segment = nextBuildContourEdge(segment, outgoingSegments.get(endKey) || []);
+  }
+
+  return line;
+}
+
+function drawDashedAsteroidBoundaryLine(ctx, line, camera, minX, maxX, minY, maxY) {
+  let distance = 0;
+
+  for (const segment of line) {
+    for (let offset = 0; offset < segment.length; offset += 1) {
+      if (positiveModulo(distance + offset, ASTEROID_DASH_PERIOD) >= ASTEROID_DASH_ON) {
+        continue;
+      }
+
+      const pixel = asteroidBoundarySegmentPixel(segment, offset);
+      if (pixel.x < minX || pixel.x > maxX || pixel.y < minY || pixel.y > maxY) {
+        continue;
+      }
+
+      ctx.fillRect(
+        Math.round(pixel.x - camera.x),
+        Math.round(pixel.y - camera.y),
+        1,
+        1
+      );
+    }
+
+    distance += segment.length;
   }
 }
 
-function drawDashedBoundaryHorizontal(ctx, x, y, length, worldX) {
-  for (let offset = 0; offset < length; offset += 1) {
-    if (positiveModulo(worldX + offset, ASTEROID_DASH_PERIOD) < ASTEROID_DASH_ON) {
-      ctx.fillRect(x + offset, y, 1, 1);
-    }
+function asteroidBoundarySegmentPixel(segment, offset) {
+  if (segment.direction === 0) {
+    return { x: segment.x0 + offset, y: segment.y0 };
   }
+
+  if (segment.direction === 1) {
+    return { x: segment.x0, y: segment.y0 + offset };
+  }
+
+  if (segment.direction === 2) {
+    return { x: segment.x0 - offset, y: segment.y0 };
+  }
+
+  return { x: segment.x0, y: segment.y0 - offset };
 }
 
 function isRockTile(tile) {
