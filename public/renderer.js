@@ -239,6 +239,53 @@ function createPixelSurface(canvasContext, width, height) {
   let activeClip = null;
   let activeLens = null;
 
+  function canWriteProjectedPixel(x, y) {
+    return x >= 0 &&
+      y >= 0 &&
+      x < width &&
+      y < height &&
+      (!activeClip || (x >= activeClip.starts[y] && x < activeClip.ends[y]));
+  }
+
+  function writeProjectedPixel(projected) {
+    if (!projected || !canWriteProjectedPixel(projected.x, projected.y)) {
+      return false;
+    }
+
+    pixels[projected.y * width + projected.x] = currentColor;
+    return true;
+  }
+
+  function writeProjectedBridge(from, to) {
+    let x = from.x;
+    let y = from.y;
+    const dx = Math.abs(to.x - from.x);
+    const dy = -Math.abs(to.y - from.y);
+    const stepX = from.x < to.x ? 1 : -1;
+    const stepY = from.y < to.y ? 1 : -1;
+    let error = dx + dy;
+
+    while (true) {
+      if (canWriteProjectedPixel(x, y)) {
+        pixels[y * width + x] = currentColor;
+      }
+
+      if (x === to.x && y === to.y) {
+        break;
+      }
+
+      const doubled = error * 2;
+      if (doubled >= dy) {
+        error += dy;
+        x += stepX;
+      }
+      if (doubled <= dx) {
+        error += dx;
+        y += stepY;
+      }
+    }
+  }
+
   return {
     width,
     height,
@@ -278,21 +325,31 @@ function createPixelSurface(canvasContext, width, height) {
           return;
         }
 
+        const isThinStroke = (x1 - x0 === 1 && y1 - y0 > 1) ||
+          (y1 - y0 === 1 && x1 - x0 > 1);
+        if (isThinStroke) {
+          let previous = null;
+          for (let py = y0; py < y1; py += 1) {
+            for (let px = x0; px < x1; px += 1) {
+              const projected = projectLensPixel(px, py, activeLens);
+              if (!writeProjectedPixel(projected)) {
+                previous = null;
+                continue;
+              }
+
+              if (previous) {
+                writeProjectedBridge(previous, projected);
+              }
+              previous = projected;
+            }
+          }
+          return;
+        }
+
         for (let py = y0; py < y1; py += 1) {
           for (let px = x0; px < x1; px += 1) {
             const projected = projectLensPixel(px, py, activeLens);
-            if (!projected || projected.x < 0 || projected.y < 0 || projected.x >= width || projected.y >= height) {
-              continue;
-            }
-
-            if (activeClip && (
-              projected.x < activeClip.starts[projected.y] ||
-              projected.x >= activeClip.ends[projected.y]
-            )) {
-              continue;
-            }
-
-            pixels[projected.y * width + projected.x] = currentColor;
+            writeProjectedPixel(projected);
           }
         }
         return;
@@ -2372,12 +2429,11 @@ function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRendere
   ctx.fillRect(x, y, width, height);
   ctx.fillStyle = selected && !entity.fillColor ? colors.foreground : fillColor;
   ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  ctx.fillStyle = colors.foreground;
+  drawRectOutline(ctx, x, y, width, height);
   if (selected && entity.fillColor) {
     ctx.fillStyle = colors.foreground;
-    ctx.fillRect(x + 2, y + 2, width - 4, 1);
-    ctx.fillRect(x + 2, y + height - 3, width - 4, 1);
-    ctx.fillRect(x + 2, y + 2, 1, height - 4);
-    ctx.fillRect(x + width - 3, y + 2, 1, height - 4);
+    drawRectOutline(ctx, x + 2, y + 2, width - 4, height - 4);
   }
 
   const textOptions = {
@@ -2389,6 +2445,13 @@ function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRendere
     ...textOptions,
     width: width - 4
   });
+}
+
+function drawRectOutline(ctx, x, y, width, height) {
+  ctx.fillRect(x, y, width, 1);
+  ctx.fillRect(x, y + height - 1, width, 1);
+  ctx.fillRect(x, y, 1, height);
+  ctx.fillRect(x + width - 1, y, 1, height);
 }
 
 function drawShip(ctx, player, camera, colors, timeSeconds, textRenderer) {
