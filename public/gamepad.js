@@ -27,6 +27,7 @@ export function createGamepadControls() {
       const dpad = dpadVector(gamepad);
       const buttons = {
         select: buttonDown(gamepad, 0),
+        reset: buttonDown(gamepad, 1),
         build: buttonDown(gamepad, 2),
         upgrades: buttonDown(gamepad, 3),
         huckRock: buttonDown(gamepad, 6),
@@ -34,6 +35,7 @@ export function createGamepadControls() {
       };
       const pressed = {
         select: buttons.select && !previousButtons.select,
+        reset: buttons.reset && !previousButtons.reset,
         build: buttons.build && !previousButtons.build,
         upgrades: buttons.upgrades && !previousButtons.upgrades,
         huckRock: buttons.huckRock && !previousButtons.huckRock,
@@ -47,7 +49,7 @@ export function createGamepadControls() {
         leftStick,
         dpad,
         move: leftStick,
-        menuMove: dpad,
+        menuMove: strongestVector(dpad, leftStick),
         aim: {
           ...rightStick,
           active: Math.hypot(rightStick.x, rightStick.y) > 0
@@ -75,6 +77,14 @@ function dpadVector(gamepad) {
   const x = Number(buttonDown(gamepad, 15)) - Number(buttonDown(gamepad, 14));
   const y = Number(buttonDown(gamepad, 13)) - Number(buttonDown(gamepad, 12));
   return clampMagnitude(x, y);
+}
+
+function strongestVector(a, b) {
+  return vectorMagnitudeSq(b) > vectorMagnitudeSq(a) ? b : a;
+}
+
+function vectorMagnitudeSq(vector) {
+  return vector.x * vector.x + vector.y * vector.y;
 }
 
 function buttonDown(gamepad, index) {
@@ -119,6 +129,7 @@ function clamp(value, min, max) {
 function defaultButtons() {
   return {
     select: false,
+    reset: false,
     build: false,
     upgrades: false,
     huckRock: false,

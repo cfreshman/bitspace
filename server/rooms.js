@@ -977,20 +977,7 @@ function firstParticipantId(room) {
 function randomizedSpawnNumbers(seed, count) {
   const playerCount = clampInteger(count, 1, ENGINE.maxPlayers);
   const random = createSeededRandom(`${seed}:spawn-order:${playerCount}`);
-  const offset = Math.floor(random() * ENGINE.maxPlayers);
-  const step = ENGINE.maxPlayers / playerCount;
-  const used = new Set();
-  const spawnNumbers = [];
-
-  for (let index = 0; index < playerCount; index += 1) {
-    let zeroBased = (offset + Math.round(index * step)) % ENGINE.maxPlayers;
-    while (used.has(zeroBased)) {
-      zeroBased = (zeroBased + 1) % ENGINE.maxPlayers;
-    }
-
-    used.add(zeroBased);
-    spawnNumbers.push(zeroBased + 1);
-  }
+  const spawnNumbers = Array.from({ length: ENGINE.maxPlayers }, (_value, index) => index + 1);
 
   for (let index = spawnNumbers.length - 1; index > 0; index -= 1) {
     const swapIndex = Math.floor(random() * (index + 1));
@@ -999,7 +986,7 @@ function randomizedSpawnNumbers(seed, count) {
     spawnNumbers[swapIndex] = value;
   }
 
-  return spawnNumbers;
+  return spawnNumbers.slice(0, playerCount);
 }
 
 function clampInteger(value, min, max) {

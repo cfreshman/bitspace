@@ -1,5 +1,6 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
-import { ASTEROID_TILE, STORM_STATE, raycastAsteroid } from "/shared/asteroid.js";
+import { BUILD_DIRECTION_STEPS, buildDirectionAngle, firstTileAlongBuildRay } from "/shared/build.js";
+import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
 import {
   aggregateUpgradeEffects,
@@ -177,7 +178,7 @@ export function createRenderer(canvas) {
     canvas.width = size.width;
     canvas.height = size.height;
     surface = createPixelSurface(canvasContext, size.width, size.height);
-    textRenderer = createPixelTextRenderer(size.width, size.height);
+    textRenderer = createPixelTextRenderer(size.width, size.height, () => colors);
   }
 
   sizeCanvasBox();
@@ -529,7 +530,10 @@ function lensNoiseUnitAt(x, y, salt) {
   return ((value ^ (value >>> 15)) >>> 0) / 4294967295;
 }
 
-function createPixelTextRenderer(width, height) {
+function createPixelTextRenderer(width, height, colorsForText = () => ({
+  foreground: RENDER.foreground,
+  background: RENDER.background
+})) {
   return {
     measure(text, options = {}) {
       return measureBitmapText(text, options);
@@ -543,7 +547,7 @@ function createPixelTextRenderer(width, height) {
       ctx.fillStyle = options.color || RENDER.foreground;
 
       lines.forEach((line, index) => {
-        drawBitmapTextLine(ctx, String(line), x, y + index * lineHeight, maxWidth, scale, options);
+        drawBitmapTextLine(ctx, String(line), x, y + index * lineHeight, maxWidth, scale, options, colorsForText());
       });
 
       return {
@@ -566,7 +570,7 @@ function measureBitmapText(text, options = {}) {
   return Math.max(0, width - scale);
 }
 
-function drawBitmapTextLine(ctx, text, x, y, maxWidth, scale, options = {}) {
+function drawBitmapTextLine(ctx, text, x, y, maxWidth, scale, options = {}, colors = {}) {
   let cursorX = x;
   const selectionStart = Math.min(options.selectionStart ?? -1, options.selectionEnd ?? -1);
   const selectionEnd = Math.max(options.selectionStart ?? -1, options.selectionEnd ?? -1);
@@ -579,20 +583,31 @@ function drawBitmapTextLine(ctx, text, x, y, maxWidth, scale, options = {}) {
       break;
     }
 
-    if (index >= selectionStart && index < selectionEnd) {
-      ctx.fillStyle = options.selectionBackground || RENDER.foreground;
+    const selected = index >= selectionStart && index < selectionEnd;
+    const textColor = selected
+      ? options.selectionColor || colors.background || RENDER.background
+      : options.color || colors.foreground || RENDER.foreground;
+    const borderColor = selected
+      ? options.selectionBackground || colors.foreground || RENDER.foreground
+      : bitmapTextBorderColor(textColor, options, colors);
+
+    if (selected) {
+      ctx.fillStyle = options.selectionBackground || colors.foreground || RENDER.foreground;
       ctx.fillRect(cursorX - Math.floor(scale / 2), y - scale, glyphWidthPx + scale, 9 * scale);
-      ctx.fillStyle = options.selectionColor || RENDER.background;
-    } else {
-      ctx.fillStyle = options.color || RENDER.foreground;
     }
 
-    drawBitmapGlyph(ctx, glyph, cursorX, y, scale);
+    drawBitmapGlyph(ctx, glyph, cursorX, y, scale, textColor, borderColor);
     cursorX += glyphWidthPx + scale;
   }
 }
 
-function drawBitmapGlyph(ctx, glyph, x, y, scale) {
+function drawBitmapGlyph(ctx, glyph, x, y, scale, color, borderColor) {
+  if (borderColor) {
+    ctx.fillStyle = borderColor;
+    drawBitmapGlyphBorder(ctx, glyph, x, y, scale);
+  }
+
+  ctx.fillStyle = color;
   for (let row = 0; row < glyph.length; row += 1) {
     for (let col = 0; col < glyph[row].length; col += 1) {
       if (glyph[row][col] === "1") {
@@ -600,6 +615,30 @@ function drawBitmapGlyph(ctx, glyph, x, y, scale) {
       }
     }
   }
+}
+
+function drawBitmapGlyphBorder(ctx, glyph, x, y, scale) {
+  for (let row = 0; row < glyph.length; row += 1) {
+    for (let col = 0; col < glyph[row].length; col += 1) {
+      if (glyph[row][col] === "1") {
+        ctx.fillRect(x + col * scale - 1, y + row * scale - 1, scale + 2, scale + 2);
+      }
+    }
+  }
+}
+
+function bitmapTextBorderColor(textColor, options = {}, colors = {}) {
+  if (options.borderColor) {
+    return options.borderColor;
+  }
+
+  const foreground = colors.foreground || RENDER.foreground;
+  const background = colors.background || RENDER.background;
+  return sameColor(textColor, background) ? foreground : background;
+}
+
+function sameColor(a, b) {
+  return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 }
 
 function glyphWidth(character) {
@@ -735,7 +774,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       ctx,
       localPlayer,
       colors,
-      textRenderer
+      textRenderer,
+      options.hudFlash,
+      options.timeSeconds
     );
     drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
     drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
@@ -1399,11 +1440,28 @@ function isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize) {
 function drawBuildAreaOutline(ctx, asteroid, player, players, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY) {
   const validTiles = new Set();
 
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      if (isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize)) {
-        validTiles.add(tileKey(tileX, tileY));
+  for (let step = 0; step < BUILD_DIRECTION_STEPS; step += 1) {
+    const tile = firstTileAlongBuildRay({
+      widthTiles: asteroid.widthTiles,
+      heightTiles: asteroid.heightTiles,
+      tileSize,
+      startX: player.x,
+      startY: player.y,
+      angle: buildDirectionAngle(step),
+      isCandidate(tileX, tileY) {
+        return tileX >= minTileX &&
+          tileX <= maxTileX &&
+          tileY >= minTileY &&
+          tileY <= maxTileY &&
+          isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize);
+      },
+      isBlocked(tileX, tileY) {
+        return isBuildRayBlockedTile(asteroid, tileX, tileY);
       }
+    });
+
+    if (tile) {
+      validTiles.add(tileKey(tile.tileX, tile.tileY));
     }
   }
 
@@ -1424,6 +1482,12 @@ function drawBuildAreaOutline(ctx, asteroid, player, players, camera, tileSize, 
       drawBuildPixelContour(ctx, edges, outgoingEdges, edge, camera);
     }
   }
+}
+
+function isBuildRayBlockedTile(asteroid, tileX, tileY) {
+  const index = tileY * asteroid.widthTiles + tileX;
+  return isAsteroidRockTile(asteroid.tiles[index]) ||
+    !isPlayableTile(asteroid, tileX, tileY);
 }
 
 function buildInsetPixelMask(validTiles, tileSize) {
@@ -2954,7 +3018,7 @@ function drawControllerAimCursor(ctx, player, camera, cursor, colors) {
   fillSolidDisk(ctx, x, y, 1);
 }
 
-function drawPlayerHud(ctx, player, colors, textRenderer) {
+function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSeconds = 0) {
   if (!player) {
     return;
   }
@@ -2989,7 +3053,10 @@ function drawPlayerHud(ctx, player, colors, textRenderer) {
   });
   drawHudHealthBars(ctx, x + 22, hpY + 1, contentRight - (x + 22), 5, hp, maxHp, healthBars, colors);
 
-  drawHudResource(ctx, "ROCK", resources.rock || 0, contentX, contentRight, rowY, textRenderer, colors);
+  drawHudResource(ctx, "ROCK", resources.rock || 0, contentX, contentRight, rowY, textRenderer, colors, {
+    flash: hudFlash.rock,
+    timeSeconds
+  });
   drawHudResource(ctx, "ORE", resources.ore || 0, contentX, contentRight, rowY + rowStep, textRenderer, colors);
   drawHudResource(ctx, "DIAMOND", resources.diamond || 0, contentX, contentRight, rowY + rowStep * 2, textRenderer, colors);
 }
@@ -3242,9 +3309,14 @@ function drawHudHealthBars(ctx, x, y, width, height, health, maxHealth, bars, co
   }
 }
 
-function drawHudResource(ctx, label, value, labelX, countRight, y, textRenderer, colors) {
+function drawHudResource(ctx, label, value, labelX, countRight, y, textRenderer, colors, options = {}) {
   const count = String(Math.min(ENGINE.player.maxResourceAmount, Math.max(0, Math.floor(value))));
-  const countWidth = textRenderer.measure(count, { fontSize: 8 });
+  const textOptions = { fontSize: 8 };
+  const countWidth = textRenderer.measure(count, textOptions);
+  const flashOff = options.flash && Math.floor((options.timeSeconds || 0) * 14) % 2 === 0;
+  if (flashOff) {
+    return;
+  }
 
   textRenderer.draw(ctx, label, labelX, y, {
     fontSize: 8,

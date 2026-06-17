@@ -1,4 +1,5 @@
 import { ENGINE, RENDER } from "./constants.js";
+import { firstTileAlongBuildRay } from "./build.js";
 import {
   ASTEROID_TILE,
   blockingTilesAlongSegment,
@@ -275,6 +276,10 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
 
   if (tileOverlapsAlivePlayer(arena, asteroid, tileX, tileY)) {
     return { ok: false, reason: "build_occupied" };
+  }
+
+  if (!tileIsClosestBuildCandidate(arena, player, tileX, tileY)) {
+    return { ok: false, reason: "build_obscured" };
   }
 
   const cost = ENGINE.build.wallCostRock;
@@ -1804,6 +1809,47 @@ function tileWithinBuildRadius(player, asteroid, tileX, tileY) {
   const centerX = (tileX + 0.5) * tileSize;
   const centerY = (tileY + 0.5) * tileSize;
   return Math.hypot(centerX - player.x, centerY - player.y) <= ENGINE.build.radiusTiles * tileSize;
+}
+
+function tileIsClosestBuildCandidate(arena, player, tileX, tileY) {
+  const asteroid = arena.asteroid;
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const centerX = (tileX + 0.5) * tileSize;
+  const centerY = (tileY + 0.5) * tileSize;
+  const angle = Math.atan2(centerY - player.y, centerX - player.x);
+  const closest = firstTileAlongBuildRay({
+    widthTiles: asteroid.widthTiles,
+    heightTiles: asteroid.heightTiles,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    angle,
+    isCandidate(candidateX, candidateY) {
+      return isServerBuildCandidate(arena, player, candidateX, candidateY);
+    },
+    isBlocked(candidateX, candidateY) {
+      return isServerBuildRayBlocked(arena, candidateX, candidateY);
+    }
+  });
+
+  return closest?.tileX === tileX && closest?.tileY === tileY;
+}
+
+function isServerBuildCandidate(arena, player, tileX, tileY) {
+  const asteroid = arena.asteroid;
+  const index = tileY * asteroid.widthTiles + tileX;
+  return tileWithinBuildRadius(player, asteroid, tileX, tileY) &&
+    isPlayableCell(asteroid, index) &&
+    asteroid.tiles[index] === ASTEROID_TILE.empty &&
+    stormStateAt(arena, index) === STORM_STATE.safe &&
+    !tileOverlapsAlivePlayer(arena, asteroid, tileX, tileY);
+}
+
+function isServerBuildRayBlocked(arena, tileX, tileY) {
+  const asteroid = arena.asteroid;
+  const index = tileY * asteroid.widthTiles + tileX;
+  return isAsteroidRockTile(asteroid.tiles[index]) ||
+    !isPlayableCell(asteroid, index);
 }
 
 function tileOverlapsAlivePlayer(arena, asteroid, tileX, tileY) {

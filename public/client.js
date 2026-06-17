@@ -1,4 +1,5 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
+import { firstTileAlongBuildRay } from "/shared/build.js";
 import {
   ASTEROID_TILE,
   blockingTilesAlongSegment,
@@ -50,6 +51,7 @@ const CONTROLLER_HUCK_TARGET_RAY_MULTIPLIER = 2.5;
 const CONTROLLER_UPGRADE_NAV_INITIAL_DELAY_SECONDS = 0.28;
 const CONTROLLER_UPGRADE_NAV_REPEAT_SECONDS = 0.11;
 const CONTROLLER_DPAD_NAV_THRESHOLD = 0.5;
+const HUD_RESOURCE_FLASH_SECONDS = 0.55;
 const MENU_PLAYER_ID = "menu-player";
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
@@ -139,6 +141,9 @@ const state = {
   lastRoomId: null,
   inputSeq: 0,
   nextHuckRockThunkAtSeconds: 0,
+  hudFlash: {
+    rockUntilSeconds: 0
+  },
   mouse: {
     x: 0,
     y: 0,
@@ -638,6 +643,7 @@ function draw(now = 0) {
     controllerActive: state.controller.connected,
     controllerCursor: controllerCursorRenderState(),
     controllerAimCursor: controllerAimCursorRenderState(),
+    hudFlash: hudFlashRenderState(timeSeconds),
     theme: state.theme,
     timeSeconds
   });
@@ -659,6 +665,7 @@ function updateControllerState(timeSeconds) {
   state.controller.mining = input.buttons.mining;
   state.controller.huckRock = input.buttons.huckRock;
   state.controller.selectPressed = input.pressed.select;
+  state.controller.resetPressed = input.pressed.reset;
   state.controller.buildPressed = input.pressed.build;
   state.controller.upgradesPressed = input.pressed.upgrades;
 
@@ -685,6 +692,7 @@ function updateControllerState(timeSeconds) {
 
   if (
     input.pressed.select ||
+    input.pressed.reset ||
     input.pressed.build ||
     input.pressed.upgrades ||
     input.pressed.mining ||
@@ -701,6 +709,18 @@ function handleControllerActions(input) {
     return;
   }
 
+  if (input.pressed.reset) {
+    if (state.upgrades.active) {
+      closeUpgrades();
+      return;
+    }
+
+    if (state.build.active) {
+      state.build.active = false;
+      return;
+    }
+  }
+
   if (input.pressed.upgrades) {
     toggleUpgrades({ controller: true });
   }
@@ -709,17 +729,19 @@ function handleControllerActions(input) {
     toggleBuildMode();
   }
 
-  if (!input.pressed.select) {
-    return;
-  }
-
-  if (state.build.active) {
+  if ((input.pressed.select || input.pressed.mining) && state.build.active) {
     buildWallAtMouse();
     return;
   }
 
-  if (state.upgrades.active) {
+  if (input.pressed.select && state.upgrades.active) {
     buySelectedUpgrade();
+    return;
+  }
+
+  const cursorActivatePressed = input.pressed.select ||
+    (state.controller.cursor.visible && input.pressed.mining);
+  if (!cursorActivatePressed) {
     return;
   }
 
@@ -795,6 +817,7 @@ function controllerAimCursorRenderState() {
     physicalMiningInputActive() ||
     state.controller.cursor.visible ||
     state.upgrades.active ||
+    state.build.active ||
     state.chat.active
   ) {
     return null;
@@ -808,6 +831,16 @@ function controllerAimCursorRenderState() {
     angle: state.controller.aimAngle,
     distance: playerMiningRayRange(player)
   };
+}
+
+function hudFlashRenderState(timeSeconds) {
+  return {
+    rock: timeSeconds < state.hudFlash.rockUntilSeconds
+  };
+}
+
+function flashRockHud() {
+  state.hudFlash.rockUntilSeconds = performance.now() / 1000 + HUD_RESOURCE_FLASH_SECONDS;
 }
 
 function createTalkInput() {
@@ -1159,6 +1192,7 @@ function createControllerState() {
     mining: false,
     huckRock: false,
     selectPressed: false,
+    resetPressed: false,
     buildPressed: false,
     upgradesPressed: false,
     lastTimeSeconds: 0,
@@ -3290,6 +3324,7 @@ function huckRockInputAllowed() {
   if (roomState === "active") {
     const player = localPlayerFromSnapshot();
     if ((player?.resources?.rock || 0) < (ENGINE.huckRock.costRock || 0)) {
+      flashRockHud();
       return false;
     }
   }
@@ -3318,7 +3353,7 @@ function physicalMiningInputActive() {
 }
 
 function controllerMiningActive() {
-  return state.controller.connected && state.controller.mining;
+  return state.controller.connected && state.controller.mining && !state.controller.cursor.visible;
 }
 
 function controllerAimTargetForPlayer(player) {
@@ -3484,7 +3519,7 @@ function controllerShipMoveVector() {
   }
 
   return state.controller.cursor.visible
-    ? state.controller.leftStick
+    ? { x: 0, y: 0 }
     : state.controller.move;
 }
 
@@ -4737,6 +4772,15 @@ function buySelectedUpgrade() {
 }
 
 function buildWallAtMouse() {
+  const player = predictedLocalPlayer() || localPlayerFromSnapshot();
+  if (
+    state.build.active &&
+    state.room?.state === "active" &&
+    (player?.resources?.rock || 0) < ENGINE.build.wallCostRock
+  ) {
+    flashRockHud();
+  }
+
   const target = buildTargetFromMouse();
   if (!target?.valid || !socket.connected) {
     return;
@@ -4763,49 +4807,79 @@ function buildTargetFromMouse() {
     return null;
   }
 
-  const tileSize = state.asteroid.tileSize || 16;
-  const worldPoint = buildWorldPointForPlayer(player);
-  if (!worldPoint) {
+  const angle = buildAngleForPlayer(player);
+  if (!Number.isFinite(angle)) {
     return null;
   }
 
-  const tileX = Math.floor(worldPoint.x / tileSize);
-  const tileY = Math.floor(worldPoint.y / tileSize);
+  const tileSize = state.asteroid.tileSize || 16;
+  const snappedTile = closestClientBuildTile(player, angle, tileSize);
+  if (!snappedTile) {
+    return null;
+  }
+
+  const { tileX, tileY } = snappedTile;
   const index = tileY * state.asteroid.widthTiles + tileX;
-  const inBounds = tileX >= 0 &&
-    tileY >= 0 &&
-    tileX < state.asteroid.widthTiles &&
-    tileY < state.asteroid.heightTiles;
-  const inRange = inBounds && tileWithinBuildRadius(player, tileX, tileY, tileSize);
-  const empty = inBounds && state.asteroid.tiles[index] === ASTEROID_TILE.empty;
-  const playable = inBounds && isPlayableBuildIndex(index);
-  const stormSafe = inBounds && !isStormBuildIndex(index);
-  const clear = inBounds && !tileOverlapsVisiblePlayer(tileX, tileY, tileSize);
   const affordable = (player.resources?.rock || 0) >= ENGINE.build.wallCostRock;
 
   return {
     tileX,
     tileY,
     index,
-    inRange,
-    empty,
-    playable,
-    clear,
+    inRange: true,
+    empty: true,
+    playable: true,
+    clear: true,
     affordable,
-    valid: inRange && empty && playable && stormSafe && clear && affordable
+    valid: affordable
   };
 }
 
-function buildWorldPointForPlayer(player) {
-  if (state.controller.connected && (state.controller.aimActive || state.controller.huckRock)) {
-    return controllerAimTargetForPlayer(player);
+function buildAngleForPlayer(player) {
+  if (state.controller.connected && state.build.active) {
+    return state.controller.aimAngle;
   }
 
   if (!isMouseInPhysicalViewport()) {
     return null;
   }
 
-  return lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
+  const worldPoint = lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
+  const dx = worldPoint.x - player.x;
+  const dy = worldPoint.y - player.y;
+  return dx !== 0 || dy !== 0 ? Math.atan2(dy, dx) : null;
+}
+
+function closestClientBuildTile(player, angle, tileSize) {
+  return firstTileAlongBuildRay({
+    widthTiles: state.asteroid.widthTiles,
+    heightTiles: state.asteroid.heightTiles,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    angle,
+    isCandidate(tileX, tileY) {
+      return isClientBuildCandidate(player, tileX, tileY, tileSize);
+    },
+    isBlocked(tileX, tileY) {
+      return isClientBuildRayBlocked(tileX, tileY);
+    }
+  });
+}
+
+function isClientBuildCandidate(player, tileX, tileY, tileSize) {
+  const index = tileY * state.asteroid.widthTiles + tileX;
+  return tileWithinBuildRadius(player, tileX, tileY, tileSize) &&
+    state.asteroid.tiles[index] === ASTEROID_TILE.empty &&
+    isPlayableBuildIndex(index) &&
+    !isStormBuildIndex(index) &&
+    !tileOverlapsVisiblePlayer(tileX, tileY, tileSize);
+}
+
+function isClientBuildRayBlocked(tileX, tileY) {
+  const index = tileY * state.asteroid.widthTiles + tileX;
+  return isAsteroidRockTile(state.asteroid.tiles[index]) ||
+    !isPlayableBuildIndex(index);
 }
 
 function tileWithinBuildRadius(player, tileX, tileY, tileSize) {
