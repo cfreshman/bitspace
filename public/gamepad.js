@@ -4,11 +4,13 @@ const BUTTON_THRESHOLD = 0.5;
 
 export function createGamepadControls() {
   let previousButtons = defaultButtons();
+  let boundGamepadIndex = null;
 
   return {
     update() {
-      const gamepad = firstUsableGamepad();
+      const gamepad = selectedGamepad(boundGamepadIndex);
       if (!gamepad) {
+        boundGamepadIndex = null;
         previousButtons = defaultButtons();
         return {
           connected: false,
@@ -21,6 +23,7 @@ export function createGamepadControls() {
           pressed: defaultButtons()
         };
       }
+      boundGamepadIndex = gamepad.index;
 
       const leftStick = axisPair(gamepad, 0, 1);
       const rightStick = axisPair(gamepad, 2, 3);
@@ -61,9 +64,27 @@ export function createGamepadControls() {
   };
 }
 
-function firstUsableGamepad() {
+function selectedGamepad(boundGamepadIndex) {
   const gamepads = navigator.getGamepads?.() || [];
-  return Array.from(gamepads).find((gamepad) => gamepad?.connected) || null;
+  const bound = Number.isInteger(boundGamepadIndex) ? gamepads[boundGamepadIndex] : null;
+  if (bound?.connected) {
+    return bound;
+  }
+
+  return Array.from(gamepads).find((gamepad) => gamepad?.connected && gamepadHasInput(gamepad)) || null;
+}
+
+function gamepadHasInput(gamepad) {
+  const axesActive = Array.from(gamepad.axes || []).some((axis) => applyDeadzone(axis) !== 0);
+  const buttonsActive = Array.from(gamepad.buttons || []).some((button, index) => {
+    if (!button) {
+      return false;
+    }
+
+    return button.pressed || Number(button.value || 0) >= triggerThreshold(index);
+  });
+
+  return axesActive || buttonsActive;
 }
 
 function axisPair(gamepad, xIndex, yIndex) {
