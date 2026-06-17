@@ -57,7 +57,9 @@ const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 76;
 const THEME_ASTEROID_GAP = 24;
 const THEME_PRESETS = Object.freeze([
-  { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
+  // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
+  // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
+  { id: "blue", label: "BLUE", background: "#231f33", foreground: "#74acef" },
   { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff", backing: "#100810" },
   { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
   { id: "purple", label: "PURPLE", background: "#3d2945", foreground: "#65ceff" },
