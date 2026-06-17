@@ -2330,9 +2330,18 @@ function activateTalk() {
   state.upgrades.active = false;
   state.mouse.down = false;
   keys.clear();
-  talkInput.value = "";
+  talkInput.value = currentTalkText();
   talkInput.focus({ preventScroll: true });
+  talkInput.setSelectionRange(0, talkInput.value.length);
   syncTalkDraft();
+}
+
+function currentTalkText() {
+  if (isReadyMenu()) {
+    return state.menu.player?.talk || "";
+  }
+
+  return localPlayerFromSnapshot()?.talk || "";
 }
 
 function activateUpgrades() {
