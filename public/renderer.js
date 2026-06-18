@@ -770,16 +770,20 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   endWorldViewport(ctx);
 
   if (options.room?.state === "active") {
-    drawPlayerHud(
-      ctx,
-      localPlayer,
-      colors,
-      textRenderer,
-      options.hudFlash,
-      options.timeSeconds
-    );
-    drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
-    drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
+    if (localPlayer && !localPlayer.alive) {
+      drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer);
+    } else {
+      drawPlayerHud(
+        ctx,
+        localPlayer,
+        colors,
+        textRenderer,
+        options.hudFlash,
+        options.timeSeconds
+      );
+      drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
+      drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
+    }
   }
   drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
   drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
@@ -815,12 +819,11 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
   }
 
   if (state === "active" && localPlayer && !localPlayer.alive) {
-    drawSpectatorOverlay(ctx, options, localPlayer, colors, textRenderer);
     return;
   }
 
   if (state === "ended") {
-    drawEndedOverlay(ctx, room, options, colors, textRenderer);
+    drawEndedHud(ctx, room, options, colors, textRenderer);
   }
 }
 
@@ -876,36 +879,45 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
   drawRoomButtons(ctx, options, colors, textRenderer);
 }
 
-function drawSpectatorOverlay(ctx, options, localPlayer, colors, textRenderer) {
-  const watchedId = localPlayer.killedById || options.cameraPlayerId;
-  const watched = options.snapshot?.players?.find((player) => player.id === watchedId);
-  const label = watched?.name ? `WATCHING ${watched.name}` : "WATCHING";
-  const panel = { x: Math.round((ctx.width - 208) / 2), y: 122, width: 208, height: 70 };
+function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
+  const panel = { x: 8, y: 8, width: 132, height: 26 };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, "ELIMINATED", ctx.width / 2, panel.y + 13, {
-    fontSize: 10,
+  drawCenteredText(ctx, textRenderer, "ELIMINATED", panel.x + panel.width / 2, panel.y + 9, {
+    fontSize: 8,
     color: colors.foreground
   });
-  drawCenteredText(ctx, textRenderer, label, ctx.width / 2, panel.y + 36, {
-    fontSize: 8,
-    color: colors.foreground,
-    width: panel.width - 12
-  });
-  drawRoomButtons(ctx, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
 }
 
-function drawEndedOverlay(ctx, room, options, colors, textRenderer) {
+function drawEndedHud(ctx, room, options, colors, textRenderer) {
   const won = room.winnerId && room.winnerId === options.playerId;
   const title = won ? "YOU WON!" : "GAME OVER";
-  const panel = { x: Math.round((ctx.width - 192) / 2), y: 128, width: 192, height: 54 };
+  const panel = { x: 8, y: 8, width: 132, height: 26 };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, title, ctx.width / 2, panel.y + 19, {
-    fontSize: 10,
+  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + 9, {
+    fontSize: 8,
     color: colors.foreground
   });
-  drawRoomButtons(ctx, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+}
+
+function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
+  if (options.controllerActive) {
+    drawControllerHudAction(ctx, "faceRight", "LEAVE", x, y, colors, textRenderer);
+    return;
+  }
+
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+
+  textRenderer.draw(ctx, "ESC - LEAVE", x, y + 2, {
+    ...textOptions,
+    width: 96
+  });
 }
 
 function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds = 0) {
@@ -2696,6 +2708,21 @@ function drawMenuTitleEntity(ctx, entity, camera, colors, textRenderer) {
     ...textOptions,
     width: width + 2
   });
+
+  const subtitle = String(entity.subtitle || "").toUpperCase();
+  if (!subtitle) {
+    return;
+  }
+
+  const subtitleOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+  const subtitleWidth = textRenderer.measure(subtitle, subtitleOptions);
+  textRenderer.draw(ctx, subtitle, Math.round(screen.x - subtitleWidth / 2), Math.round(screen.y + 22), {
+    ...subtitleOptions,
+    width: subtitleWidth + 2
+  });
 }
 
 function drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer) {
@@ -3208,8 +3235,11 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
 }
 
 function drawControllerHudAction(ctx, buttonPosition, label, x, y, colors, textRenderer) {
-  drawControllerFaceButtons(ctx, x + 7, y + 5, buttonPosition, colors);
-  textRenderer.draw(ctx, label, x + 19, y, {
+  const rowCenterY = y + 5;
+  const labelY = y + 2;
+
+  drawControllerFaceButtons(ctx, x + 7, rowCenterY, buttonPosition, colors);
+  textRenderer.draw(ctx, label, x + 19, labelY, {
     fontSize: 8,
     color: colors.foreground,
     width: 120

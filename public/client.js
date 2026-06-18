@@ -62,6 +62,7 @@ const MENU_BUTTON_WIDTH = 112;
 const MENU_BUTTON_WIDE_WIDTH = 128;
 const MENU_BUTTON_HEIGHT = 32;
 const MENU_BUTTON_GAP = 24;
+const MENU_ESRB_SUBTITLE = "online interactions not rated by the ESRB";
 const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 76;
 const THEME_ASTEROID_GAP = 24;
@@ -91,10 +92,12 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
   rowInset: 8,
   rowHitPadding: 2
 });
-const ROOM_BUTTONS = Object.freeze({
-  ready: { x: 132, y: 216, width: 120, height: 28 },
-  leaveSpectating: { x: 132, y: 330, width: 120, height: 28 },
-  leaveEnded: { x: 132, y: 330, width: 120, height: 28 }
+const TERMINAL_LEAVE_ACTION = Object.freeze({
+  x: 10,
+  eliminatedY: 41,
+  endedY: 41,
+  width: 98,
+  height: 13
 });
 const canvas = document.querySelector("#scene");
 const renderer = createRenderer(canvas);
@@ -371,6 +374,16 @@ window.addEventListener("keydown", (event) => {
   }
 
   if (state.chat.active) {
+    return;
+  }
+
+  if (
+    event.code === "Escape" &&
+    !event.repeat &&
+    canLeaveWithControllerReset()
+  ) {
+    event.preventDefault();
+    leaveCurrentRoom();
     return;
   }
 
@@ -714,6 +727,11 @@ function handleControllerActions(input) {
   }
 
   if (input.pressed.reset) {
+    if (canLeaveWithControllerReset()) {
+      leaveCurrentRoom();
+      return;
+    }
+
     if (state.upgrades.active) {
       closeUpgrades();
       return;
@@ -759,6 +777,10 @@ function handleControllerActions(input) {
 
 function controllerCursorShouldShow() {
   if (!state.controller.connected || state.chat.active || isReadyMenu()) {
+    return false;
+  }
+
+  if (canLeaveWithControllerReset()) {
     return false;
   }
 
@@ -2279,7 +2301,7 @@ function menuEntities() {
   }
 
   return [
-    menuTitle("menu-title", "BITSPACE", center.x, center.y - 114),
+    menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, center.y - 92),
     menuButton("menu-ready", "ready", "READY", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuHint("menu-controls", menuControlHintRows(), center.x, top + MENU_BUTTON_HEIGHT + 30)
@@ -2303,11 +2325,12 @@ function menuControlHintRows() {
   ];
 }
 
-function menuTitle(id, label, x, y) {
+function menuTitle(id, label, subtitle, x, y) {
   return {
     id,
     type: "menuTitle",
     label,
+    subtitle,
     x,
     y
   };
@@ -4578,10 +4601,23 @@ function handleRoomUiClick(buttonId) {
     return;
   }
 
-  if (buttonId === "leaveSpectating" || buttonId === "leaveEnded") {
-    forgetRegisteredRoom();
-    socket.emit(CLIENT_EVENTS.leave);
+  if (buttonId === "leaveSpectating" || buttonId === "leaveEnded" || buttonId === "terminalLeave") {
+    leaveCurrentRoom();
   }
+}
+
+function canLeaveWithControllerReset() {
+  return state.room?.state === "ended" ||
+    (state.room?.state === "active" && isLocalPlayerEliminated());
+}
+
+function leaveCurrentRoom() {
+  if (!socket.connected) {
+    return;
+  }
+
+  forgetRegisteredRoom();
+  socket.emit(CLIENT_EVENTS.leave);
 }
 
 function requestRoomReattach(now = performance.now(), silent = true) {
@@ -4665,27 +4701,20 @@ function forgetRegisteredRoom() {
 }
 
 function activeRoomButtons() {
-  const room = state.room;
-  if (!room || room.state === "menu") {
-    return {};
-  }
-
-  if (room.state === "active" && isLocalPlayerEliminated()) {
-    return { leaveSpectating: centeredRoomButton(ROOM_BUTTONS.leaveSpectating) };
-  }
-
-  if (room.state === "ended") {
-    return { leaveEnded: centeredRoomButton(ROOM_BUTTONS.leaveEnded) };
+  if (canLeaveWithControllerReset()) {
+    return { terminalLeave: terminalLeaveActionRect() };
   }
 
   return {};
 }
 
-function centeredRoomButton(rect) {
-  const frame = framebufferSize();
+function terminalLeaveActionRect() {
+  const ended = state.room?.state === "ended";
   return {
-    ...rect,
-    x: Math.round((frame.width - rect.width) / 2)
+    x: TERMINAL_LEAVE_ACTION.x,
+    y: ended ? TERMINAL_LEAVE_ACTION.endedY : TERMINAL_LEAVE_ACTION.eliminatedY,
+    width: TERMINAL_LEAVE_ACTION.width,
+    height: TERMINAL_LEAVE_ACTION.height
   };
 }
 
