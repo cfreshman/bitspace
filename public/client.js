@@ -94,10 +94,12 @@ const THEME_PRESETS = Object.freeze([
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
-  width: 260,
+  padding: 8,
   rowTopOffset: 24,
   rowHeight: 14,
   rowInset: 8,
+  labelOffset: 14,
+  columnGap: 8,
   rowHitPadding: 2
 });
 const TERMINAL_LEAVE_ACTION = Object.freeze({
@@ -5164,9 +5166,95 @@ function upgradeRowsRect() {
   return {
     x: UPGRADE_MENU_LAYOUT.x + UPGRADE_MENU_LAYOUT.rowInset,
     y: UPGRADE_MENU_LAYOUT.y + UPGRADE_MENU_LAYOUT.rowTopOffset,
-    width: UPGRADE_MENU_LAYOUT.width - UPGRADE_MENU_LAYOUT.rowInset * 2,
+    width: upgradeMenuRowWidth(),
     height: UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight
   };
+}
+
+function upgradeMenuRowWidth() {
+  return approximateUpgradeMenuWidth() - UPGRADE_MENU_LAYOUT.rowInset * 2;
+}
+
+function approximateUpgradeMenuWidth() {
+  const labelWidth = Math.max(...UPGRADE_DEFINITIONS.map((definition) =>
+    approximateBitmapTextWidth(definition.label)
+  ));
+  const levelWidth = Math.max(...UPGRADE_DEFINITIONS.map((definition) =>
+    approximateBitmapTextWidth(`0/${definition.maxLevel}`)
+  ));
+  const rowWidth = UPGRADE_MENU_LAYOUT.labelOffset +
+    labelWidth +
+    UPGRADE_MENU_LAYOUT.columnGap +
+    levelWidth;
+  const detailWidth = Math.max(...approximateUpgradeMenuDetailLines().map(approximateBitmapTextWidth));
+  const titleWidth = approximateBitmapTextWidth("UPGRADES");
+
+  return Math.ceil(Math.max(
+    titleWidth + UPGRADE_MENU_LAYOUT.padding * 2,
+    rowWidth + UPGRADE_MENU_LAYOUT.rowInset * 2,
+    detailWidth + UPGRADE_MENU_LAYOUT.padding * 2
+  ));
+}
+
+function approximateUpgradeMenuDetailLines() {
+  const lines = new Set([
+    "COST: MAX LEVEL",
+    "MAXED",
+    "NEED RESOURCES",
+    "CLICK BUY",
+    "SELECT BUY"
+  ]);
+
+  for (const definition of UPGRADE_DEFINITIONS) {
+    lines.add(`CURRENT: ${definition.baseStatText || "BASE"}`);
+    lines.add("NEXT: MAX LEVEL");
+    for (const level of definition.levels || []) {
+      lines.add(`CURRENT: ${level.effectText || definition.baseStatText || "BASE"}`);
+      lines.add(`NEXT: ${level.effectText || "MAX LEVEL"}`);
+      lines.add(`COST: ${approximateUpgradeCostText(level.cost)}`);
+    }
+  }
+
+  return Array.from(lines);
+}
+
+function approximateUpgradeCostText(cost) {
+  if (!cost) {
+    return "MAX";
+  }
+
+  const parts = [];
+  if (cost.rock) {
+    parts.push(`${cost.rock} ROCK`);
+  }
+  if (cost.ore) {
+    parts.push(`${cost.ore} ORE`);
+  }
+  if (cost.diamond) {
+    parts.push(`${cost.diamond} DIAMOND`);
+  }
+  return parts.join(" ");
+}
+
+function approximateBitmapTextWidth(text) {
+  const characters = String(text).toUpperCase();
+  let width = 0;
+
+  for (const character of characters) {
+    width += approximateGlyphWidth(character) + 1;
+  }
+
+  return Math.max(0, width - 1);
+}
+
+function approximateGlyphWidth(character) {
+  if (character === " ") {
+    return 3;
+  }
+  if (character === "I" || character === "1" || character === "/" || character === ":") {
+    return 3;
+  }
+  return 5;
 }
 
 function upgradeRowRect(index) {

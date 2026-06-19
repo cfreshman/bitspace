@@ -9,7 +9,7 @@ const CORE_UPGRADE_COSTS = Object.freeze([
 export const UPGRADE_DEFINITIONS = Object.freeze([
   {
     id: "speed",
-    label: "SPEED",
+    label: "ENGINES",
     code: "SPEED",
     maxLevel: 5,
     description: "SHIP SPEED",
@@ -18,50 +18,50 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     levels: Object.freeze([
       {
         cost: CORE_UPGRADE_COSTS[0],
-        effectText: "+45% SPEED",
+        effectText: "145% SPEED",
         effects: { thrustMultiplier: 1.45, thrusterParticleMultiplier: 1.35 }
       },
       {
         cost: CORE_UPGRADE_COSTS[1],
-        effectText: "+75% SPEED",
+        effectText: "175% SPEED",
         effects: { thrustMultiplier: 1.75, thrusterParticleMultiplier: 1.55 }
       },
       {
         cost: CORE_UPGRADE_COSTS[2],
-        effectText: "+105% SPEED",
+        effectText: "205% SPEED",
         effects: { thrustMultiplier: 2.05, thrusterParticleMultiplier: 1.75 }
       },
       {
         cost: CORE_UPGRADE_COSTS[3],
-        effectText: "+135% SPEED",
+        effectText: "235% SPEED",
         effects: { thrustMultiplier: 2.35, thrusterParticleMultiplier: 1.95 }
       },
       {
         cost: CORE_UPGRADE_COSTS[4],
-        effectText: "+170% SPEED",
+        effectText: "270% SPEED",
         effects: { thrustMultiplier: 2.7, thrusterParticleMultiplier: 2.2 }
       }
     ])
   },
   {
     id: "range",
-    label: "RANGE",
+    label: "MINING RANGE",
     code: "RANGE",
     maxLevel: 5,
     description: "MINING RAY REACHES FARTHER",
     baseStatText: "100% RAY RANGE",
     visual: "Mining ray endpoint reaches farther.",
     levels: Object.freeze([
-      { cost: CORE_UPGRADE_COSTS[0], effectText: "+25% RAY RANGE", effects: { rayLengthBonus: 7 } },
-      { cost: CORE_UPGRADE_COSTS[1], effectText: "+61% RAY RANGE", effects: { rayLengthBonus: 17 } },
-      { cost: CORE_UPGRADE_COSTS[2], effectText: "+100% RAY RANGE", effects: { rayLengthBonus: 28 } },
-      { cost: CORE_UPGRADE_COSTS[3], effectText: "+150% RAY RANGE", effects: { rayLengthBonus: 42 } },
-      { cost: CORE_UPGRADE_COSTS[4], effectText: "+221% RAY RANGE", effects: { rayLengthBonus: 62 } }
+      { cost: CORE_UPGRADE_COSTS[0], effectText: "125% RAY RANGE", effects: { rayLengthBonus: 7 } },
+      { cost: CORE_UPGRADE_COSTS[1], effectText: "161% RAY RANGE", effects: { rayLengthBonus: 17 } },
+      { cost: CORE_UPGRADE_COSTS[2], effectText: "200% RAY RANGE", effects: { rayLengthBonus: 28 } },
+      { cost: CORE_UPGRADE_COSTS[3], effectText: "250% RAY RANGE", effects: { rayLengthBonus: 42 } },
+      { cost: CORE_UPGRADE_COSTS[4], effectText: "321% RAY RANGE", effects: { rayLengthBonus: 62 } }
     ])
   },
   {
     id: "power",
-    label: "POWER",
+    label: "RAY POWER",
     code: "POWER",
     maxLevel: 5,
     description: "FASTER MINING AND MORE DAMAGE",
@@ -70,7 +70,7 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     levels: Object.freeze([
       {
         cost: CORE_UPGRADE_COSTS[0],
-        effectText: "+30% RAY POWER",
+        effectText: "130% RAY POWER",
         effects: {
           miningPowerMultiplier: 1.3,
           rayDamageMultiplier: 1.3,
@@ -80,7 +80,7 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
       },
       {
         cost: CORE_UPGRADE_COSTS[1],
-        effectText: "+70% RAY POWER",
+        effectText: "170% RAY POWER",
         effects: {
           miningPowerMultiplier: 1.7,
           rayDamageMultiplier: 1.7,
@@ -90,7 +90,7 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
       },
       {
         cost: CORE_UPGRADE_COSTS[2],
-        effectText: "+125% RAY POWER",
+        effectText: "225% RAY POWER",
         effects: {
           miningPowerMultiplier: 2.25,
           rayDamageMultiplier: 2.25,
@@ -100,7 +100,7 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
       },
       {
         cost: CORE_UPGRADE_COSTS[3],
-        effectText: "+200% RAY POWER",
+        effectText: "300% RAY POWER",
         effects: {
           miningPowerMultiplier: 3,
           rayDamageMultiplier: 3,
@@ -110,7 +110,7 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
       },
       {
         cost: CORE_UPGRADE_COSTS[4],
-        effectText: "+300% RAY POWER",
+        effectText: "400% RAY POWER",
         effects: {
           miningPowerMultiplier: 4,
           rayDamageMultiplier: 4,
@@ -118,19 +118,6 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
           miningParticleMultiplier: 2.15
         }
       }
-    ])
-  },
-  {
-    id: "beams",
-    label: "SIDE RAYS",
-    code: "SIDE",
-    maxLevel: 2,
-    description: "ADDS SIDE MINING RAYS",
-    baseStatText: "0 HALF-POWER SIDE RAYS",
-    visual: "Side emitters add independent half-power rays.",
-    levels: Object.freeze([
-      { cost: Object.freeze({ diamond: 3 }), effectText: "1 HALF-POWER SIDE RAY", effects: { miningRayCount: 2 } },
-      { cost: Object.freeze({ diamond: 3 }), effectText: "2 HALF-POWER SIDE RAYS", effects: { miningRayCount: 3 } }
     ])
   },
   {
@@ -151,7 +138,7 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
   },
   {
     id: "repair",
-    label: "REPAIR",
+    label: "REGENERATION",
     code: "REPAIR",
     maxLevel: 4,
     description: "SLOW HP REGEN AFTER DAMAGE",
@@ -162,6 +149,19 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
       { cost: CORE_UPGRADE_COSTS[2], effectText: "1 HP BAR PER 30S AFTER 5S", effects: { healthRechargePerSecond: 100 / 30 } },
       { cost: CORE_UPGRADE_COSTS[3], effectText: "1 HP BAR PER 20S AFTER 5S", effects: { healthRechargePerSecond: 5 } },
       { cost: CORE_UPGRADE_COSTS[4], effectText: "1 HP BAR PER 15S AFTER 5S", effects: { healthRechargePerSecond: 100 / 15 } }
+    ])
+  },
+  {
+    id: "beams",
+    label: "AUXILIARY RAYS",
+    code: "SIDE",
+    maxLevel: 2,
+    description: "ADDS SIDE MINING RAYS",
+    baseStatText: "NONE",
+    visual: "Side emitters add independent half-power rays.",
+    levels: Object.freeze([
+      { cost: Object.freeze({ diamond: 3 }), effectText: "1 HALF-POWER SIDE RAY", effects: { miningRayCount: 2 } },
+      { cost: Object.freeze({ diamond: 3 }), effectText: "2 HALF-POWER SIDE RAYS", effects: { miningRayCount: 3 } }
     ])
   }
 ]);

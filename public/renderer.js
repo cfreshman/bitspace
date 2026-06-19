@@ -83,14 +83,15 @@ const asteroidBoundaryContourCache = new WeakMap();
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
-  width: 260,
   padding: 8,
   titleTop: 8,
   rowTopOffset: 24,
   rowHeight: 14,
   rowInset: 8,
+  labelOffset: 14,
   rowHighlightPadding: 2,
   rowTextHeight: 7,
+  columnGap: 8,
   separatorGap: 6,
   detailTopGap: 7,
   detailLineHeight: 10,
@@ -860,10 +861,12 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
       ? `NEED ${minPlayers} PLAYERS`
       : `START ${formatClock(secondsLeft)}`;
 
-  drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer);
   if (room.countdownArmed) {
     drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer);
+    return;
   }
+
+  drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer);
 }
 
 function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer) {
@@ -3274,7 +3277,8 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
-  const width = UPGRADE_MENU_LAYOUT.width;
+  const metrics = upgradeMenuMetrics(textRenderer, controllerActive);
+  const width = metrics.width;
   const height = upgradeMenuHeight();
   const x = UPGRADE_MENU_LAYOUT.x;
   const y = UPGRADE_MENU_LAYOUT.y;
@@ -3296,9 +3300,11 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
   });
 
   const rowX = x + UPGRADE_MENU_LAYOUT.rowInset;
-  const rowRight = x + width - UPGRADE_MENU_LAYOUT.rowInset;
+  const rowRight = rowX + metrics.rowWidth;
   const rowTop = y + UPGRADE_MENU_LAYOUT.rowTopOffset;
   const rowHeight = UPGRADE_MENU_LAYOUT.rowHeight;
+  const labelX = rowX + UPGRADE_MENU_LAYOUT.labelOffset;
+  const levelRight = rowRight;
 
   for (let index = 0; index < UPGRADE_DEFINITIONS.length; index += 1) {
     const definition = UPGRADE_DEFINITIONS[index];
@@ -3309,7 +3315,6 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     const rowY = rowTop + index * rowHeight;
     const levelText = `${level}/${definition.maxLevel}`;
     const levelWidth = textRenderer.measure(levelText, { fontSize: 8 });
-    const labelX = rowX + 14;
 
     if (selected) {
       ctx.fillStyle = colors.foreground;
@@ -3332,9 +3337,9 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     textRenderer.draw(ctx, definition.label, labelX, rowY, {
       fontSize: 8,
       color: selected ? colors.background : colors.foreground,
-      width: 176
+      width: metrics.tableColumns.labelWidth + 1
     });
-    textRenderer.draw(ctx, levelText, rowRight - levelWidth, rowY, {
+    textRenderer.draw(ctx, levelText, levelRight - levelWidth, rowY, {
       fontSize: 8,
       color: selected ? colors.background : colors.foreground,
       width: levelWidth + 1
@@ -3414,6 +3419,82 @@ function drawControllerButtonGlyph(ctx, x, y, selected, colors) {
   ctx.fillRect(x + 1, y, 1, 1);
   ctx.fillRect(x, y - 1, 1, 1);
   ctx.fillRect(x, y + 1, 1, 1);
+}
+
+function measurePixelTableColumns(rows, textRenderer, options = {}) {
+  return rows.reduce((columns, row) => ({
+    labelWidth: Math.max(columns.labelWidth, textRenderer.measure(row.label, options)),
+    levelWidth: Math.max(columns.levelWidth, textRenderer.measure(row.level, options))
+  }), {
+    labelWidth: 0,
+    levelWidth: 0
+  });
+}
+
+function upgradeMenuMetrics(textRenderer, controllerActive = false) {
+  const textOptions = { fontSize: 8 };
+  const tableColumns = measurePixelTableColumns(
+    UPGRADE_DEFINITIONS.map((definition) => ({
+      label: definition.label,
+      level: `0/${definition.maxLevel}`
+    })),
+    textRenderer,
+    textOptions
+  );
+  const baseRowWidth = UPGRADE_MENU_LAYOUT.labelOffset +
+    tableColumns.labelWidth +
+    UPGRADE_MENU_LAYOUT.columnGap +
+    tableColumns.levelWidth;
+  const detailWidth = Math.max(...upgradeMenuDetailLines(controllerActive).map((line) =>
+    textRenderer.measure(line, textOptions)
+  ));
+  const titleWidth = textRenderer.measure("UPGRADES", textOptions);
+  const width = Math.ceil(Math.max(
+    titleWidth + UPGRADE_MENU_LAYOUT.padding * 2,
+    baseRowWidth + UPGRADE_MENU_LAYOUT.rowInset * 2,
+    detailWidth + UPGRADE_MENU_LAYOUT.padding * 2
+  ));
+  const rowWidth = width - UPGRADE_MENU_LAYOUT.rowInset * 2;
+  const expandedTableColumns = expandPixelTableColumns(tableColumns, rowWidth);
+
+  return {
+    width,
+    rowWidth,
+    tableColumns: expandedTableColumns
+  };
+}
+
+function expandPixelTableColumns(columns, rowWidth) {
+  const expandedLabelWidth = Math.max(
+    columns.labelWidth,
+    rowWidth - UPGRADE_MENU_LAYOUT.labelOffset - UPGRADE_MENU_LAYOUT.columnGap - columns.levelWidth
+  );
+
+  return {
+    ...columns,
+    labelWidth: expandedLabelWidth
+  };
+}
+
+function upgradeMenuDetailLines(controllerActive = false) {
+  const lines = new Set([
+    "COST: MAX LEVEL",
+    "MAXED",
+    "NEED RESOURCES",
+    controllerActive ? "SELECT BUY" : "CLICK BUY"
+  ]);
+
+  for (const definition of UPGRADE_DEFINITIONS) {
+    lines.add(`CURRENT: ${definition.baseStatText || "BASE"}`);
+    lines.add("NEXT: MAX LEVEL");
+    for (const level of definition.levels || []) {
+      lines.add(`CURRENT: ${level.effectText || definition.baseStatText || "BASE"}`);
+      lines.add(`NEXT: ${level.effectText || "MAX LEVEL"}`);
+      lines.add(`COST: ${formatUpgradeCostLong(level.cost)}`);
+    }
+  }
+
+  return Array.from(lines);
 }
 
 function upgradeMenuHeight() {
