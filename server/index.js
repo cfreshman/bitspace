@@ -112,7 +112,13 @@ io.on("connection", (socket) => {
     }
 
     if (room.state === ROOM_STATES.waiting || room.state === ROOM_STATES.active) {
-      setPlayerInput(room.arena, clientId, payload);
+      setPlayerInput(
+        room.arena,
+        clientId,
+        room.state === ROOM_STATES.waiting
+          ? { ...payload, mining: false }
+          : payload
+      );
     }
   });
 
@@ -198,8 +204,8 @@ io.on("connection", (socket) => {
     }
 
     socket.join(roomChannel(result.room));
-    if (!payload?.silent) {
-      socket.emit(SERVER_EVENTS.beep, { kind: "button" });
+    if (!payload?.silent && result.joined) {
+      broadcastBeep(result.room, "button");
     }
     broadcastRoom(result.room);
     if (result.room.arena) {
@@ -351,7 +357,16 @@ function broadcastRoom(room = roomManager.activeRoom()) {
     return;
   }
 
-  io.to(roomChannel(room)).emit(SERVER_EVENTS.room, roomManager.genericRoomSnapshot(room));
+  for (const participant of room.participants.values()) {
+    const participantSocket = participant.socketId
+      ? io.sockets.sockets.get(participant.socketId)
+      : null;
+    if (!participantSocket) {
+      continue;
+    }
+
+    participantSocket.emit(SERVER_EVENTS.room, roomManager.roomSnapshot(participant.clientId));
+  }
 }
 
 function emitGameState(socket, room) {

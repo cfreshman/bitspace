@@ -1,0 +1,125 @@
+import { ENGINE } from "./constants.js";
+
+export function miningRayCountForPlayer(player) {
+  const rawCount = Number(player?.prototypeMiningRayCount ?? player?.miningRayCount ?? 1);
+  const count = Math.round(rawCount);
+  if (!Number.isFinite(count)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.min(ENGINE.mining.maxRayCount, count));
+}
+
+export function miningRayLaneOffsets(count, sideOffset = ENGINE.mining.sideRayOffset) {
+  if (count <= 1) {
+    return [0];
+  }
+
+  if (count === 2) {
+    return [0, -sideOffset];
+  }
+
+  return [0, -sideOffset, sideOffset];
+}
+
+export function miningRayLanePower(offset) {
+  return offset === 0 ? 1 : 0.5;
+}
+
+export function miningRayLanesForPlayer(
+  player,
+  angle = player?.aimAngle ?? player?.angle ?? 0,
+  forwardLength = ENGINE.mining.rayLength
+) {
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const normal = {
+    x: -direction.y,
+    y: direction.x
+  };
+  const radius = Number(player?.radius ?? ENGINE.ship.radius);
+  const start = {
+    x: Number(player?.x ?? 0) + direction.x * radius,
+    y: Number(player?.y ?? 0) + direction.y * radius
+  };
+
+  return miningRayLaneOffsets(miningRayCountForPlayer(player)).map((offset, index) => ({
+    index,
+    offset,
+    ...miningRayLaneGeometry(start, direction, normal, offset, forwardLength)
+  }));
+}
+
+function miningRayLaneGeometry(start, direction, normal, offset, forwardLength) {
+  const endOffset = offset * ENGINE.mining.sideRayEndOffsetScale;
+  const lateralDelta = endOffset - offset;
+  const dx = direction.x * forwardLength + normal.x * lateralDelta;
+  const dy = direction.y * forwardLength + normal.y * lateralDelta;
+  const rayDistance = Math.max(0.000001, Math.hypot(dx, dy));
+  const rayDirectionX = dx / rayDistance;
+  const rayDirectionY = dy / rayDistance;
+  return {
+    power: miningRayLanePower(offset),
+    startOffset: offset,
+    startX: start.x + normal.x * offset,
+    startY: start.y + normal.y * offset,
+    endOffset,
+    fullEndX: start.x + direction.x * forwardLength + normal.x * endOffset,
+    fullEndY: start.y + direction.y * forwardLength + normal.y * endOffset,
+    rayAngle: Math.atan2(rayDirectionY, rayDirectionX),
+    rayDistance,
+    rayDirectionX,
+    rayDirectionY
+  };
+}
+
+export function miningRaySideStartProbe(
+  player,
+  lane,
+  angle = player?.aimAngle ?? player?.angle ?? 0
+) {
+  const offset = Number(lane?.offset) || 0;
+  const sideSign = Math.sign(offset);
+  if (sideSign === 0) {
+    return null;
+  }
+
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const normal = {
+    x: -direction.y,
+    y: direction.x
+  };
+  const radius = Number(player?.radius ?? ENGINE.ship.radius);
+  const directionX = normal.x * sideSign;
+  const directionY = normal.y * sideSign;
+  return {
+    startX: Number(player?.x ?? 0) + direction.x * radius,
+    startY: Number(player?.y ?? 0) + direction.y * radius,
+    directionX,
+    directionY,
+    angle: Math.atan2(directionY, directionX),
+    distance: Math.abs(offset)
+  };
+}
+
+export function miningRayLaneWithStart(lane, startX, startY) {
+  const dx = lane.fullEndX - startX;
+  const dy = lane.fullEndY - startY;
+  const rayDistance = Math.max(0.000001, Math.hypot(dx, dy));
+  const rayDirectionX = dx / rayDistance;
+  const rayDirectionY = dy / rayDistance;
+  return {
+    ...lane,
+    startX,
+    startY,
+    rayAngle: Math.atan2(rayDirectionY, rayDirectionX),
+    rayDistance,
+    rayDirectionX,
+    rayDirectionY
+  };
+}

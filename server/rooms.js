@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { ENGINE, RENDER } from "../shared/constants.js";
-import { createLobbyAsteroid } from "../shared/asteroid.js";
+import { createThemeAsteroid } from "../shared/asteroid.js";
 import { createSeededRandom } from "../shared/math.js";
 import {
   addPlayer,
@@ -20,9 +20,6 @@ export const ROOM_STATES = Object.freeze({
 
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
-const LOBBY_BUTTON_WIDTH = 112;
-const LOBBY_BUTTON_HEIGHT = 32;
-const LOBBY_BUTTON_GAP = 32;
 const HEARTBEAT_TIMEOUT_MS = ENGINE.heartbeat.timeoutSeconds * 1000;
 const FINAL_COUNTDOWN_BEEP_SECONDS = new Set([3, 2, 1, 0]);
 
@@ -698,12 +695,13 @@ export function createRoomManager(options = {}) {
     }
 
     for (const player of room.arena.players.values()) {
-      if (!player.alive || !player.mining || player.miningRay?.hitType !== "entity") {
+      const entityRay = lobbyButtonRayHit(player.miningRay);
+      if (!player.alive || !player.mining || !entityRay) {
         resetLobbyButtonTarget(player);
         continue;
       }
 
-      const entity = room.arena.entities.get(player.miningRay.targetId);
+      const entity = room.arena.entities.get(entityRay.targetId);
       if (entity?.type !== "lobbyButton" || entity.hidden) {
         resetLobbyButtonTarget(player);
         continue;
@@ -733,6 +731,15 @@ export function createRoomManager(options = {}) {
     }
 
     return events;
+  }
+
+  function lobbyButtonRayHit(miningRay) {
+    const lanes = Array.isArray(miningRay?.lanes) && miningRay.lanes.length > 0
+      ? miningRay.lanes
+      : miningRay
+        ? [miningRay]
+        : [];
+    return lanes.find((lane) => lane.hitType === "entity" && lane.targetId) || null;
   }
 
   function activateLobbyButton(room, playerId, entity) {
@@ -789,78 +796,17 @@ export function createRoomManager(options = {}) {
 }
 
 function createLobbyArena(id, seed) {
-  const asteroid = createLobbyAsteroid({ seed: `${seed}:box` });
-  const arena = createArena({
+  const asteroid = createThemeAsteroid({
+    seed: `${seed}:theme-lobby`,
+    createLobbyPockets: true,
+    playerCount: ENGINE.maxPlayers
+  });
+  return createArena({
     id,
     seed,
     asteroid,
     playerDamage: false
   });
-  const center = {
-    x: (asteroid.widthTiles * asteroid.tileSize) / 2,
-    y: (asteroid.heightTiles * asteroid.tileSize) / 2
-  };
-  const startX = center.x - LOBBY_BUTTON_WIDTH - LOBBY_BUTTON_GAP / 2;
-  const leaveX = center.x + LOBBY_BUTTON_GAP / 2;
-  const buttonY = center.y - LOBBY_BUTTON_HEIGHT / 2;
-
-  arena.entities.set("lobby-start", {
-    id: "lobby-start",
-    type: "lobbyButton",
-    action: "start",
-    label: "START",
-    x: startX,
-    y: buttonY,
-    width: LOBBY_BUTTON_WIDTH,
-    height: LOBBY_BUTTON_HEIGHT,
-    hostOnly: true
-  });
-  arena.entities.set("lobby-leave", {
-    id: "lobby-leave",
-    type: "lobbyButton",
-    action: "leave",
-    label: "LEAVE",
-    x: leaveX,
-    y: buttonY,
-    width: LOBBY_BUTTON_WIDTH,
-    height: LOBBY_BUTTON_HEIGHT
-  });
-
-  clearLobbyButtonSpawns(arena, center);
-
-  return arena;
-}
-
-function clearLobbyButtonSpawns(arena, center) {
-  const buttons = Array.from(arena.entities.values()).filter((entity) => entity.type === "lobbyButton");
-  const radius = ENGINE.ship.radius + 2;
-
-  for (const pocket of arena.asteroid.pockets) {
-    let x = pocket.spawnX;
-    let y = pocket.spawnY;
-    let guard = 32;
-
-    while (guard > 0 && buttons.some((button) => circleOverlapsRect(x, y, radius, button))) {
-      const dx = x - center.x;
-      const dy = y - center.y;
-      const distance = Math.hypot(dx, dy) || 1;
-      x += (dx / distance) * RENDER.tileSize;
-      y += (dy / distance) * RENDER.tileSize;
-      guard -= 1;
-    }
-
-    pocket.spawnX = x;
-    pocket.spawnY = y;
-  }
-}
-
-function circleOverlapsRect(cx, cy, radius, rect) {
-  const closestX = Math.max(rect.x, Math.min(cx, rect.x + rect.width));
-  const closestY = Math.max(rect.y, Math.min(cy, rect.y + rect.height));
-  const dx = cx - closestX;
-  const dy = cy - closestY;
-
-  return dx * dx + dy * dy < radius * radius;
 }
 
 function syncLobbyHosts(room) {

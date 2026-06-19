@@ -317,6 +317,86 @@ export function createLobbyAsteroid(options = {}) {
   };
 }
 
+export function createThemeAsteroid(options = {}) {
+  const widthTiles = options.widthTiles || 48;
+  const heightTiles = options.heightTiles || 48;
+  const clearRadius = options.clearRadius ?? 116;
+  const center = {
+    x: (widthTiles * RENDER.tileSize) / 2,
+    y: (heightTiles * RENDER.tileSize) / 2
+  };
+  const asteroid = createNaturalAsteroid({
+    seed: options.seed || "bitspace-theme",
+    widthTiles,
+    heightTiles,
+    playerCount: options.playerCount,
+    createPockets: false,
+    seedResources: options.seedResources,
+    clearCircles: [{ x: center.x, y: center.y, radius: clearRadius }],
+    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + RENDER.tileSize * 2 }],
+    generation: {
+      ...THEME_ASTEROID_GENERATION,
+      ...(options.generation || {})
+    }
+  });
+
+  if (options.createLobbyPockets) {
+    asteroid.pockets = createCenteredLobbyPockets(asteroid, center, options.spawnRadius || 92);
+  }
+
+  return asteroid;
+}
+
+const THEME_ASTEROID_GENERATION = Object.freeze({
+  edgeMargin: 5,
+  noiseScale: 0.09,
+  noiseDetailScale: 0.22,
+  noiseWarpScale: 0.06,
+  noiseWarpStrength: 4,
+  noiseCaveScale: 0.13,
+  noiseCaveSecondaryScale: 0.17,
+  noiseCaveDetailScale: 0.28,
+  noiseCaveBand: 0.04,
+  noiseCaveJunctionBand: 0.025,
+  noiseCaveWidthJitter: 0.018,
+  noiseCaveMinDepth: 0.08,
+  noiseOctaves: 4,
+  noisePersistence: 0.52,
+  noiseLacunarity: 2,
+  noiseFieldRadius: 19,
+  noiseThreshold: -0.14,
+  noiseRadialFalloff: 0.45,
+  noiseMinComponentSize: 4,
+  caveCloseMaxSize: 10,
+  caveCloseProbabilityPower: 1.15,
+  resourceCandidateChance: 0.95,
+  resourceNoiseThreshold: 0.76,
+  resourceConnectionChance: 0.6,
+  resourceConnectionMaxDistance: 5,
+  resourceGraphKeepDegradation: 0.92,
+  resourceMaxGraphs: 160,
+  resourceMaxSpawnTiles: 260,
+  oreChance: 0.84,
+  diamondChance: 0.07,
+  boundaryDilate: 8,
+  boundaryShrink: 4,
+  boundaryGap: 4
+});
+
+function createCenteredLobbyPockets(asteroid, center, orbitRadius) {
+  return Array.from({ length: ENGINE.maxPlayers }, (_unused, index) => {
+    const angle = Math.PI / 4 + (index * Math.PI * 2) / ENGINE.maxPlayers;
+    return {
+      playerNumber: index + 1,
+      tileX: Math.round(center.x / asteroid.tileSize),
+      tileY: Math.round(center.y / asteroid.tileSize),
+      radius: 0,
+      spawnX: center.x + Math.cos(angle) * orbitRadius,
+      spawnY: center.y + Math.sin(angle) * orbitRadius
+    };
+  });
+}
+
 export function serializeAsteroid(asteroid) {
   return {
     seed: asteroid.seed,

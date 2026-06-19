@@ -3,6 +3,12 @@ import { BUILD_DIRECTION_STEPS, buildDirectionAngle, firstTileAlongBuildRay } fr
 import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
 import {
+  miningRayCountForPlayer,
+  miningRayLaneWithStart,
+  miningRaySideStartProbe,
+  miningRayLanesForPlayer
+} from "/shared/mining.js";
+import {
   aggregateUpgradeEffects,
   canAffordUpgrade,
   nextUpgradeCost,
@@ -55,8 +61,14 @@ const REAR_ORBS = Object.freeze([
   { rear: 9, side: 0, layer: "front" }
 ]);
 const THRUSTER_PARTICLE_RATE = 70;
-const MINING_PARTICLE_RATE = 90;
-const MINING_RAY_BASE_SPIN_RATE = 2.5;
+const MINING_PARTICLE_RATE = 150;
+const MINING_RAY_VISUAL_RADIUS = 2;
+const MINING_RAY_SIDE_WAVE_AMPLITUDE = 0.5;
+const MINING_RAY_SIDE_WAVE_LENGTH = 9;
+const MINING_RAY_SIDE_WAVE_SPEED = 18;
+const MINING_RAY_EMITTER_RADIUS = 1;
+const MINING_RAY_EMITTER_LENGTH = 8;
+const MINING_RAY_HIT_FLARE_RADIUS = 3;
 const MAX_PARTICLES = 260;
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
@@ -744,7 +756,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       emitThrusterParticles(particleState, renderPlayer, options.dtSeconds);
     }
 
-    if (renderPlayer.mining && renderPlayer.miningRay?.hit) {
+    if (renderPlayer.mining && miningRayHasHit(renderPlayer.miningRay)) {
       emitMiningParticles(particleState, renderPlayer, options.dtSeconds);
     }
   }
@@ -757,12 +769,18 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     if (renderPlayer.mining) {
       drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
     }
-    drawShip(ctx, renderPlayer, camera, colors, options.timeSeconds ?? snapshot.tick / 60, textRenderer);
+    drawShip(ctx, renderPlayer, camera, options.asteroid, colors, options.timeSeconds ?? snapshot.tick / 60, textRenderer);
   }
 
   drawControllerAimCursor(ctx, localPlayer, camera, options.controllerAimCursor, colors);
 
   drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
+
+  for (const renderPlayer of renderPlayers) {
+    if (renderPlayer.mining) {
+      drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+    }
+  }
 
   for (const renderPlayer of renderPlayers) {
     drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
@@ -836,27 +854,106 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
   const maxPlayers = room.maxPlayers || ENGINE.maxPlayers;
   const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
   const secondsLeft = Math.max(0, Math.ceil(((room.autoStartAtMs || 0) - Date.now()) / 1000));
+  const status = room.countdownArmed
+    ? `STARTING ${formatClock(secondsLeft)}`
+    : count < minPlayers
+      ? `NEED ${minPlayers} PLAYERS`
+      : `START ${formatClock(secondsLeft)}`;
 
+  drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer);
   if (room.countdownArmed) {
     drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer);
+  }
+}
+
+function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer) {
+  const panel = { x: 8, y: 8, width: 132, height: 34 };
+  const canStart = waitingRoomCanStart(room);
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, `LOBBY ${count}/${maxPlayers}`, panel.x + panel.width / 2, panel.y + 8, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  drawCenteredText(ctx, textRenderer, status, panel.x + panel.width / 2, panel.y + 21, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  const warningPosition = drawWaitingTerminalActions(
+    ctx,
+    panel.x + 2,
+    panel.y + panel.height + 7,
+    canStart,
+    options,
+    colors,
+    textRenderer
+  );
+  drawWaitingDisabledFlash(ctx, warningPosition.x, warningPosition.y, options, colors, textRenderer);
+}
+
+function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRenderer) {
+  const keyboardLineStep = 12;
+  const controllerLineStep = 15;
+  const labelOffsetY = 2;
+
+  if (options.controllerActive) {
+    drawControllerHudAction(ctx, "faceRight", "LEAVE", x, y, colors, textRenderer);
+    if (canStart) {
+      drawControllerHudAction(ctx, "faceBottom", "START", x, y + 15, colors, textRenderer);
+    }
+    return {
+      x: x + 19,
+      y: y + labelOffsetY + controllerLineStep * (canStart ? 2 : 1)
+    };
+  }
+
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+
+  const firstLineY = y + labelOffsetY;
+
+  textRenderer.draw(ctx, "ESC - LEAVE", x, firstLineY, {
+    ...textOptions,
+    width: 96
+  });
+  if (canStart) {
+    textRenderer.draw(ctx, "ENTER - START", x, firstLineY + keyboardLineStep, {
+      ...textOptions,
+      width: 112
+    });
+  }
+  return {
+    x,
+    y: firstLineY + keyboardLineStep * (canStart ? 2 : 1)
+  };
+}
+
+function drawWaitingDisabledFlash(ctx, x, y, options, colors, textRenderer) {
+  if (!options.hudFlash?.miningRayDisabled) {
     return;
   }
 
-  const panel = { x: Math.round((ctx.width - 212) / 2), y: 20, width: 212, height: 35 };
+  if (Math.floor((options.timeSeconds || 0) * 4) % 2 === 0) {
+    return;
+  }
 
-  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, `WAITING ${count}/${maxPlayers}`, ctx.width / 2, panel.y + 8, {
+  textRenderer.draw(ctx, "MINING RAY DISABLED", x, y, {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    width: 132
   });
-  const status = count < minPlayers
-    ? `NEED ${minPlayers} PLAYERS`
-    : `START ${formatClock(secondsLeft)}`;
-  drawCenteredText(ctx, textRenderer, status, ctx.width / 2, panel.y + 21, {
-    fontSize: 8,
-    color: colors.foreground
-  });
-  drawRoomButtons(ctx, options, colors, textRenderer);
+}
+
+function waitingRoomCanStart(room) {
+  if (!room?.isHost || room.countdownArmed) {
+    return false;
+  }
+
+  const count = room.players?.length || 0;
+  const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
+  return count >= minPlayers;
 }
 
 function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
@@ -876,7 +973,6 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   drawCenteredText(ctx, textRenderer, label, ctx.width / 2, panel.y + 9, textOptions);
-  drawRoomButtons(ctx, options, colors, textRenderer);
 }
 
 function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
@@ -1065,20 +1161,21 @@ function asteroidMiningTargetMap(snapshot) {
   }
 
   for (const player of snapshot.players || []) {
-    const ray = player.miningRay;
-    if (!ray?.mineable || ray.index === null || ray.index === undefined) {
-      continue;
-    }
+    for (const ray of miningRayRenderableLanes(player.miningRay)) {
+      if (!ray?.mineable || ray.index === null || ray.index === undefined) {
+        continue;
+      }
 
-    if (ray.tile === ASTEROID_TILE.ore || ray.tile === ASTEROID_TILE.diamond) {
-      const current = targets.get(ray.index);
-      const progress = ray.progress || 0;
-      if (!current || progress > current.progress) {
-        targets.set(ray.index, {
-          phase: null,
-          tile: ray.tile,
-          progress
-        });
+      if (ray.tile === ASTEROID_TILE.ore || ray.tile === ASTEROID_TILE.diamond) {
+        const current = targets.get(ray.index);
+        const progress = ray.progress || 0;
+        if (!current || progress > current.progress) {
+          targets.set(ray.index, {
+            phase: null,
+            tile: ray.tile,
+            progress
+          });
+        }
       }
     }
   }
@@ -1230,7 +1327,10 @@ function offsetMiningRay(miningRay, dx, dy) {
     endX: Number.isFinite(miningRay.endX) ? miningRay.endX + dx : miningRay.endX,
     endY: Number.isFinite(miningRay.endY) ? miningRay.endY + dy : miningRay.endY,
     fullEndX: Number.isFinite(miningRay.fullEndX) ? miningRay.fullEndX + dx : miningRay.fullEndX,
-    fullEndY: Number.isFinite(miningRay.fullEndY) ? miningRay.fullEndY + dy : miningRay.fullEndY
+    fullEndY: Number.isFinite(miningRay.fullEndY) ? miningRay.fullEndY + dy : miningRay.fullEndY,
+    lanes: Array.isArray(miningRay.lanes)
+      ? miningRay.lanes.map((lane) => offsetMiningRay(lane, dx, dy))
+      : miningRay.lanes
   };
 }
 
@@ -2807,7 +2907,7 @@ function drawRectOutline(ctx, x, y, width, height) {
   ctx.fillRect(x + width - 1, y, 1, height);
 }
 
-function drawShip(ctx, player, camera, colors, timeSeconds, textRenderer) {
+function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -2826,8 +2926,6 @@ function drawShip(ctx, player, camera, colors, timeSeconds, textRenderer) {
     radius: player.radius
   };
 
-  void timeSeconds;
-
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
     const orbX = Math.round(x + rear.x * orb.rear + side.x * orb.side);
     const orbY = Math.round(y + rear.y * orb.rear + side.y * orb.side);
@@ -2842,8 +2940,50 @@ function drawShip(ctx, player, camera, colors, timeSeconds, textRenderer) {
     drawSphere(ctx, orbX, orbY, SMALL_ORB_RADIUS, player.angle, colors);
   }
 
+  drawMiningRayEmitters(ctx, player, camera, asteroid, colors);
+
   drawShipHealthIndicator(ctx, x, y, player, colors);
   drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+}
+
+function drawMiningRayEmitters(ctx, player, camera, asteroid, colors) {
+  const count = miningRayVisualCount(player);
+  if (count <= 1) {
+    return;
+  }
+
+  const angle = player.aimAngle ?? player.angle ?? 0;
+  const fallbackDirection = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const lanes = miningRayLanesForPlayer(player, angle, rayLength)
+    .map((lane) => clipRenderMiningRayLaneStart(player, asteroid, lane, angle))
+    .filter((lane) => lane.offset !== 0);
+
+  for (const lane of lanes) {
+    const direction = miningRayLaneDirection(lane, fallbackDirection);
+    const normal = {
+      x: -direction.y,
+      y: direction.x
+    };
+    const front = worldToScreen({ x: lane.startX, y: lane.startY }, camera);
+    const rear = {
+      x: front.x - direction.x * MINING_RAY_EMITTER_LENGTH,
+      y: front.y - direction.y * MINING_RAY_EMITTER_LENGTH
+    };
+    drawSideMiningRayEmitter(
+      ctx,
+      rear,
+      front,
+      normal,
+      lane.offset,
+      MINING_RAY_EMITTER_RADIUS,
+      colors
+    );
+  }
 }
 
 function drawShipStormWarning(ctx, x, y, player, colors, textRenderer) {
@@ -3462,14 +3602,15 @@ function emitThrusterParticles(state, player, dtSeconds) {
 
 function emitMiningParticles(state, player, dtSeconds) {
   const ray = player.miningRay;
+  const hitLanes = miningRayRenderableLanes(ray).filter((lane) => lane.hit);
+  if (hitLanes.length <= 0) {
+    return;
+  }
+
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const direction = {
+  const fallbackDirection = {
     x: Math.cos(player.aimAngle ?? player.angle),
     y: Math.sin(player.aimAngle ?? player.angle)
-  };
-  const normal = {
-    x: -direction.y,
-    y: direction.x
   };
   const key = `mine:${player.id || player.number}`;
   const carry =
@@ -3480,20 +3621,27 @@ function emitMiningParticles(state, player, dtSeconds) {
 
   for (let index = 0; index < count; index += 1) {
     const seed = state.nextSeed();
-    const sideJitter = (randomUnit(seed, 1) - 0.5) * 6;
-    const impactJitter = randomUnit(seed, 2) * 2;
-    const speed = 16 + randomUnit(seed, 3) * 44;
-    const spread = (randomUnit(seed, 4) - 0.5) * 36;
-    const life = 0.12 + randomUnit(seed, 5) * 0.24;
+    const sideJitter = (randomUnit(seed, 1) - 0.5) * 7;
+    const impactJitter = randomUnit(seed, 2) * 3;
+    const speed = 22 + randomUnit(seed, 3) * 58;
+    const spread = (randomUnit(seed, 4) - 0.5) * 48;
+    const life = 0.16 + randomUnit(seed, 5) * 0.34;
+    const lane = hitLanes[Math.floor(randomUnit(seed, 7) * hitLanes.length)] || hitLanes[0];
+    const direction = miningRayLaneDirection(lane, fallbackDirection);
+    const normal = {
+      x: -direction.y,
+      y: direction.x
+    };
 
     state.miningParticles.push({
-      x: ray.endX - direction.x * impactJitter + normal.x * sideJitter,
-      y: ray.endY - direction.y * impactJitter + normal.y * sideJitter,
+      x: lane.endX - direction.x * impactJitter + normal.x * sideJitter,
+      y: lane.endY - direction.y * impactJitter + normal.y * sideJitter,
       vx: -direction.x * speed + normal.x * spread,
       vy: -direction.y * speed + normal.y * spread,
       age: 0,
       life,
-      seed
+      seed,
+      size: randomUnit(seed, 8) > 0.58 ? 2 : 1
     });
   }
 
@@ -3546,7 +3694,7 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
     }
 
     const screen = worldToScreen(particle, camera);
-    const size = progress < 0.18 && particle.seed % 7 === 0 ? 2 : 1;
+    const size = particle.size || (progress < 0.18 && particle.seed % 7 === 0 ? 2 : 1);
     ctx.fillRect(screen.x, screen.y, size, size);
   }
 }
@@ -3596,77 +3744,391 @@ function fillSolidDisk(ctx, cx, cy, radius) {
   }
 }
 
-function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
+function miningRayVisualCount(player) {
+  return miningRayCountForPlayer(player);
+}
+
+function drawFilledCapsule(ctx, from, to, radius) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.000001) {
+    fillSolidDisk(ctx, from.x, from.y, radius);
+    return;
+  }
+
+  const minX = Math.floor(Math.min(from.x, to.x) - radius);
+  const maxX = Math.ceil(Math.max(from.x, to.x) + radius);
+  const minY = Math.floor(Math.min(from.y, to.y) - radius);
+  const maxY = Math.ceil(Math.max(from.y, to.y) + radius);
+  const radiusSq = radius * radius;
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const pointX = px + 0.5;
+      const pointY = py + 0.5;
+      const t = clamp(((pointX - from.x) * dx + (pointY - from.y) * dy) / lengthSq, 0, 1);
+      const closestX = from.x + dx * t;
+      const closestY = from.y + dy * t;
+      const distanceX = pointX - closestX;
+      const distanceY = pointY - closestY;
+      if (distanceX * distanceX + distanceY * distanceY <= radiusSq) {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+}
+
+function drawCapsuleOutline(ctx, from, to, radius, normal, colors) {
+  ctx.fillStyle = colors.background;
+  drawFilledCapsule(ctx, from, to, radius);
+
   ctx.fillStyle = colors.foreground;
+  drawPixelLine(
+    ctx,
+    Math.round(from.x + normal.x * radius),
+    Math.round(from.y + normal.y * radius),
+    Math.round(to.x + normal.x * radius),
+    Math.round(to.y + normal.y * radius)
+  );
+  drawPixelLine(
+    ctx,
+    Math.round(from.x - normal.x * radius),
+    Math.round(from.y - normal.y * radius),
+    Math.round(to.x - normal.x * radius),
+    Math.round(to.y - normal.y * radius)
+  );
+  drawCircle(ctx, Math.round(from.x), Math.round(from.y), radius);
+  drawCircle(ctx, Math.round(to.x), Math.round(to.y), radius);
+}
+
+function drawSideMiningRayEmitter(ctx, from, to, normal, offset, radius, colors) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.000001) {
+    return;
+  }
+
+  void offset;
+
+  const length = Math.sqrt(lengthSq);
+  const unit = {
+    x: dx / length,
+    y: dy / length
+  };
+  const minX = Math.floor(Math.min(from.x, to.x) - radius - 1);
+  const maxX = Math.ceil(Math.max(from.x, to.x) + radius + 1);
+  const minY = Math.floor(Math.min(from.y, to.y) - radius - 1);
+  const maxY = Math.ceil(Math.max(from.y, to.y) + radius + 1);
+
+  ctx.fillStyle = colors.background;
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const pointX = px + 0.5;
+      const pointY = py + 0.5;
+      const behindMouth = (to.x - pointX) * unit.x + (to.y - pointY) * unit.y;
+      if (behindMouth < 0 || behindMouth > length) {
+        continue;
+      }
+
+      const cross = (pointX - to.x) * normal.x + (pointY - to.y) * normal.y;
+      const falloff = clamp(behindMouth / length, 0, 1);
+      const halfWidth = radius * Math.sqrt(Math.max(0, 1 - falloff * falloff));
+      if (Math.abs(cross) <= halfWidth) {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+
+  ctx.fillStyle = colors.foreground;
+  const steps = Math.max(8, Math.ceil(length * 2));
+  let previous = null;
+
+  for (let step = 0; step <= steps; step += 1) {
+    const theta = -Math.PI / 2 + (Math.PI * step) / steps;
+    const behindMouth = length * Math.cos(theta);
+    const cross = radius * Math.sin(theta);
+    const point = {
+      x: Math.round(to.x - unit.x * behindMouth + normal.x * cross),
+      y: Math.round(to.y - unit.y * behindMouth + normal.y * cross)
+    };
+
+    if (previous) {
+      drawPixelLine(ctx, previous.x, previous.y, point.x, point.y);
+    }
+    previous = point;
+  }
+
+  drawPixelLine(
+    ctx,
+    Math.round(to.x + normal.x * radius),
+    Math.round(to.y + normal.y * radius),
+    Math.round(to.x - normal.x * radius),
+    Math.round(to.y - normal.y * radius)
+  );
+}
+
+function drawMiningRayBeam(ctx, from, to, direction, normal, colors, timeSeconds, hit, sideOffset = 0) {
+  const radius = sideOffset === 0
+    ? MINING_RAY_VISUAL_RADIUS
+    : MINING_RAY_VISUAL_RADIUS * 0.5;
+  drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sideOffset);
+  void hit;
+  void direction;
+  void normal;
+}
+
+function drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sideOffset = 0) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.000001) {
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(Math.round(from.x - radius), Math.round(from.y - radius), radius * 2 + 1, radius * 2 + 1);
+    return;
+  }
+
+  const maxRadius = radius + 1;
+  const minX = Math.floor(Math.min(from.x, to.x) - maxRadius);
+  const maxX = Math.ceil(Math.max(from.x, to.x) + maxRadius);
+  const minY = Math.floor(Math.min(from.y, to.y) - maxRadius);
+  const maxY = Math.ceil(Math.max(from.y, to.y) + maxRadius);
+  const length = Math.sqrt(lengthSq);
+  const normal = {
+    x: -dy / length,
+    y: dx / length
+  };
+  const sideSign = Math.sign(sideOffset);
+
+  ctx.fillStyle = colors.foreground;
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const pointX = px + 0.5;
+      const pointY = py + 0.5;
+      const along = ((pointX - from.x) * dx + (pointY - from.y) * dy) / lengthSq;
+      if (along < 0 || along > 1) {
+        continue;
+      }
+
+      const alongDistance = along * length;
+      const signedCross = (pointX - from.x) * normal.x + (pointY - from.y) * normal.y;
+      const inside = sideSign === 0
+        ? isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds)
+        : isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign);
+      if (inside) {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+}
+
+function isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds) {
+  const taper = miningRayTipTaper(radius, alongDistance, length);
+  const wave = miningRaySideWave01(alongDistance, timeSeconds);
+  const positiveRadius = quantizedMiningRaySideRadius(radius, wave) * taper;
+  const negativeRadius = quantizedMiningRaySideRadius(radius, wave) * taper;
+
+  return signedCross >= -negativeRadius && signedCross <= positiveRadius;
+}
+
+function isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign) {
+  const taper = miningRayTipTaper(radius, alongDistance, length);
+  const innerRadius = radius * taper;
+  const outerRadius = sinusoidalMiningRayOuterRadius(radius, alongDistance, timeSeconds) * taper;
+
+  return sideSign > 0
+    ? signedCross >= -innerRadius && signedCross <= outerRadius
+    : signedCross <= innerRadius && signedCross >= -outerRadius;
+}
+
+function miningRayTipTaper(radius, alongDistance, length) {
+  const taperDistance = Math.max(4, radius * 3);
+  const distanceToTip = Math.max(0, length - alongDistance);
+  return clamp(distanceToTip / taperDistance, 0, 1);
+}
+
+function miningRaySideWave01(alongDistance, timeSeconds) {
+  const waveDistance = alongDistance + timeSeconds * MINING_RAY_SIDE_WAVE_SPEED;
+  return (Math.sin((waveDistance / MINING_RAY_SIDE_WAVE_LENGTH) * Math.PI * 2) + 1) / 2;
+}
+
+function sinusoidalMiningRayOuterRadius(radius, alongDistance, timeSeconds) {
+  return quantizedMiningRaySideRadius(radius, miningRaySideWave01(alongDistance, timeSeconds));
+}
+
+function quantizedMiningRaySideRadius(radius, wave01) {
+  return radius + (wave01 > 1 - MINING_RAY_SIDE_WAVE_AMPLITUDE ? 1 : 0);
+}
+
+function drawMiningRayHitFlare(ctx, point, colors) {
+  const x = Math.round(point.x);
+  const y = Math.round(point.y);
+
+  ctx.fillStyle = colors.foreground;
+  fillSolidDisk(ctx, x, y, MINING_RAY_HIT_FLARE_RADIUS);
+}
+
+function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
-  const hasFullTip = Number.isFinite(player.miningRay?.fullEndX) && Number.isFinite(player.miningRay?.fullEndY);
-  const rawExtension = hasFullTip || !player.miningRay
-    ? player.rayExtension ?? player.miningRay?.extension ?? 1
-    : 1;
+  const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
   const extension = Number.isFinite(rawExtension) ? clamp(rawExtension, 0, 1) : 1;
   const angle = player.aimAngle ?? player.angle;
-  const direction = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
-  const normal = {
-    x: -direction.y,
-    y: direction.x
-  };
-  const fallbackStart = {
-    x: player.x + direction.x * player.radius,
-    y: player.y + direction.y * player.radius
-  };
-  const fallbackHit = !player.miningRay && asteroid
-    ? raycastAsteroid(asteroid, fallbackStart.x, fallbackStart.y, angle, rayLength, {
-        blockNonPlayable: !asteroid.storm
-      })
-    : null;
-  const startWorld = player.miningRay
-    ? { x: player.miningRay.startX, y: player.miningRay.startY }
-    : fallbackStart;
-  const fullTipWorld = player.miningRay
-    ? {
-        x: hasFullTip ? player.miningRay.fullEndX : player.miningRay.endX,
-        y: hasFullTip ? player.miningRay.fullEndY : player.miningRay.endY
-      }
-    : fallbackHit
-      ? { x: fallbackHit.x, y: fallbackHit.y }
-    : {
-        x: fallbackStart.x + direction.x * rayLength,
-        y: fallbackStart.y + direction.y * rayLength
-      };
-  const activeTipWorld = player.miningRay
-    ? { x: player.miningRay.endX, y: player.miningRay.endY }
-    : null;
-  const start = worldToScreen(startWorld, camera);
-  const phase = timeSeconds * MINING_RAY_BASE_SPIN_RATE * effects.raySpinMultiplier + player.number;
-  const fullTip = worldToScreen(fullTipWorld, camera);
-  const activeTip = activeTipWorld ? worldToScreen(activeTipWorld, camera) : null;
+  const lanes = miningRayRenderLanes(player, asteroid, angle, rayLength, extension);
 
-  for (let index = 0; index < 3; index += 1) {
-    const offset = Math.round(Math.sin(phase + (index * Math.PI * 2) / 3) * 2);
-    const from = {
-      x: Math.round(start.x + normal.x * offset),
-      y: Math.round(start.y + normal.y * offset)
-    };
-    const fullDx = fullTip.x - from.x;
-    const fullDy = fullTip.y - from.y;
+  for (const lane of lanes) {
+    const laneStartWorld = { x: lane.startX, y: lane.startY };
+    const laneFullTipWorld = { x: lane.fullEndX, y: lane.fullEndY };
+    const laneActiveTipWorld = { x: lane.endX, y: lane.endY };
+    const start = worldToScreen(laneStartWorld, camera);
+    const fullTip = worldToScreen(laneFullTipWorld, camera);
+    const activeTip = worldToScreen(laneActiveTipWorld, camera);
+    const fullDx = fullTip.x - start.x;
+    const fullDy = fullTip.y - start.y;
     const fullLength = Math.hypot(fullDx, fullDy);
     if (fullLength <= 0) {
       continue;
     }
+
     const activeLength = activeTip
-      ? Math.hypot(activeTip.x - from.x, activeTip.y - from.y)
+      ? Math.hypot(activeTip.x - start.x, activeTip.y - start.y)
       : 0;
     const visibleLength = clamp(Math.max(fullLength * extension, activeLength), 0, fullLength);
-    const visibleTip = {
-      x: Math.round(from.x + (fullDx / fullLength) * visibleLength),
-      y: Math.round(from.y + (fullDy / fullLength) * visibleLength)
+    if (visibleLength <= 0) {
+      continue;
+    }
+
+    const unit = {
+      x: fullDx / fullLength,
+      y: fullDy / fullLength
     };
-    drawPixelLine(ctx, from.x, from.y, visibleTip.x, visibleTip.y);
+    const laneNormal = {
+      x: -unit.y,
+      y: unit.x
+    };
+    const visibleTip = {
+      x: start.x + unit.x * visibleLength,
+      y: start.y + unit.y * visibleLength
+    };
+
+    drawMiningRayBeam(
+      ctx,
+      start,
+      visibleTip,
+      unit,
+      laneNormal,
+      colors,
+      timeSeconds * effects.raySpinMultiplier,
+      Boolean(lane.hit),
+      Number(lane.offset) || 0
+    );
   }
+}
+
+function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colors) {
+  void timeSeconds;
+
+  const effects = aggregateUpgradeEffects(player.upgrades);
+  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
+  const extension = Number.isFinite(rawExtension) ? clamp(rawExtension, 0, 1) : 1;
+  const angle = player.aimAngle ?? player.angle;
+  const lanes = miningRayRenderLanes(player, asteroid, angle, rayLength, extension);
+
+  for (const lane of lanes) {
+    if (!lane.hit || !Number.isFinite(lane.endX) || !Number.isFinite(lane.endY)) {
+      continue;
+    }
+
+    drawMiningRayHitFlare(ctx, worldToScreen({ x: lane.endX, y: lane.endY }, camera), colors);
+  }
+}
+
+function miningRayRenderableLanes(miningRay) {
+  if (!miningRay) {
+    return [];
+  }
+
+  return Array.isArray(miningRay.lanes) && miningRay.lanes.length > 0
+    ? miningRay.lanes
+    : [miningRay];
+}
+
+function miningRayHasHit(miningRay) {
+  return miningRayRenderableLanes(miningRay).some((lane) => lane.hit);
+}
+
+function miningRayRenderLanes(player, asteroid, angle, rayLength, extension) {
+  const lanes = miningRayRenderableLanes(player.miningRay);
+  if (lanes.length > 0) {
+    return lanes;
+  }
+
+  return miningRayLanesForPlayer(player, angle, rayLength).map((lane) => {
+    lane = clipRenderMiningRayLaneStart(player, asteroid, lane, angle);
+    const activeDistance = lane.rayDistance * extension;
+    const activeHit = asteroid
+      ? raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, activeDistance, {
+          blockNonPlayable: !asteroid.storm
+        })
+      : null;
+    const fullHit = asteroid
+      ? raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, lane.rayDistance, {
+          blockNonPlayable: !asteroid.storm
+        })
+      : null;
+    return {
+      ...lane,
+      endX: activeHit?.x ?? lane.startX + lane.rayDirectionX * activeDistance,
+      endY: activeHit?.y ?? lane.startY + lane.rayDirectionY * activeDistance,
+      fullEndX: fullHit?.x ?? lane.fullEndX,
+      fullEndY: fullHit?.y ?? lane.fullEndY,
+      hit: Boolean(activeHit?.hit)
+    };
+  });
+}
+
+function clipRenderMiningRayLaneStart(player, asteroid, lane, angle) {
+  const probe = miningRaySideStartProbe(player, lane, angle);
+  if (!probe || !asteroid) {
+    return lane;
+  }
+
+  const hit = raycastAsteroid(asteroid, probe.startX, probe.startY, probe.angle, probe.distance, {
+    blockNonPlayable: !asteroid.storm
+  });
+  if (!hit.hit) {
+    return lane;
+  }
+
+  const distance = Math.max(0, Math.min(probe.distance, hit.distance - 0.5));
+  return miningRayLaneWithStart(
+    lane,
+    probe.startX + probe.directionX * distance,
+    probe.startY + probe.directionY * distance
+  );
+}
+
+function miningRayLaneDirection(lane, fallbackDirection) {
+  if (Number.isFinite(lane.rayDirectionX) && Number.isFinite(lane.rayDirectionY)) {
+    return {
+      x: lane.rayDirectionX,
+      y: lane.rayDirectionY
+    };
+  }
+
+  const dx = Number(lane.fullEndX) - Number(lane.startX);
+  const dy = Number(lane.fullEndY) - Number(lane.startY);
+  const length = Math.hypot(dx, dy);
+  if (length > 0.000001) {
+    return {
+      x: dx / length,
+      y: dy / length
+    };
+  }
+
+  return fallbackDirection;
 }
 
 function drawCircle(ctx, cx, cy, radius, occluders = []) {

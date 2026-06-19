@@ -7,12 +7,18 @@ import {
   blockingTilesNearCircle,
   createLobbyAsteroid,
   createNaturalAsteroid,
+  createThemeAsteroid,
   isAsteroidRockTile,
   raycastAsteroid
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import { createSeededRandom, inheritedVelocityLaunchAngle } from "/shared/math.js";
+import {
+  miningRayLaneWithStart,
+  miningRaySideStartProbe,
+  miningRayLanesForPlayer
+} from "/shared/mining.js";
 import {
   aggregateUpgradeEffects,
   canAffordUpgrade,
@@ -43,7 +49,7 @@ const ELIMINATION_NOTICE_MAX = 3;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
 const WORLD_LENS_POWER = RENDER.lensPower || 2;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
-const MINING_AUDIO_MAX_GAIN = 0.022;
+const MINING_AUDIO_MAX_GAIN = 0.011;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
 const AUDIO_COLLISION_CLUNK_SPEED = 18;
 const CONTROLLER_CURSOR_SPEED = 160;
@@ -63,6 +69,8 @@ const MENU_BUTTON_WIDE_WIDTH = 128;
 const MENU_BUTTON_HEIGHT = 32;
 const MENU_BUTTON_GAP = 24;
 const MENU_ESRB_SUBTITLE = "online interactions not rated by the ESRB";
+const MENU_MINING_RAY_MIN_COUNT = 1;
+const MENU_MINING_RAY_MAX_COUNT = 3;
 const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 76;
 const THEME_ASTEROID_GAP = 24;
@@ -377,6 +385,14 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (handleMenuRayCountKey(event)) {
+    return;
+  }
+
+  if (handleWaitingRoomShortcutKey(event)) {
+    return;
+  }
+
   if (
     event.code === "Escape" &&
     !event.repeat &&
@@ -577,6 +593,38 @@ canvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
 
+function handleMenuRayCountKey(event) {
+  if (
+    state.room?.state !== "menu" ||
+    event.repeat ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.altKey
+  ) {
+    return false;
+  }
+
+  const countByCode = {
+    Digit1: 1,
+    Numpad1: 1,
+    Digit2: 2,
+    Numpad2: 2,
+    Digit3: 3,
+    Numpad3: 3
+  };
+  const count = countByCode[event.code];
+  if (!count) {
+    return false;
+  }
+
+  event.preventDefault();
+  state.menu.rayCount = clamp(count, MENU_MINING_RAY_MIN_COUNT, MENU_MINING_RAY_MAX_COUNT);
+  if (state.menu.player) {
+    state.menu.player.prototypeMiningRayCount = state.menu.rayCount;
+  }
+  return true;
+}
+
 setInterval(() => {
   if (!socket.connected || !state.playerId) {
     return;
@@ -645,16 +693,12 @@ function draw(now = 0) {
     room: state.room,
     clientId: state.clientId,
     roomButtons: activeRoomButtons(),
-    uiRayActive: physicalMiningInputActive(),
+    uiRayActive: activeRoomMiningInputAllowed(),
     uiTargetId: state.uiHoverId,
     aimAngle: menuPlayer?.aimAngle ?? state.mouse.aimAngle,
     mining: readyMenu
       ? menuPlayer?.mining === true
-      : physicalMiningInputActive() &&
-        !state.chat.active &&
-        !state.upgrades.active &&
-        !state.build.active &&
-        !isInputBlocked(),
+      : activeRoomMiningInputAllowed(),
     predictedPlayer: readyMenu ? null : predictedLocalPlayer(),
     eliminationNotices: state.eliminationNotices,
     controllerActive: state.controller.connected,
@@ -723,6 +767,10 @@ function updateControllerState(timeSeconds) {
 
 function handleControllerActions(input) {
   if (!input.connected || state.chat.active) {
+    return;
+  }
+
+  if (handleWaitingRoomControllerActions(input)) {
     return;
   }
 
@@ -861,12 +909,21 @@ function controllerAimCursorRenderState() {
 
 function hudFlashRenderState(timeSeconds) {
   return {
-    rock: timeSeconds < state.hudFlash.rockUntilSeconds
+    rock: timeSeconds < state.hudFlash.rockUntilSeconds,
+    miningRayDisabled: lobbyMiningRayAttemptActive()
   };
 }
 
 function flashRockHud() {
   state.hudFlash.rockUntilSeconds = performance.now() / 1000 + HUD_RESOURCE_FLASH_SECONDS;
+}
+
+function lobbyMiningRayAttemptActive() {
+  return state.room?.state === "waiting" &&
+    !state.chat.active &&
+    !state.upgrades.active &&
+    !state.build.active &&
+    physicalMiningInputActive();
 }
 
 function createTalkInput() {
@@ -1252,61 +1309,17 @@ function createMenuState() {
     asteroid,
     huckRocks: [],
     huckRockCooldownSeconds: 0,
+    rayCount: 1,
     player: createMenuPlayer(asteroid)
   };
 }
 
 function createThemeMenuAsteroid() {
-  const widthTiles = 48;
-  const heightTiles = 48;
-  const center = {
-    x: (widthTiles * RENDER.tileSize) / 2,
-    y: (heightTiles * RENDER.tileSize) / 2
-  };
   const clearRadius = THEME_SWATCH_RING_RADIUS + THEME_SWATCH_RADIUS + THEME_ASTEROID_GAP;
 
-  return createNaturalAsteroid({
+  return createThemeAsteroid({
     seed: "bitspace-menu-theme",
-    widthTiles,
-    heightTiles,
-    createPockets: false,
-    clearCircles: [{ x: center.x, y: center.y, radius: clearRadius }],
-    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + RENDER.tileSize * 2 }],
-    generation: {
-      edgeMargin: 5,
-      noiseScale: 0.09,
-      noiseDetailScale: 0.22,
-      noiseWarpScale: 0.06,
-      noiseWarpStrength: 4,
-      noiseCaveScale: 0.13,
-      noiseCaveSecondaryScale: 0.17,
-      noiseCaveDetailScale: 0.28,
-      noiseCaveBand: 0.04,
-      noiseCaveJunctionBand: 0.025,
-      noiseCaveWidthJitter: 0.018,
-      noiseCaveMinDepth: 0.08,
-      noiseOctaves: 4,
-      noisePersistence: 0.52,
-      noiseLacunarity: 2,
-      noiseFieldRadius: 19,
-      noiseThreshold: -0.14,
-      noiseRadialFalloff: 0.45,
-      noiseMinComponentSize: 4,
-      caveCloseMaxSize: 10,
-      caveCloseProbabilityPower: 1.15,
-      resourceCandidateChance: 0.95,
-      resourceNoiseThreshold: 0.76,
-      resourceConnectionChance: 0.6,
-      resourceConnectionMaxDistance: 5,
-      resourceGraphKeepDegradation: 0.92,
-      resourceMaxGraphs: 160,
-      resourceMaxSpawnTiles: 260,
-      oreChance: 0.84,
-      diamondChance: 0.07,
-      boundaryDilate: 8,
-      boundaryShrink: 4,
-      boundaryGap: 4
-    }
+    clearRadius
   });
 }
 
@@ -1333,6 +1346,7 @@ function createMenuPlayer(asteroid) {
     miningRay: null,
     miningHoldSeconds: 0,
     rayExtension: 0,
+    prototypeMiningRayCount: 1,
     huckRockEngineCutoutSeconds: 0,
     thrusting: false,
     shake: 0,
@@ -1406,6 +1420,7 @@ function enterMenuRoom(room) {
   player.miningRay = null;
   player.miningHoldSeconds = 0;
   player.rayExtension = 0;
+  player.prototypeMiningRayCount = state.menu.rayCount;
   player.huckRockEngineCutoutSeconds = 0;
   player.thrusting = false;
 }
@@ -1424,6 +1439,7 @@ function updateMenuSimulation(timeSeconds) {
   applyShipFriction(player, dtSeconds);
 
   updateMenuAim(player);
+  player.prototypeMiningRayCount = state.menu.rayCount;
 
   const move = state.chat.active ? { x: 0, y: 0 } : readMoveVector();
   const effects = aggregateUpgradeEffects(player.upgrades);
@@ -1485,47 +1501,28 @@ function updateMenuMiningRay(player, dtSeconds) {
 
   const effects = aggregateUpgradeEffects(player.upgrades);
   const fullRayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
-  const activeRayLength = fullRayLength * player.rayExtension;
   const angle = player.aimAngle ?? player.angle;
-  const direction = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
-  const start = {
-    x: player.x + direction.x * player.radius,
-    y: player.y + direction.y * player.radius
-  };
-  const asteroidHit = raycastAsteroid(state.menu.asteroid, start.x, start.y, angle, activeRayLength);
-  const entityHit = raycastMenuEntities(start, direction, Math.min(asteroidHit.distance, activeRayLength));
-  const hit = entityHit || asteroidHit;
-  const fullAsteroidHit = raycastAsteroid(state.menu.asteroid, start.x, start.y, angle, fullRayLength);
-  const fullEntityHit = raycastMenuEntities(start, direction, Math.min(fullAsteroidHit.distance, fullRayLength));
-  const fullHit = fullEntityHit || fullAsteroidHit;
-  const end = hit.hit ? hit : {
-    x: start.x + direction.x * activeRayLength,
-    y: start.y + direction.y * activeRayLength
-  };
-
-  player.miningRay = {
-    startX: start.x,
-    startY: start.y,
-    endX: end.x,
-    endY: end.y,
-    fullEndX: fullHit.x,
-    fullEndY: fullHit.y,
-    hit: hit.hit,
-    hitType: entityHit ? "entity" : asteroidHit.hit ? "asteroid" : null,
-    mineable: false,
-    tileX: entityHit ? null : asteroidHit.tileX,
-    tileY: entityHit ? null : asteroidHit.tileY,
-    index: entityHit ? null : asteroidHit.index,
-    tile: entityHit ? null : asteroidHit.tile,
-    targetId: entityHit?.target.id ?? null,
-    targetNumber: null,
-    targetAction: entityHit?.target.action ?? null,
-    extension: player.rayExtension,
-    progress: 0
-  };
+  const lanes = miningRayLanesForPlayer(player, angle, fullRayLength).map((baseLane) => {
+    baseLane = clipMenuMiningRayLaneStart(player, baseLane, angle);
+    const start = {
+      x: baseLane.startX,
+      y: baseLane.startY
+    };
+    const direction = {
+      x: baseLane.rayDirectionX,
+      y: baseLane.rayDirectionY
+    };
+    const activeDistance = baseLane.rayDistance * player.rayExtension;
+    const asteroidHit = raycastAsteroid(state.menu.asteroid, start.x, start.y, baseLane.rayAngle, activeDistance);
+    const entityHit = raycastMenuEntities(start, direction, Math.min(asteroidHit.distance, activeDistance));
+    const fullAsteroidHit = raycastAsteroid(state.menu.asteroid, start.x, start.y, baseLane.rayAngle, baseLane.rayDistance);
+    const fullEntityHit = raycastMenuEntities(start, direction, Math.min(fullAsteroidHit.distance, baseLane.rayDistance));
+    return menuMiningRayLaneState(baseLane, entityHit, asteroidHit, fullEntityHit || fullAsteroidHit);
+  });
+  const entityLane = lanes.find((lane) => lane._entityHit);
+  const entityHit = entityLane?._entityHit ?? null;
+  player.miningRay = menuMiningRayStateFromLanes(lanes, player.rayExtension);
+  stripMenuMiningLaneHits(player.miningRay);
 
   if (!entityHit) {
     state.menu.activeTargetId = null;
@@ -1550,6 +1547,81 @@ function updateMenuMiningRay(player, dtSeconds) {
 
   state.menu.buttonTargetActivated = true;
   activateMenuEntity(entityHit.target);
+}
+
+function clipMenuMiningRayLaneStart(player, lane, angle) {
+  const probe = miningRaySideStartProbe(player, lane, angle);
+  if (!probe || !state.menu.asteroid) {
+    return lane;
+  }
+
+  const hit = raycastAsteroid(state.menu.asteroid, probe.startX, probe.startY, probe.angle, probe.distance);
+  if (!hit.hit) {
+    return lane;
+  }
+
+  const distance = Math.max(0, Math.min(probe.distance, hit.distance - 0.5));
+  return miningRayLaneWithStart(
+    lane,
+    probe.startX + probe.directionX * distance,
+    probe.startY + probe.directionY * distance
+  );
+}
+
+function menuMiningRayLaneState(baseLane, entityHit, asteroidHit, fullHit) {
+  const hit = entityHit || asteroidHit;
+  return {
+    laneIndex: baseLane.index,
+    offset: baseLane.offset,
+    endOffset: baseLane.endOffset,
+    power: baseLane.power,
+    rayAngle: baseLane.rayAngle,
+    rayDistance: baseLane.rayDistance,
+    rayDirectionX: baseLane.rayDirectionX,
+    rayDirectionY: baseLane.rayDirectionY,
+    startX: baseLane.startX,
+    startY: baseLane.startY,
+    endX: hit.x,
+    endY: hit.y,
+    fullEndX: fullHit.x,
+    fullEndY: fullHit.y,
+    hit: hit.hit,
+    hitType: entityHit ? "entity" : asteroidHit.hit ? "asteroid" : null,
+    mineable: false,
+    tileX: entityHit ? null : asteroidHit.tileX,
+    tileY: entityHit ? null : asteroidHit.tileY,
+    index: entityHit ? null : asteroidHit.index,
+    tile: entityHit ? null : asteroidHit.tile,
+    targetId: entityHit?.target.id ?? null,
+    targetNumber: null,
+    targetAction: entityHit?.target.action ?? null,
+    progress: 0,
+    _entityHit: entityHit
+  };
+}
+
+function menuMiningRayStateFromLanes(lanes, extension) {
+  const primaryLane = lanes.find((lane) => lane.hit) || lanes[0] || null;
+  if (!primaryLane) {
+    return null;
+  }
+
+  return {
+    ...primaryLane,
+    extension,
+    lanes
+  };
+}
+
+function stripMenuMiningLaneHits(miningRay) {
+  if (!miningRay) {
+    return;
+  }
+
+  delete miningRay._entityHit;
+  for (const lane of miningRay.lanes || []) {
+    delete lane._entityHit;
+  }
 }
 
 function updateMenuHuckRocks(player, dtSeconds) {
@@ -1622,7 +1694,6 @@ function updateMenuHuckRocks(player, dtSeconds) {
   if (
     !activatedEntityThisFrame &&
     !state.chat.active &&
-    !physicalMiningInputActive() &&
     (keys.has("Space") || state.controller.huckRock) &&
     state.menu.huckRockCooldownSeconds <= 0
   ) {
@@ -2926,7 +2997,7 @@ function closeTalk() {
 
 function submitTalk() {
   const text = talkInput.value.trim().replace(/\s+/g, " ");
-  if (text && socket.connected) {
+  if (socket.connected) {
     socket.emit(CLIENT_EVENTS.talk, text);
   }
 
@@ -3320,7 +3391,7 @@ function readInput() {
     moveX: move.x,
     moveY: move.y,
     aimAngle: state.mouse.aimAngle,
-    mining: physicalMiningInputActive() && !state.upgrades.active && !state.build.active,
+    mining: activeRoomMiningInputAllowed(),
     huckRock,
     huckRockTargetX: huckRockTarget?.x ?? null,
     huckRockTargetY: huckRockTarget?.y ?? null,
@@ -3350,8 +3421,6 @@ function huckRockInputAllowed() {
   if (
     (!keyboardHuck && !controllerHuck) ||
     (!controllerHuck && !isMouseInPhysicalViewport()) ||
-    state.mouse.down ||
-    controllerMiningActive() ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
     state.build.active
@@ -3388,6 +3457,15 @@ function huckRockTargetForPlayer(player) {
 
 function physicalMiningInputActive() {
   return (state.mouse.down && isMouseInPhysicalViewport()) || controllerMiningActive();
+}
+
+function activeRoomMiningInputAllowed() {
+  return state.room?.state === "active" &&
+    physicalMiningInputActive() &&
+    !state.chat.active &&
+    !state.upgrades.active &&
+    !state.build.active &&
+    !isInputBlocked();
 }
 
 function controllerMiningActive() {
@@ -3612,11 +3690,7 @@ function reconcilePrediction(snapshot, timeSeconds) {
     pendingFacingSignY: predicted.pendingFacingSignY,
     pendingFacingSeconds: predicted.pendingFacingSeconds,
     aimAngle: state.mouse.aimAngle,
-    mining: physicalMiningInputActive() &&
-      !state.chat.active &&
-      !state.upgrades.active &&
-      !state.build.active &&
-      !isInputBlocked()
+    mining: activeRoomMiningInputAllowed()
   };
 }
 
@@ -3663,11 +3737,7 @@ function updatePrediction(timeSeconds) {
   }
 
   predicted.aimAngle = state.mouse.aimAngle;
-  predicted.mining = physicalMiningInputActive() &&
-    !state.chat.active &&
-    !state.upgrades.active &&
-    !state.build.active &&
-    !isInputBlocked();
+  predicted.mining = activeRoomMiningInputAllowed();
   if (predicted.mining) {
     predicted.miningHoldSeconds = (predicted.miningHoldSeconds || 0) + dtSeconds;
   } else {
@@ -3724,7 +3794,10 @@ function translateMiningRay(miningRay, dx, dy) {
     endX: translateNumber(miningRay.endX, dx),
     endY: translateNumber(miningRay.endY, dy),
     fullEndX: translateNumber(miningRay.fullEndX, dx),
-    fullEndY: translateNumber(miningRay.fullEndY, dy)
+    fullEndY: translateNumber(miningRay.fullEndY, dy),
+    lanes: Array.isArray(miningRay.lanes)
+      ? miningRay.lanes.map((lane) => translateMiningRay(lane, dx, dy))
+      : miningRay.lanes
   };
 }
 
@@ -4597,13 +4670,69 @@ function handleRoomUiClick(buttonId) {
   }
 
   if (buttonId === "start") {
-    socket.emit(CLIENT_EVENTS.start);
+    requestWaitingRoomStart();
     return;
   }
 
   if (buttonId === "leaveSpectating" || buttonId === "leaveEnded" || buttonId === "terminalLeave") {
     leaveCurrentRoom();
   }
+}
+
+function handleWaitingRoomShortcutKey(event) {
+  if (state.room?.state !== "waiting" || event.repeat || event.metaKey || event.ctrlKey || event.altKey) {
+    return false;
+  }
+
+  if (event.code === "Escape") {
+    event.preventDefault();
+    leaveCurrentRoom();
+    return true;
+  }
+
+  if (event.code === "Enter") {
+    event.preventDefault();
+    requestWaitingRoomStart();
+    return true;
+  }
+
+  return false;
+}
+
+function handleWaitingRoomControllerActions(input) {
+  if (state.room?.state !== "waiting") {
+    return false;
+  }
+
+  if (input.pressed.reset) {
+    leaveCurrentRoom();
+    return true;
+  }
+
+  if (input.pressed.select) {
+    requestWaitingRoomStart();
+    return true;
+  }
+
+  return false;
+}
+
+function requestWaitingRoomStart() {
+  if (!socket.connected || !canStartWaitingRoom()) {
+    return;
+  }
+
+  socket.emit(CLIENT_EVENTS.start);
+}
+
+function canStartWaitingRoom() {
+  if (state.room?.state !== "waiting" || state.room.countdownArmed || !state.room.isHost) {
+    return false;
+  }
+
+  const playerCount = state.room.players?.length || 0;
+  const minPlayers = state.room.minPlayers || ENGINE.lobby.minPlayers || 2;
+  return playerCount >= minPlayers;
 }
 
 function canLeaveWithControllerReset() {

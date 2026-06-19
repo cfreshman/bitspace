@@ -27,6 +27,11 @@ import {
   upgradeDefinitionById,
   upgradeLevel
 } from "./upgrades.js";
+import {
+  miningRayLaneWithStart,
+  miningRaySideStartProbe,
+  miningRayLanesForPlayer
+} from "./mining.js";
 
 const DEFAULT_ARENA_ID = "main";
 const INITIAL_SPAWN_ANGLE = Math.PI / 4;
@@ -87,6 +92,7 @@ export function addPlayer(arena, playerOptions) {
     aimAngle: spawn.angle,
     mining: false,
     miningRay: null,
+    miningRayCount: 1,
     miningHoldSeconds: 0,
     rayExtension: 0,
     buttonTargetId: null,
@@ -204,10 +210,6 @@ export function setPlayerTalk(arena, playerId, text) {
   }
 
   const talk = sanitizeTalkText(text);
-  if (!talk) {
-    return false;
-  }
-
   player.talk = talk;
   return true;
 }
@@ -465,7 +467,6 @@ function processHuckRockInput(arena, player, dtSeconds) {
 
   if (
     !player.input.huckRock ||
-    player.input.mining ||
     !arena.asteroid ||
     player.huckRockCooldownSeconds > 0
   ) {
@@ -1300,34 +1301,144 @@ function processPlayerMining(arena, player, dtSeconds) {
   }
 
   const angle = player.aimAngle ?? player.angle;
-  const direction = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
   const effects = aggregateUpgradeEffects(player.upgrades);
   const fullRayLength = playerMiningRayLength(player, effects);
-  const activeRayLength = fullRayLength * player.rayExtension;
-  const start = {
-    x: player.x + direction.x * player.radius,
-    y: player.y + direction.y * player.radius
-  };
-  const fullRay = raycastMiningRay(arena, player, start, angle, fullRayLength);
-  const activeRay = raycastMiningRay(arena, player, start, angle, activeRayLength);
+  const lanes = miningRayLanesForPlayer(player, angle, fullRayLength).map((baseLane) => {
+    baseLane = clipMiningRayLaneStart(arena, player, baseLane, angle);
+    const start = {
+      x: baseLane.startX,
+      y: baseLane.startY
+    };
+    const fullRay = raycastMiningRay(arena, player, start, baseLane.rayAngle, baseLane.rayDistance);
+    const activeRay = raycastMiningRay(
+      arena,
+      player,
+      start,
+      baseLane.rayAngle,
+      baseLane.rayDistance * player.rayExtension
+    );
+
+    return miningRayLaneState(baseLane, activeRay, fullRay);
+  });
+  const miningRay = miningRayStateFromLanes(lanes, player.rayExtension);
+  player.miningRay = miningRay;
+
+  const miningByIndex = new Map();
+  for (const lane of lanes) {
+    const playerHit = lane._playerHit;
+    const entityHit = lane._entityHit;
+    const hit = lane._asteroidHit;
+    if (arena.rules.playerDamage) {
+      if (playerHit) {
+        damagePlayer(
+          playerHit.target,
+          ENGINE.mining.playerDamagePerSecond * effects.rayDamageMultiplier * lane.power * dtSeconds,
+          arena.tick,
+          player.id
+        );
+      }
+    }
+
+    if (playerHit || entityHit || !hit.mineable) {
+      continue;
+    }
+
+    const target = miningTargetForTile(arena.asteroid, hit.index);
+    if (!target) {
+      continue;
+    }
+
+    const existing = miningByIndex.get(hit.index);
+    if (existing?.target.phase === target.phase) {
+      existing.power += lane.power;
+      existing.lanes.push(lane);
+    } else {
+      miningByIndex.set(hit.index, {
+        hit,
+        target,
+        power: lane.power,
+        lanes: [lane]
+      });
+    }
+  }
+
+  if (miningByIndex.size <= 0) {
+    resetPlayerMiningTarget(player);
+    stripTransientMiningLaneHits(player.miningRay);
+    return;
+  }
+
+  const firstMineable = miningByIndex.values().next().value;
+  player.miningTargetIndex = firstMineable.hit.index;
+  player.miningPhase = firstMineable.target.phase;
+  player.miningProgress = 0;
+
+  for (const entry of miningByIndex.values()) {
+    const progress = addMiningProgress(
+      arena,
+      entry.hit.index,
+      entry.target,
+      dtSeconds * effects.miningPowerMultiplier * entry.power
+    );
+    const progressRatio = roundForSnapshot(clamp(progress / entry.target.seconds, 0, 1));
+    for (const lane of entry.lanes) {
+      lane.progress = progressRatio;
+    }
+    if (entry === firstMineable) {
+      player.miningProgress = progress;
+      player.miningRay.progress = progressRatio;
+    }
+
+    if (progress >= entry.target.seconds) {
+      completeMiningTarget(arena, player, entry.hit.index, entry.target);
+      clearMiningProgress(arena, entry.hit.index);
+      resetPlayerMiningTarget(player);
+    }
+  }
+
+  stripTransientMiningLaneHits(player.miningRay);
+}
+
+function clipMiningRayLaneStart(arena, player, lane, angle) {
+  const probe = miningRaySideStartProbe(player, lane, angle);
+  if (!probe || !arena.asteroid) {
+    return lane;
+  }
+
+  const hit = raycastAsteroid(arena.asteroid, probe.startX, probe.startY, probe.angle, probe.distance, {
+    blockNonPlayable: !arena.asteroid.storm
+  });
+  if (!hit.hit) {
+    return lane;
+  }
+
+  const distance = Math.max(0, Math.min(probe.distance, hit.distance - 0.5));
+  return miningRayLaneWithStart(
+    lane,
+    probe.startX + probe.directionX * distance,
+    probe.startY + probe.directionY * distance
+  );
+}
+
+function miningRayLaneState(baseLane, activeRay, fullRay) {
   const hit = activeRay.asteroidHit;
   const entityHit = activeRay.entityHit;
   const playerHit = activeRay.playerHit;
   const hitResult = activeRay.hitResult;
   const fullHitResult = fullRay.hitResult;
-  const end = {
-    x: hitResult.x,
-    y: hitResult.y
-  };
-
-  player.miningRay = {
-    startX: roundForSnapshot(start.x),
-    startY: roundForSnapshot(start.y),
-    endX: roundForSnapshot(end.x),
-    endY: roundForSnapshot(end.y),
+  const lane = {
+    laneIndex: baseLane.index,
+    offset: baseLane.offset,
+    endOffset: baseLane.endOffset,
+    power: baseLane.power,
+    rayAngle: roundForSnapshot(baseLane.rayAngle),
+    rayDistance: roundForSnapshot(baseLane.rayDistance),
+    rayDirectionX: roundForSnapshot(baseLane.rayDirectionX),
+    rayDirectionY: roundForSnapshot(baseLane.rayDirectionY),
+    startX: roundForSnapshot(baseLane.startX),
+    startY: roundForSnapshot(baseLane.startY),
+    endX: roundForSnapshot(hitResult.x),
+    endY: roundForSnapshot(hitResult.y),
     fullEndX: roundForSnapshot(fullHitResult.x),
     fullEndY: roundForSnapshot(fullHitResult.y),
     hit: hitResult.hit,
@@ -1340,60 +1451,41 @@ function processPlayerMining(arena, player, dtSeconds) {
     targetId: playerHit?.target.id ?? entityHit?.target.id ?? null,
     targetNumber: playerHit?.target.number ?? null,
     targetAction: entityHit?.target.action ?? null,
-    extension: roundForSnapshot(player.rayExtension),
-    progress: 0
+    progress: 0,
+    _asteroidHit: hit,
+    _entityHit: entityHit,
+    _playerHit: playerHit
   };
 
-  if (playerHit) {
-    if (arena.rules.playerDamage) {
-      damagePlayer(
-        playerHit.target,
-        ENGINE.mining.playerDamagePerSecond * effects.rayDamageMultiplier * dtSeconds,
-        arena.tick,
-        player.id
-      );
-    }
-    resetPlayerMiningTarget(player);
+  return lane;
+}
+
+function miningRayStateFromLanes(lanes, extension) {
+  const primaryLane = lanes.find((lane) => lane.hit) || lanes[0] || null;
+  if (!primaryLane) {
+    return null;
+  }
+
+  return {
+    ...primaryLane,
+    extension: roundForSnapshot(extension),
+    lanes
+  };
+}
+
+function stripTransientMiningLaneHits(miningRay) {
+  if (!miningRay) {
     return;
   }
 
-  if (entityHit) {
-    resetPlayerMiningTarget(player);
-    return;
+  delete miningRay._asteroidHit;
+  delete miningRay._entityHit;
+  delete miningRay._playerHit;
+  for (const lane of miningRay.lanes || []) {
+    delete lane._asteroidHit;
+    delete lane._entityHit;
+    delete lane._playerHit;
   }
-
-  if (!hit.mineable) {
-    resetPlayerMiningTarget(player);
-    return;
-  }
-
-  const target = miningTargetForTile(arena.asteroid, hit.index);
-  if (!target) {
-    resetPlayerMiningTarget(player);
-    return;
-  }
-
-  if (player.miningTargetIndex !== hit.index || player.miningPhase !== target.phase) {
-    player.miningTargetIndex = hit.index;
-    player.miningPhase = target.phase;
-  }
-
-  const progress = addMiningProgress(
-    arena,
-    hit.index,
-    target,
-    dtSeconds * effects.miningPowerMultiplier
-  );
-  player.miningProgress = progress;
-  player.miningRay.progress = roundForSnapshot(clamp(progress / target.seconds, 0, 1));
-
-  if (progress < target.seconds) {
-    return;
-  }
-
-  completeMiningTarget(arena, player, hit.index, target);
-  clearMiningProgress(arena, hit.index);
-  resetPlayerMiningTarget(player);
 }
 
 function raycastMiningRay(arena, player, start, angle, maxDistance) {
@@ -2100,9 +2192,15 @@ function miningRayExtension(mining, holdSeconds) {
 
 function syncPlayerDerivedStats(player) {
   const oldMaxHealth = player.maxHealth || playerMaxHealth(ENGINE.player.startingHealthBars);
+  const effects = aggregateUpgradeEffects(player.upgrades);
   const healthBars = playerHealthBars(player);
   const maxHealth = playerMaxHealth(healthBars);
 
+  player.miningRayCount = clamp(
+    Math.round(effects.miningRayCount || 1),
+    1,
+    ENGINE.mining.maxRayCount
+  );
   player.healthBars = healthBars;
   player.maxHealth = maxHealth;
   if (maxHealth > oldMaxHealth) {
@@ -2290,6 +2388,7 @@ function snapshotPlayer(player) {
     moveX: roundForSnapshot(player.input?.moveX || 0),
     moveY: roundForSnapshot(player.input?.moveY || 0),
     mining: player.mining,
+    miningRayCount: player.miningRayCount || 1,
     huckRockCooldownSeconds: roundForSnapshot(player.huckRockCooldownSeconds || 0),
     huckRockEngineCutoutSeconds: roundForSnapshot(player.huckRockEngineCutoutSeconds || 0),
     miningRay: player.miningRay,

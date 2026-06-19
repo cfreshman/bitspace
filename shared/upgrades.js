@@ -121,6 +121,19 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     ])
   },
   {
+    id: "beams",
+    label: "SIDE RAYS",
+    code: "SIDE",
+    maxLevel: 2,
+    description: "ADDS SIDE MINING RAYS",
+    baseStatText: "0 HALF-POWER SIDE RAYS",
+    visual: "Side emitters add independent half-power rays.",
+    levels: Object.freeze([
+      { cost: Object.freeze({ diamond: 3 }), effectText: "1 HALF-POWER SIDE RAY", effects: { miningRayCount: 2 } },
+      { cost: Object.freeze({ diamond: 3 }), effectText: "2 HALF-POWER SIDE RAYS", effects: { miningRayCount: 3 } }
+    ])
+  },
+  {
     id: "health",
     label: "HEALTH",
     code: "HEALTH",
@@ -157,6 +170,7 @@ const UPGRADE_IDS = new Set(UPGRADE_DEFINITIONS.map((upgrade) => upgrade.id));
 const DEFAULT_EFFECTS = Object.freeze({
   thrustMultiplier: 1,
   rayLengthBonus: 0,
+  miningRayCount: 1,
   miningPowerMultiplier: 1,
   rayDamageMultiplier: 1,
   raySpinMultiplier: 1,
