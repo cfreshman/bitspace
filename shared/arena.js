@@ -28,6 +28,7 @@ import {
   upgradeLevel
 } from "./upgrades.js";
 import {
+  miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
   miningRayLanesForPlayer
@@ -1412,7 +1413,7 @@ function clipMiningRayLaneStart(arena, player, lane, angle) {
     return lane;
   }
 
-  const distance = Math.max(0, Math.min(probe.distance, hit.distance - 0.5));
+  const distance = miningRayClippedSideStartDistance(probe, hit.distance);
   return miningRayLaneWithStart(
     lane,
     probe.startX + probe.directionX * distance,

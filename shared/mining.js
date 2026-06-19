@@ -26,6 +26,13 @@ export function miningRayLanePower(offset) {
   return offset === 0 ? 1 : 0.5;
 }
 
+export function miningRaySideMinStartDistance(player, offset) {
+  const sideDistance = Math.abs(Number(offset) || 0);
+  const radius = Number(player?.radius ?? ENGINE.ship.radius);
+  const minDistance = Math.max(0, radius - 1);
+  return Math.min(sideDistance, minDistance);
+}
+
 export function miningRayLanesForPlayer(
   player,
   angle = player?.aimAngle ?? player?.angle ?? 0,
@@ -103,8 +110,20 @@ export function miningRaySideStartProbe(
     directionX,
     directionY,
     angle: Math.atan2(directionY, directionX),
+    minDistance: miningRaySideMinStartDistance(player, offset),
     distance: Math.abs(offset)
   };
+}
+
+export function miningRayClippedSideStartDistance(probe, hitDistance) {
+  const distance = Number(probe?.distance) || 0;
+  const minDistance = Math.max(0, Math.min(distance, Number(probe?.minDistance) || 0));
+  const clippedDistance = Math.min(distance, Number(hitDistance) - 0.5);
+  if (!Number.isFinite(clippedDistance)) {
+    return distance;
+  }
+
+  return Math.max(minDistance, clippedDistance);
 }
 
 export function miningRayLaneWithStart(lane, startX, startY) {

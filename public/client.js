@@ -15,6 +15,7 @@ import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import { createSeededRandom, inheritedVelocityLaunchAngle } from "/shared/math.js";
 import {
+  miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
   miningRayLanesForPlayer
@@ -95,8 +96,8 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
   padding: 8,
-  rowTopOffset: 24,
-  rowHeight: 14,
+  rowTopOffset: 20,
+  rowHeight: 16,
   rowInset: 8,
   labelOffset: 14,
   columnGap: 8,
@@ -162,6 +163,7 @@ const state = {
     x: 0,
     y: 0,
     inFrame: true,
+    hasPointer: false,
     down: false,
     aimAngle: 0
   },
@@ -518,9 +520,13 @@ talkInput.addEventListener("keydown", (event) => {
   requestAnimationFrame(syncTalkDraft);
 });
 
-canvas.addEventListener("pointermove", (event) => {
+window.addEventListener("pointermove", (event) => {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
+  }
+
   updateMouse(event);
-  if (state.mouse.down && !state.build.active && !isMouseInPhysicalViewport()) {
+  if (state.mouse.down && !state.build.active && !hasMousePointer()) {
     state.mouse.down = false;
   }
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
@@ -529,71 +535,91 @@ canvas.addEventListener("pointermove", (event) => {
   }
 });
 
-canvas.addEventListener("pointerdown", (event) => {
+window.addEventListener("pointerout", (event) => {
+  if (!event.relatedTarget) {
+    clearPagePointerHover();
+  }
+});
+
+window.addEventListener("pointerdown", (event) => {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
+  }
+
   event.preventDefault();
   unlockAudio();
   updateMouse(event);
   const screenButton = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   if (screenButton) {
     handleRoomUiClick(screenButton);
-    canvas.setPointerCapture(event.pointerId);
     return;
   }
 
   if (state.upgrades.active) {
     updateUpgradeSelectionFromMouse();
     buySelectedUpgrade();
-    canvas.setPointerCapture(event.pointerId);
     return;
   }
 
   if (isReadyMenu()) {
-    state.mouse.down = isMouseInPhysicalViewport();
-    canvas.setPointerCapture(event.pointerId);
+    state.mouse.down = hasMousePointer();
     return;
   }
 
   if (isRoomUiBlocking()) {
     state.mouse.down = false;
-    canvas.setPointerCapture(event.pointerId);
     return;
   }
 
   if (state.build.active) {
     state.mouse.down = true;
     buildWallAtMouse({ force: true });
-    canvas.setPointerCapture(event.pointerId);
-    return;
-  }
-
-  if (!isMouseInPhysicalViewport()) {
-    state.mouse.down = false;
-    canvas.setPointerCapture(event.pointerId);
     return;
   }
 
   state.mouse.down = true;
-  canvas.setPointerCapture(event.pointerId);
 });
 
-canvas.addEventListener("pointerup", (event) => {
-  event.preventDefault();
-  updateMouse(event);
-  state.mouse.down = false;
-  if (canvas.hasPointerCapture(event.pointerId)) {
-    canvas.releasePointerCapture(event.pointerId);
+window.addEventListener("pointerup", (event) => {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
   }
-});
 
-canvas.addEventListener("pointercancel", (event) => {
   event.preventDefault();
   updateMouse(event);
   state.mouse.down = false;
 });
 
-canvas.addEventListener("contextmenu", (event) => {
+window.addEventListener("pointercancel", (event) => {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
+  }
+
+  event.preventDefault();
+  updateMouse(event);
+  state.mouse.down = false;
+});
+
+window.addEventListener("contextmenu", (event) => {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
+  }
+
   event.preventDefault();
 });
+
+function shouldIgnorePagePointerEvent() {
+  return document.body.classList.contains("mapgen-active");
+}
+
+function clearPagePointerHover() {
+  state.uiHoverId = null;
+  state.mouse.hasPointer = false;
+  state.mouse.down = false;
+  if (state.upgrades.active) {
+    state.upgrades.selectedIndex = null;
+  }
+}
 
 function handleMenuRayCountKey(event) {
   if (
@@ -1478,7 +1504,7 @@ function updateMenuAim(player) {
     return;
   }
 
-  if (!isMouseInPhysicalViewport()) {
+  if (!hasMousePointer()) {
     return;
   }
 
@@ -1562,7 +1588,7 @@ function clipMenuMiningRayLaneStart(player, lane, angle) {
     return lane;
   }
 
-  const distance = Math.max(0, Math.min(probe.distance, hit.distance - 0.5));
+  const distance = miningRayClippedSideStartDistance(probe, hit.distance);
   return miningRayLaneWithStart(
     lane,
     probe.startX + probe.directionX * distance,
@@ -2929,6 +2955,9 @@ function activateUpgrades(options = {}) {
   }
 
   state.upgrades.active = true;
+  if (options.controller && !Number.isInteger(state.upgrades.selectedIndex)) {
+    state.upgrades.selectedIndex = 0;
+  }
   closeBuildMode();
   state.mouse.down = false;
   resetControllerUpgradeNav();
@@ -3422,7 +3451,7 @@ function huckRockInputAllowed() {
   const keyboardHuck = keys.has("Space");
   if (
     (!keyboardHuck && !controllerHuck) ||
-    (!controllerHuck && !isMouseInPhysicalViewport()) ||
+    (!controllerHuck && !hasMousePointer()) ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
     state.build.active
@@ -3458,7 +3487,7 @@ function huckRockTargetForPlayer(player) {
 }
 
 function physicalMiningInputActive() {
-  return (state.mouse.down && isMouseInPhysicalViewport()) || controllerMiningActive();
+  return (state.mouse.down && hasMousePointer()) || controllerMiningActive();
 }
 
 function activeRoomMiningInputAllowed() {
@@ -4658,6 +4687,7 @@ function updateMouse(event) {
   state.mouse.x = point.x;
   state.mouse.y = point.y;
   state.mouse.inFrame = point.inFrame;
+  state.mouse.hasPointer = true;
   updateAimFromSnapshot();
 }
 
@@ -4883,10 +4913,6 @@ function isLocalPlayerEliminated() {
 
 function updateUpgradeSelectionFromMouse() {
   const index = upgradeIndexAtPoint(state.mouse.x, state.mouse.y);
-  if (index === null) {
-    return;
-  }
-
   if (state.upgrades.selectedIndex !== index) {
     state.upgrades.selectedIndex = index;
   }
@@ -4926,8 +4952,11 @@ function resetControllerUpgradeNav() {
 }
 
 function moveUpgradeSelection(direction) {
+  const currentIndex = Number.isInteger(state.upgrades.selectedIndex)
+    ? state.upgrades.selectedIndex
+    : direction > 0 ? -1 : UPGRADE_DEFINITIONS.length;
   state.upgrades.selectedIndex = clamp(
-    state.upgrades.selectedIndex + direction,
+    currentIndex + direction,
     0,
     UPGRADE_DEFINITIONS.length - 1
   );
@@ -4935,6 +4964,10 @@ function moveUpgradeSelection(direction) {
 
 function buySelectedUpgrade() {
   const player = localPlayerFromSnapshot();
+  if (!Number.isInteger(state.upgrades.selectedIndex)) {
+    return;
+  }
+
   const definition = UPGRADE_DEFINITIONS[state.upgrades.selectedIndex];
   if (!player || !definition) {
     return;
@@ -5151,12 +5184,18 @@ function upgradeIndexAtPoint(x, y) {
   const rowTop = rows.y;
   const rowBottom = rowTop + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
 
-  if (x < rowLeft || x > rowRight || y < rowTop - UPGRADE_MENU_LAYOUT.rowHitPadding || y >= rowBottom) {
+  if (
+    x < rowLeft ||
+    x > rowRight ||
+    y < rowTop - UPGRADE_MENU_LAYOUT.rowHitPadding ||
+    y >= rowBottom + UPGRADE_MENU_LAYOUT.rowHitPadding
+  ) {
     return null;
   }
 
+  const rowOffset = clamp(y - rowTop, 0, rowBottom - rowTop - 1);
   return clamp(
-    Math.floor((y - rowTop + UPGRADE_MENU_LAYOUT.rowHitPadding) / UPGRADE_MENU_LAYOUT.rowHeight),
+    Math.floor(rowOffset / UPGRADE_MENU_LAYOUT.rowHeight),
     0,
     UPGRADE_DEFINITIONS.length - 1
   );
@@ -5273,7 +5312,7 @@ function updateAimFromSnapshot() {
     return;
   }
 
-  if (!isMouseInPhysicalViewport()) {
+  if (!hasMousePointer()) {
     return;
   }
 
@@ -5319,6 +5358,10 @@ function eventToFramebufferPoint(event) {
 
 function isMouseInPhysicalViewport() {
   return isPointInPhysicalViewport(state.mouse.x, state.mouse.y, state.mouse.inFrame);
+}
+
+function hasMousePointer() {
+  return state.mouse.hasPointer;
 }
 
 function lensScreenPointToWorld(player, screenX, screenY) {

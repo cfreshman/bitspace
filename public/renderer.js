@@ -3,6 +3,7 @@ import { BUILD_DIRECTION_STEPS, buildDirectionAngle, firstTileAlongBuildRay } fr
 import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
 import {
+  miningRayClippedSideStartDistance,
   miningRayCountForPlayer,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
@@ -80,23 +81,46 @@ const stormPatternCache = new Map();
 let stormPatternCacheFrame = null;
 const huckRockShapeCache = new Map();
 const asteroidBoundaryContourCache = new WeakMap();
+class PixelDivider {
+  constructor({ sidePadding = 0, thickness = 1 } = {}) {
+    this.sidePadding = sidePadding;
+    this.thickness = thickness;
+  }
+
+  draw(ctx, panel, y, colors) {
+    const left = Math.round(panel.x + this.sidePadding);
+    const right = Math.round(panel.x + panel.width - this.sidePadding);
+    const width = Math.max(0, right - left);
+    if (width <= 0) {
+      return;
+    }
+
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(left, Math.round(y), width, this.thickness);
+  }
+}
+
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 60,
   padding: 8,
   titleTop: 8,
-  rowTopOffset: 24,
-  rowHeight: 14,
+  rowTopOffset: 20,
+  rowHeight: 16,
   rowInset: 8,
   labelOffset: 14,
   rowHighlightPadding: 2,
+  rowTextInset: 4,
   rowTextHeight: 7,
   columnGap: 8,
-  separatorGap: 6,
-  detailTopGap: 7,
-  detailLineHeight: 10,
+  dividerTopGap: 5,
+  dividerBottomGap: 5,
+  detailLineHeight: 12,
   detailLineCount: 4,
   bottomPadding: 8
+});
+const UPGRADE_MENU_DIVIDER = new PixelDivider({
+  sidePadding: UPGRADE_MENU_LAYOUT.padding
 });
 const BITMAP_GLYPHS = Object.freeze({
   " ": ["000", "000", "000", "000", "000", "000", "000"],
@@ -3277,34 +3301,22 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
-  const metrics = upgradeMenuMetrics(textRenderer, controllerActive);
-  const width = metrics.width;
-  const height = upgradeMenuHeight();
-  const x = UPGRADE_MENU_LAYOUT.x;
-  const y = UPGRADE_MENU_LAYOUT.y;
+  const layout = upgradeMenuLayout(textRenderer, controllerActive);
+  const { panel, metrics } = layout;
   const resources = player.resources || {};
-  const selectedIndex = clamp(
-    Math.floor(upgradesUi.selectedIndex || 0),
-    0,
-    UPGRADE_DEFINITIONS.length - 1
-  );
+  const selectedIndex = Number.isInteger(upgradesUi.selectedIndex)
+    ? clamp(upgradesUi.selectedIndex, 0, UPGRADE_DEFINITIONS.length - 1)
+    : null;
 
   ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x, y, width, height);
+  ctx.fillRect(panel.x, panel.y, panel.width, panel.height);
   ctx.fillStyle = colors.background;
-  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  ctx.fillRect(panel.x + 1, panel.y + 1, panel.width - 2, panel.height - 2);
 
-  textRenderer.draw(ctx, "UPGRADES", x + UPGRADE_MENU_LAYOUT.padding, y + UPGRADE_MENU_LAYOUT.titleTop, {
+  textRenderer.draw(ctx, "UPGRADES", layout.contentX, layout.titleY, {
     fontSize: 8,
     color: colors.foreground
   });
-
-  const rowX = x + UPGRADE_MENU_LAYOUT.rowInset;
-  const rowRight = rowX + metrics.rowWidth;
-  const rowTop = y + UPGRADE_MENU_LAYOUT.rowTopOffset;
-  const rowHeight = UPGRADE_MENU_LAYOUT.rowHeight;
-  const labelX = rowX + UPGRADE_MENU_LAYOUT.labelOffset;
-  const levelRight = rowRight;
 
   for (let index = 0; index < UPGRADE_DEFINITIONS.length; index += 1) {
     const definition = UPGRADE_DEFINITIONS[index];
@@ -3312,47 +3324,45 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     const cost = nextUpgradeCost(player.upgrades, definition.id);
     const affordable = canAffordUpgrade(resources, cost);
     const selected = index === selectedIndex;
-    const rowY = rowTop + index * rowHeight;
+    const rowY = layout.rowTop + index * UPGRADE_MENU_LAYOUT.rowHeight;
+    const rowTextY = rowY + UPGRADE_MENU_LAYOUT.rowTextInset;
     const levelText = `${level}/${definition.maxLevel}`;
     const levelWidth = textRenderer.measure(levelText, { fontSize: 8 });
 
     if (selected) {
       ctx.fillStyle = colors.foreground;
       ctx.fillRect(
-        rowX - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
-        rowY - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
-        rowRight - rowX + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2,
-        UPGRADE_MENU_LAYOUT.rowTextHeight + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2
+        layout.rowX - UPGRADE_MENU_LAYOUT.rowHighlightPadding,
+        rowY,
+        layout.rowRight - layout.rowX + UPGRADE_MENU_LAYOUT.rowHighlightPadding * 2,
+        UPGRADE_MENU_LAYOUT.rowHeight
       );
     }
 
     if (affordable) {
-      textRenderer.draw(ctx, "+", rowX, rowY, {
+      textRenderer.draw(ctx, "+", layout.rowX, rowTextY, {
         fontSize: 8,
         color: selected ? colors.background : colors.foreground,
         width: 10
       });
     }
 
-    textRenderer.draw(ctx, definition.label, labelX, rowY, {
+    textRenderer.draw(ctx, definition.label, layout.labelX, rowTextY, {
       fontSize: 8,
       color: selected ? colors.background : colors.foreground,
       width: metrics.tableColumns.labelWidth + 1
     });
-    textRenderer.draw(ctx, levelText, levelRight - levelWidth, rowY, {
+    textRenderer.draw(ctx, levelText, layout.levelRight - levelWidth, rowTextY, {
       fontSize: 8,
       color: selected ? colors.background : colors.foreground,
       width: levelWidth + 1
     });
   }
 
-  const selectedDefinition = UPGRADE_DEFINITIONS[selectedIndex];
+  const selectedDefinition = selectedIndex === null ? null : UPGRADE_DEFINITIONS[selectedIndex];
   const selectedLevel = upgradeLevel(player.upgrades, selectedDefinition?.id);
   const selectedUpgradeLevel = selectedDefinition?.levels[selectedLevel];
   const selectedCost = nextUpgradeCost(player.upgrades, selectedDefinition?.id);
-  const rowsBottom = y + UPGRADE_MENU_LAYOUT.rowTopOffset + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
-  const separatorY = rowsBottom + UPGRADE_MENU_LAYOUT.separatorGap;
-  const detailY = separatorY + UPGRADE_MENU_LAYOUT.detailTopGap;
   const affordable = canAffordUpgrade(resources, selectedCost);
   const currentText = currentUpgradeStatText(selectedDefinition, selectedLevel);
   const nextText = selectedUpgradeLevel?.effectText || "MAX LEVEL";
@@ -3363,19 +3373,20 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     ? affordable ? controllerActive ? "SELECT BUY" : "CLICK BUY" : "NEED RESOURCES"
     : "MAXED";
 
-  ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x + UPGRADE_MENU_LAYOUT.padding, separatorY, width - UPGRADE_MENU_LAYOUT.padding * 2, 1);
-  textRenderer.draw(ctx, "", x + UPGRADE_MENU_LAYOUT.padding, detailY, {
-    lines: [
-      `CURRENT: ${currentText}`,
-      `NEXT: ${nextText}`,
-      costText,
-      actionText
-    ],
+  UPGRADE_MENU_DIVIDER.draw(ctx, panel, layout.dividerY, colors);
+  textRenderer.draw(ctx, "", layout.contentX, layout.detailY, {
+    lines: selectedDefinition
+      ? [
+          `CURRENT: ${currentText}`,
+          `NEXT: ${nextText}`,
+          costText,
+          actionText
+        ]
+      : ["HOVER UPGRADE TO SEE DETAILS", "", "", ""],
     fontSize: 8,
     lineHeight: UPGRADE_MENU_LAYOUT.detailLineHeight,
     color: colors.foreground,
-    width: width - UPGRADE_MENU_LAYOUT.padding * 2
+    width: layout.contentWidth
   });
 }
 
@@ -3464,6 +3475,48 @@ function upgradeMenuMetrics(textRenderer, controllerActive = false) {
   };
 }
 
+function upgradeMenuLayout(textRenderer, controllerActive = false) {
+  const metrics = upgradeMenuMetrics(textRenderer, controllerActive);
+  const panel = {
+    x: UPGRADE_MENU_LAYOUT.x,
+    y: UPGRADE_MENU_LAYOUT.y,
+    width: metrics.width,
+    height: 0
+  };
+  const contentX = panel.x + UPGRADE_MENU_LAYOUT.padding;
+  const contentWidth = panel.width - UPGRADE_MENU_LAYOUT.padding * 2;
+  const titleY = panel.y + UPGRADE_MENU_LAYOUT.titleTop;
+  const rowX = panel.x + UPGRADE_MENU_LAYOUT.rowInset;
+  const rowRight = rowX + metrics.rowWidth;
+  const rowTop = panel.y + UPGRADE_MENU_LAYOUT.rowTopOffset;
+  const labelX = rowX + UPGRADE_MENU_LAYOUT.labelOffset;
+  const levelRight = rowRight;
+  const lastRowTop = rowTop +
+    Math.max(0, UPGRADE_DEFINITIONS.length - 1) * UPGRADE_MENU_LAYOUT.rowHeight;
+  const rowsBottom = lastRowTop + UPGRADE_MENU_LAYOUT.rowHeight;
+  const dividerY = rowsBottom + UPGRADE_MENU_LAYOUT.dividerTopGap;
+  const detailY = dividerY + UPGRADE_MENU_DIVIDER.thickness + UPGRADE_MENU_LAYOUT.dividerBottomGap;
+  const detailHeight = UPGRADE_MENU_LAYOUT.rowTextHeight +
+    Math.max(0, UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
+
+  panel.height = detailY - panel.y + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
+
+  return {
+    panel,
+    metrics,
+    contentX,
+    contentWidth,
+    titleY,
+    rowX,
+    rowRight,
+    rowTop,
+    labelX,
+    levelRight,
+    dividerY,
+    detailY
+  };
+}
+
 function expandPixelTableColumns(columns, rowWidth) {
   const expandedLabelWidth = Math.max(
     columns.labelWidth,
@@ -3495,14 +3548,6 @@ function upgradeMenuDetailLines(controllerActive = false) {
   }
 
   return Array.from(lines);
-}
-
-function upgradeMenuHeight() {
-  const rowsBottom = UPGRADE_MENU_LAYOUT.rowTopOffset + UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
-  const separatorY = rowsBottom + UPGRADE_MENU_LAYOUT.separatorGap;
-  const detailTop = separatorY + UPGRADE_MENU_LAYOUT.detailTopGap;
-  const detailHeight = 7 + (UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
-  return detailTop + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
 }
 
 function currentUpgradeStatText(definition, level) {
@@ -4183,7 +4228,7 @@ function clipRenderMiningRayLaneStart(player, asteroid, lane, angle) {
     return lane;
   }
 
-  const distance = Math.max(0, Math.min(probe.distance, hit.distance - 0.5));
+  const distance = miningRayClippedSideStartDistance(probe, hit.distance);
   return miningRayLaneWithStart(
     lane,
     probe.startX + probe.directionX * distance,
