@@ -764,9 +764,6 @@ function updateControllerState(timeSeconds) {
     state.mouse.aimAngle = state.controller.aimAngle;
   } else {
     state.controller.aimActive = false;
-    if (input.buttons.mining || input.buttons.huckRock) {
-      state.mouse.aimAngle = state.controller.aimAngle;
-    }
   }
 
   const cursorVisible = controllerCursorShouldShow();
@@ -930,7 +927,7 @@ function controllerAimCursorRenderState() {
     : predictedLocalPlayer() || localPlayerFromSnapshot();
 
   return {
-    angle: state.controller.aimAngle,
+    angle: controllerAimAngleForPlayer(player),
     distance: playerMiningRayRange(player)
   };
 }
@@ -1498,8 +1495,8 @@ function updateMenuSimulation(timeSeconds) {
 }
 
 function updateMenuAim(player) {
-  if (controllerShouldHoldAim()) {
-    player.aimAngle = state.controller.aimAngle;
+  if (state.controller.connected) {
+    player.aimAngle = controllerAimAngleForPlayer(player);
     state.mouse.aimAngle = player.aimAngle;
     return;
   }
@@ -2400,7 +2397,7 @@ function menuEntities() {
   }
 
   return [
-    menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, center.y - 92),
+    menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, center.y - 84),
     menuButton("menu-ready", "ready", "READY", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
     menuHint("menu-controls", menuControlHintRows(), center.x, top + MENU_BUTTON_HEIGHT + 30)
@@ -3394,13 +3391,15 @@ function setAudioTarget(param, value, time, timeConstant) {
 
 function readInput() {
   state.inputSeq += 1;
+  const player = predictedLocalPlayer() || localPlayerFromSnapshot();
+  const aimAngle = inputAimAngleForPlayer(player);
   if (state.chat.active || isInputBlocked()) {
     return normalizeInput({
       sessionId: inputSessionId,
       seq: state.inputSeq,
       moveX: 0,
       moveY: 0,
-      aimAngle: state.mouse.aimAngle,
+      aimAngle,
       mining: false,
       huckRock: false,
       huckRockTargetX: null,
@@ -3413,7 +3412,7 @@ function readInput() {
   const move = readMoveVector();
   const huckRock = readHuckRockInput();
   const huckRockTarget = huckRock
-    ? huckRockTargetForPlayer(predictedLocalPlayer() || localPlayerFromSnapshot())
+    ? huckRockTargetForPlayer(player)
     : null;
 
   return normalizeInput({
@@ -3421,7 +3420,7 @@ function readInput() {
     seq: state.inputSeq,
     moveX: move.x,
     moveY: move.y,
-    aimAngle: state.mouse.aimAngle,
+    aimAngle,
     mining: activeRoomMiningInputAllowed(),
     huckRock,
     huckRockTargetX: huckRockTarget?.x ?? null,
@@ -3475,11 +3474,7 @@ function huckRockTargetForPlayer(player) {
     return null;
   }
 
-  if (state.controller.connected && state.controller.huckRock) {
-    return null;
-  }
-
-  if (state.controller.connected && state.controller.aimActive) {
+  if (state.controller.connected) {
     return controllerAimTargetForPlayer(player);
   }
 
@@ -3504,7 +3499,7 @@ function controllerMiningActive() {
 }
 
 function controllerAimTargetForPlayer(player) {
-  const angle = state.controller.aimAngle ?? player.aimAngle ?? player.angle;
+  const angle = controllerAimAngleForPlayer(player);
   const distance = ENGINE.mining.rayLength * CONTROLLER_HUCK_TARGET_RAY_MULTIPLIER;
   return {
     x: player.x + Math.cos(angle) * distance,
@@ -3520,10 +3515,6 @@ function playerMiningRayRange(player) {
 
 function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
   const fallbackAngle = player.aimAngle ?? player.angle;
-  if (state.controller.connected && state.controller.huckRock) {
-    return state.controller.aimAngle ?? fallbackAngle;
-  }
-
   if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
     return fallbackAngle;
   }
@@ -3720,7 +3711,7 @@ function reconcilePrediction(snapshot, timeSeconds) {
     pendingFacingSignX: predicted.pendingFacingSignX,
     pendingFacingSignY: predicted.pendingFacingSignY,
     pendingFacingSeconds: predicted.pendingFacingSeconds,
-    aimAngle: state.mouse.aimAngle,
+    aimAngle: inputAimAngleForPlayer(predicted),
     mining: activeRoomMiningInputAllowed()
   };
 }
@@ -3767,7 +3758,7 @@ function updatePrediction(timeSeconds) {
     applyThrusterAcceleration(predicted, move, effects, dtSeconds);
   }
 
-  predicted.aimAngle = state.mouse.aimAngle;
+  predicted.aimAngle = inputAimAngleForPlayer(predicted);
   predicted.mining = activeRoomMiningInputAllowed();
   if (predicted.mining) {
     predicted.miningHoldSeconds = (predicted.miningHoldSeconds || 0) + dtSeconds;
@@ -5082,7 +5073,7 @@ function buildTargetFromMouse() {
 
 function buildAngleForPlayer(player) {
   if (state.controller.connected && state.build.active && !state.mouse.down) {
-    return state.controller.aimAngle;
+    return controllerAimAngleForPlayer(player);
   }
 
   const frame = framebufferSize();
@@ -5307,15 +5298,6 @@ function upgradeRowRect(index) {
 }
 
 function updateAimFromSnapshot() {
-  if (controllerShouldHoldAim()) {
-    state.mouse.aimAngle = state.controller.aimAngle;
-    return;
-  }
-
-  if (!hasMousePointer()) {
-    return;
-  }
-
   const snapshot = state.snapshot;
   if (!snapshot || !state.playerId) {
     return;
@@ -5323,6 +5305,15 @@ function updateAimFromSnapshot() {
 
   const player = predictedLocalPlayer() || snapshot.players.find((candidate) => candidate.id === state.playerId);
   if (!player) {
+    return;
+  }
+
+  if (state.controller.connected) {
+    state.mouse.aimAngle = controllerAimAngleForPlayer(player);
+    return;
+  }
+
+  if (!hasMousePointer()) {
     return;
   }
 
@@ -5336,9 +5327,28 @@ function updateAimFromSnapshot() {
   }
 }
 
-function controllerShouldHoldAim() {
-  return state.controller.connected &&
-    (state.controller.aimActive || state.controller.mining || state.controller.huckRock);
+function inputAimAngleForPlayer(player) {
+  if (state.controller.connected) {
+    return controllerAimAngleForPlayer(player);
+  }
+
+  return state.mouse.aimAngle;
+}
+
+function controllerAimAngleForPlayer(player) {
+  if (state.controller.aimActive && Number.isFinite(state.controller.aimAngle)) {
+    return state.controller.aimAngle;
+  }
+
+  if (Number.isFinite(player?.angle)) {
+    return player.angle;
+  }
+
+  if (Number.isFinite(player?.aimAngle)) {
+    return player.aimAngle;
+  }
+
+  return state.mouse.aimAngle;
 }
 
 function eventToFramebufferPoint(event) {
