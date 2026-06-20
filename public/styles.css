@@ -9,15 +9,24 @@ body {
   background: #000000;
 }
 
-#scene {
+#scene,
+#minimap {
   position: fixed;
   inset: var(--scene-edge-padding) auto auto var(--scene-edge-padding);
   display: block;
   object-fit: contain;
-  background: #000000;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
+}
+
+#scene {
+  background: #000000;
   touch-action: none;
+}
+
+#minimap {
+  background: transparent;
+  pointer-events: none;
 }
 
 .talk-input {
@@ -34,7 +43,8 @@ body.mapgen-active {
   overflow: auto;
 }
 
-body.mapgen-active #scene {
+body.mapgen-active #scene,
+body.mapgen-active #minimap {
   display: none;
 }
 

@@ -64,6 +64,7 @@ const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
+const PLAYER_MAP_STORAGE_KEY = "bitspace.playerMap";
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
 const ROOM_ID_PATTERN = /^room-\d+$/;
@@ -90,6 +91,11 @@ const CONTROLLER_DPAD_NAV_THRESHOLD = 0.5;
 const HUD_RESOURCE_FLASH_SECONDS = 0.55;
 const LEAVE_CONFIRM_SECONDS = 2.2;
 const BUILD_REPEAT_SECONDS = 0.08;
+const PLAYER_MAP_CHUNK_TILES = 2;
+const PLAYER_MAP_UNKNOWN = 255;
+const PLAYER_MAP_BACKGROUND = 0;
+const PLAYER_MAP_FOREGROUND = 2;
+const PLAYER_MAP_STORM = 3;
 const MENU_PLAYER_ID = "menu-player";
 const LOCAL_BOT_ROOM_ID = "local-bots";
 const LOCAL_BOT_PLAYER_ID = "local-player";
@@ -153,7 +159,8 @@ const TERMINAL_LEAVE_ACTION = Object.freeze({
   height: 13
 });
 const canvas = document.querySelector("#scene");
-const renderer = createRenderer(canvas);
+const minimapCanvas = document.querySelector("#minimap");
+const renderer = createRenderer(canvas, minimapCanvas);
 const gamepadControls = createGamepadControls();
 const talkInput = createTalkInput();
 const themeSource = document.querySelector("#bitspace-theme-source");
@@ -206,6 +213,16 @@ const state = {
   botDebugOverlay: loadBotDebugOverlay(),
   entitySmoothing: {
     byId: new Map()
+  },
+  playerMap: {
+    roomId: null,
+    asteroidSeed: null,
+    widthChunks: 0,
+    heightChunks: 0,
+    baseCells: null,
+    cells: null,
+    dirty: false,
+    lastSaveAtMs: 0
   },
   eliminationNotices: [],
   playerAliveById: new Map(),
@@ -348,6 +365,7 @@ function applyServerRoom(room) {
     releaseSpaceUntilKeyup();
     state.snapshot = null;
     state.asteroid = null;
+    resetPlayerMap();
     state.prediction.player = null;
     state.prediction.huckRockCooldownSeconds = 0;
     clearPredictedHuckRocks();
@@ -429,6 +447,7 @@ function setClientAsteroid(asteroid) {
     stormWarningUntil: asteroid.storm ? new Int32Array(asteroid.tiles.length) : null
   };
   applyStormWarnings(state.asteroid, asteroid.stormWarnings || []);
+  resetPlayerMap(state.asteroid, state.room?.roomId || state.lastRoomId);
 }
 
 function applyClientAsteroidUpdates(updates) {
@@ -820,6 +839,7 @@ function draw(now = 0) {
   const buildTarget = buildTargetFromMouse();
   updateHeldBuild(buildTarget, timeSeconds);
   const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
+  const playerMap = playerMapRenderState(snapshot);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
@@ -852,6 +872,7 @@ function draw(now = 0) {
 	    controllerAimCursor: controllerAimCursorRenderState(),
 	    hudFlash: hudFlashRenderState(timeSeconds),
 	    leaveConfirm: leaveConfirmRenderState(timeSeconds),
+	    playerMap,
 	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
 	    botDebugOverlay,
 	    theme: state.theme,
@@ -6351,6 +6372,280 @@ function randomAliveSpectatorTargetId(eliminatedPlayer) {
 
 function firstSnapshotPlayerId() {
   return state.snapshot?.players?.[0]?.id ?? null;
+}
+
+function resetPlayerMap(asteroid = null, roomId = null) {
+  if (state.playerMap.dirty) {
+    savePlayerMap({ force: true });
+  }
+
+  if (!asteroid) {
+    state.playerMap = {
+      roomId: null,
+      asteroidSeed: null,
+      widthChunks: 0,
+      heightChunks: 0,
+      baseCells: null,
+      cells: null,
+      dirty: false,
+      lastSaveAtMs: 0
+    };
+    return;
+  }
+
+  const widthChunks = Math.ceil(asteroid.widthTiles / PLAYER_MAP_CHUNK_TILES);
+  const heightChunks = Math.ceil(asteroid.heightTiles / PLAYER_MAP_CHUNK_TILES);
+  const asteroidSeed = asteroid.seed || null;
+  const cachedMap = loadPlayerMap(roomId, asteroidSeed, widthChunks, heightChunks);
+  state.playerMap = {
+    roomId: roomId || null,
+    asteroidSeed,
+    widthChunks,
+    heightChunks,
+    baseCells: cachedMap?.baseCells || buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks),
+    cells: cachedMap?.cells || new Uint8Array(widthChunks * heightChunks).fill(PLAYER_MAP_UNKNOWN),
+    dirty: false,
+    lastSaveAtMs: 0
+  };
+}
+
+function loadPlayerMap(roomId, asteroidSeed, widthChunks, heightChunks) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PLAYER_MAP_STORAGE_KEY) || "null");
+    if (
+      !parsed ||
+      parsed.version !== 1 ||
+      parsed.roomId !== (roomId || null) ||
+      parsed.asteroidSeed !== (asteroidSeed || null) ||
+      parsed.widthChunks !== widthChunks ||
+      parsed.heightChunks !== heightChunks
+    ) {
+      return null;
+    }
+
+    const length = widthChunks * heightChunks;
+    const cells = decodePlayerMapCells(parsed.cells, length);
+    if (!cells) {
+      return null;
+    }
+
+    return {
+      cells,
+      baseCells: decodePlayerMapCells(parsed.baseCells, length)
+    };
+  } catch (error) {
+    window.localStorage.removeItem(PLAYER_MAP_STORAGE_KEY);
+    return null;
+  }
+}
+
+function savePlayerMap(options = {}) {
+  const map = state.playerMap;
+  if (!map.cells || !map.baseCells || !map.roomId) {
+    return;
+  }
+
+  const now = performance.now();
+  if (!options.force && map.lastSaveAtMs > 0 && now - map.lastSaveAtMs < 500) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(PLAYER_MAP_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      roomId: map.roomId,
+      asteroidSeed: map.asteroidSeed || null,
+      widthChunks: map.widthChunks,
+      heightChunks: map.heightChunks,
+      baseCells: encodePlayerMapCells(map.baseCells),
+      cells: encodePlayerMapCells(map.cells)
+    }));
+    map.dirty = false;
+    map.lastSaveAtMs = now;
+  } catch (error) {
+    // The map is a convenience cache; gameplay should not depend on storage being available.
+  }
+}
+
+function encodePlayerMapCells(cells) {
+  let encoded = "";
+  for (let index = 0; index < cells.length; index += 1) {
+    encoded += playerMapCellCode(cells[index]);
+  }
+  return encoded;
+}
+
+function decodePlayerMapCells(encoded, length) {
+  if (typeof encoded !== "string" || encoded.length !== length) {
+    return null;
+  }
+
+  const cells = new Uint8Array(length);
+  for (let index = 0; index < length; index += 1) {
+    cells[index] = playerMapCellValue(encoded[index]);
+  }
+  return cells;
+}
+
+function playerMapCellCode(value) {
+  switch (value) {
+    case PLAYER_MAP_BACKGROUND:
+      return "b";
+    case PLAYER_MAP_FOREGROUND:
+      return "f";
+    case PLAYER_MAP_STORM:
+      return "s";
+    default:
+      return "u";
+  }
+}
+
+function playerMapCellValue(code) {
+  switch (code) {
+    case "b":
+      return PLAYER_MAP_BACKGROUND;
+    case "f":
+      return PLAYER_MAP_FOREGROUND;
+    case "s":
+      return PLAYER_MAP_STORM;
+    default:
+      return PLAYER_MAP_UNKNOWN;
+  }
+}
+
+function buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks) {
+  const cells = new Uint8Array(widthChunks * heightChunks);
+  for (let chunkY = 0; chunkY < heightChunks; chunkY += 1) {
+    for (let chunkX = 0; chunkX < widthChunks; chunkX += 1) {
+      cells[chunkY * widthChunks + chunkX] = playerMapChunkValue(asteroid, chunkX, chunkY);
+    }
+  }
+  return cells;
+}
+
+function playerMapRenderState(snapshot) {
+  if (!snapshot || state.room?.state !== "active" || !state.asteroid || !state.playerMap.cells || !state.playerMap.baseCells) {
+    return null;
+  }
+
+  const player = predictedLocalPlayer() || snapshot.players?.find((candidate) => candidate.id === state.playerId);
+  if (!player?.alive) {
+    return null;
+  }
+
+  observePlayerMap(player);
+  if (state.playerMap.dirty) {
+    savePlayerMap();
+  }
+
+  const tileSize = state.asteroid.tileSize || RENDER.tileSize;
+  const chunkWorldSize = PLAYER_MAP_CHUNK_TILES * tileSize;
+  const visibleRadius = (Math.min(RENDER.width, RENDER.height) / 2) * (RENDER.lensEdgeScale || 1);
+
+  return {
+    widthChunks: state.playerMap.widthChunks,
+    heightChunks: state.playerMap.heightChunks,
+    chunkTiles: PLAYER_MAP_CHUNK_TILES,
+    unknown: PLAYER_MAP_UNKNOWN,
+    background: PLAYER_MAP_BACKGROUND,
+    foreground: PLAYER_MAP_FOREGROUND,
+    storm: PLAYER_MAP_STORM,
+    baseCells: state.playerMap.baseCells,
+    cells: state.playerMap.cells,
+    viewCircle: {
+      x: player.x / chunkWorldSize,
+      y: player.y / chunkWorldSize,
+      radius: visibleRadius / chunkWorldSize
+    }
+  };
+}
+
+function observePlayerMap(player) {
+  const asteroid = state.asteroid;
+  const map = state.playerMap;
+  if (!asteroid || !map.cells) {
+    return;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const chunkWorldSize = PLAYER_MAP_CHUNK_TILES * tileSize;
+  const visibleRadius = (Math.min(RENDER.width, RENDER.height) / 2) * (RENDER.lensEdgeScale || 1);
+  const chunkReach = visibleRadius + chunkWorldSize * Math.SQRT2 * 0.5;
+  const minChunkX = clamp(Math.floor((player.x - chunkReach) / chunkWorldSize), 0, map.widthChunks - 1);
+  const maxChunkX = clamp(Math.floor((player.x + chunkReach) / chunkWorldSize), 0, map.widthChunks - 1);
+  const minChunkY = clamp(Math.floor((player.y - chunkReach) / chunkWorldSize), 0, map.heightChunks - 1);
+  const maxChunkY = clamp(Math.floor((player.y + chunkReach) / chunkWorldSize), 0, map.heightChunks - 1);
+  const chunkReachSq = chunkReach * chunkReach;
+  let changed = false;
+
+  for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
+    const centerY = (chunkY + 0.5) * chunkWorldSize;
+    const dy = centerY - player.y;
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+      const centerX = (chunkX + 0.5) * chunkWorldSize;
+      const dx = centerX - player.x;
+      if (dx * dx + dy * dy > chunkReachSq) {
+        continue;
+      }
+
+      const value = playerMapChunkValue(asteroid, chunkX, chunkY);
+      const cellIndex = chunkY * map.widthChunks + chunkX;
+      if (value !== PLAYER_MAP_UNKNOWN && map.cells[cellIndex] !== value) {
+        map.cells[cellIndex] = value;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    map.dirty = true;
+  }
+}
+
+function playerMapChunkValue(asteroid, chunkX, chunkY) {
+  const startX = chunkX * PLAYER_MAP_CHUNK_TILES;
+  const startY = chunkY * PLAYER_MAP_CHUNK_TILES;
+  const endX = Math.min(asteroid.widthTiles, startX + PLAYER_MAP_CHUNK_TILES);
+  const endY = Math.min(asteroid.heightTiles, startY + PLAYER_MAP_CHUNK_TILES);
+  let safePlayableCount = 0;
+  let rockCount = 0;
+  let playableCount = 0;
+  let stormCount = 0;
+
+  for (let tileY = startY; tileY < endY; tileY += 1) {
+    for (let tileX = startX; tileX < endX; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const playable = asteroid.playable?.[index] === true || asteroid.playable?.[index] === "1";
+      if (!playable) {
+        continue;
+      }
+
+      playableCount += 1;
+      if (isPlayerMapStormTile(asteroid, index)) {
+        stormCount += 1;
+        continue;
+      }
+      safePlayableCount += 1;
+      if (isAsteroidRockTile(asteroid.tiles[index])) {
+        rockCount += 1;
+      }
+    }
+  }
+
+  if (stormCount > 0) {
+    return PLAYER_MAP_STORM;
+  }
+  if (safePlayableCount <= 0) {
+    return PLAYER_MAP_UNKNOWN;
+  }
+
+  return rockCount >= PLAYER_MAP_CHUNK_TILES * PLAYER_MAP_CHUNK_TILES
+    ? PLAYER_MAP_FOREGROUND
+    : PLAYER_MAP_BACKGROUND;
+}
+
+function isPlayerMapStormTile(asteroid, index) {
+  return Boolean(asteroid.storm) && Number(asteroid.storm[index]) === STORM_STATE.storm;
 }
 
 function botChunkMapRenderState(cameraPlayerId) {
