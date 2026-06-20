@@ -33,6 +33,7 @@ export function createGamepadControls() {
         reset: buttonDown(gamepad, 1),
         build: buttonDown(gamepad, 2),
         upgrades: buttonDown(gamepad, 3),
+        map: buttonDown(gamepad, 12),
         huckRock: buttonDown(gamepad, 6),
         mining: buttonDown(gamepad, 7)
       };
@@ -41,6 +42,7 @@ export function createGamepadControls() {
         reset: buttons.reset && !previousButtons.reset,
         build: buttons.build && !previousButtons.build,
         upgrades: buttons.upgrades && !previousButtons.upgrades,
+        map: buttons.map && !previousButtons.map,
         huckRock: buttons.huckRock && !previousButtons.huckRock,
         mining: buttons.mining && !previousButtons.mining
       };
@@ -161,6 +163,7 @@ function defaultButtons() {
     reset: false,
     build: false,
     upgrades: false,
+    map: false,
     huckRock: false,
     mining: false
   };

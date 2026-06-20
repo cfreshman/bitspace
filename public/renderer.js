@@ -101,8 +101,14 @@ const BOT_CHUNK_MAP_DOT_GAP = 1;
 const BOT_CHUNK_MAP_ACTIVE_SIZE = 3;
 const BOT_CHUNK_MAP_HEAT_SIZE = 2;
 const PLAYER_MAP_CELL_SIZE = 1;
+const PLAYER_MAP_MINIMAP_RADIUS = 64;
+const PLAYER_MAP_MINIMAP_VIEW_RADIUS = 32;
 const PLAYER_MAP_MARGIN = 8;
-const PLAYER_MAP_STORM_BAND_TILES = 4;
+const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
+const PLAYER_MAP_STORM_NONE = 0;
+const PLAYER_MAP_STORM_BAND = 1;
+const playerMapArenaCircleCache = new WeakMap();
+const playerMapStormMaskCache = new WeakMap();
 const BOT_DEBUG_PANEL = Object.freeze({
   x: 8,
   y: 8,
@@ -248,15 +254,22 @@ export function createRenderer(canvas, minimapCanvas = null) {
   const emitCarry = new Map();
   let particleSeed = 1;
   let lastFrameTime = null;
+  let minimapScale = 2;
+  let minimapExpanded = false;
 
   function sizeCanvasBox() {
     const viewport = getViewportSize();
     resizeRenderSurface(viewport);
+    resizeMinimapSurface(viewport);
     canvas.style.width = `${viewport.width}px`;
     canvas.style.height = `${viewport.height}px`;
     if (minimapCanvas) {
-      minimapCanvas.style.width = `${viewport.width}px`;
-      minimapCanvas.style.height = `${viewport.height}px`;
+      minimapCanvas.style.display = minimapExpanded ? "none" : "block";
+      const minimapRect = minimapCssRect(viewport);
+      minimapCanvas.style.left = `${minimapRect.left}px`;
+      minimapCanvas.style.top = `${minimapRect.top}px`;
+      minimapCanvas.style.width = `${minimapRect.width}px`;
+      minimapCanvas.style.height = `${minimapRect.height}px`;
     }
   }
 
@@ -268,12 +281,58 @@ export function createRenderer(canvas, minimapCanvas = null) {
 
     canvas.width = size.width;
     canvas.height = size.height;
-    if (minimapCanvas) {
-      minimapCanvas.width = size.width;
-      minimapCanvas.height = size.height;
-    }
     surface = createPixelSurface(canvasContext, size.width, size.height);
     textRenderer = createPixelTextRenderer(size.width, size.height, () => colors);
+  }
+
+  function resizeMinimapSurface(viewport = getViewportSize()) {
+    if (!minimapCanvas) {
+      return;
+    }
+
+    const { width, height } = minimapSurfaceSize(viewport);
+    if (minimapCanvas.width === width && minimapCanvas.height === height) {
+      return;
+    }
+
+    minimapCanvas.width = width;
+    minimapCanvas.height = height;
+    if (minimapContext) {
+      minimapContext.imageSmoothingEnabled = false;
+    }
+  }
+
+  function minimapSurfaceSize(viewport = getViewportSize()) {
+    return {
+      width: PLAYER_MAP_MINIMAP_RADIUS * 2,
+      height: PLAYER_MAP_MINIMAP_RADIUS * 2
+    };
+  }
+
+  function minimapCssRect(viewport = getViewportSize()) {
+    const sceneRect = sceneContentRect(viewport);
+    const surfaceSize = minimapSurfaceSize(viewport);
+    const width = surfaceSize.width * minimapScale;
+    const height = surfaceSize.height * minimapScale;
+    return {
+      left: Math.round(sceneRect.left + sceneRect.width - width),
+      top: Math.round(sceneRect.top + sceneRect.height - height),
+      width,
+      height
+    };
+  }
+
+  function sceneContentRect(viewport = getViewportSize()) {
+    const padding = canvasEdgePaddingPx();
+    const scale = Math.min(viewport.width / canvas.width, viewport.height / canvas.height);
+    const width = canvas.width * scale;
+    const height = canvas.height * scale;
+    return {
+      left: padding + (viewport.width - width) / 2,
+      top: padding + (viewport.height - height) / 2,
+      width,
+      height
+    };
   }
 
   sizeCanvasBox();
@@ -283,7 +342,15 @@ export function createRenderer(canvas, minimapCanvas = null) {
 
   return {
     draw(snapshot, options = {}) {
+      const nextMinimapScale = 2;
+      const nextMinimapExpanded = options.playerMapLarge === true;
+      if (nextMinimapScale !== minimapScale || nextMinimapExpanded !== minimapExpanded) {
+        minimapScale = nextMinimapScale;
+        minimapExpanded = nextMinimapExpanded;
+        sizeCanvasBox();
+      }
       resizeRenderSurface();
+      resizeMinimapSurface();
       const timeSeconds = options.timeSeconds ?? snapshot?.tick / 60 ?? performance.now() / 1000;
       const dtSeconds =
         lastFrameTime === null ? 1 / 60 : clamp(timeSeconds - lastFrameTime, 0, 1 / 15);
@@ -309,7 +376,18 @@ export function createRenderer(canvas, minimapCanvas = null) {
         }
       });
       surface.present();
-      drawMinimapOverlay(minimapContext, canvas.width, canvas.height, options.playerMap, options.asteroid, colors);
+      if (options.playerMapLarge) {
+        drawMinimapOverlay(minimapContext, 0, 0, null, null, colors);
+      } else {
+        drawMinimapOverlay(
+          minimapContext,
+          minimapCanvas?.width ?? canvas.width,
+          minimapCanvas?.height ?? canvas.height,
+          options.playerMap,
+          options.asteroid,
+          colors
+        );
+      }
     }
   };
 }
@@ -786,6 +864,20 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   ctx.fillRect(0, 0, ctx.width, ctx.height);
   ctx.fillStyle = colors.foreground;
 
+  if (options.playerMapLarge && options.playerMap?.cells && options.asteroid) {
+    ctx.beginCircleClip();
+    ctx.fillStyle = colors.background;
+    ctx.fillRect(0, 0, ctx.width, ctx.height);
+    const visualRadius = Math.min(ctx.width, ctx.height) / 2;
+    drawPlayerMap(ctx, options.playerMap, options.asteroid, colors, {
+      centerX: ctx.width / 2,
+      centerY: ctx.height / 2,
+      radius: visualRadius
+    });
+    ctx.endClip();
+    return;
+  }
+
   if (!snapshot) {
     beginWorldViewport(ctx, colors);
     endWorldViewport(ctx);
@@ -898,6 +990,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       );
       drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
       drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
+      drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
     }
 	  }
 	  drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
@@ -919,7 +1012,14 @@ function drawMinimapOverlay(ctx, width, height, mapState, asteroid, colors) {
     return;
   }
 
-  drawPlayerMap(ctx, mapState, asteroid, colors);
+  const radius = Math.min(width, height) / 2;
+  drawPlayerMap(ctx, mapState, asteroid, colors, {
+    mode: "local",
+    centerX: width / 2,
+    centerY: height / 2,
+    radius,
+    cellSize: radius / PLAYER_MAP_MINIMAP_VIEW_RADIUS
+  });
 }
 
 function beginWorldViewport(ctx, colors) {
@@ -1119,7 +1219,7 @@ function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
     color: colors.foreground
   });
   drawLeaveConfirmFuse(ctx, panel.x + 9, panel.y + 19, panel.width - 18, leaveConfirm.progress, colors);
-  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+  drawTerminalConfirmLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
 }
 
 function drawLeaveConfirmFuse(ctx, x, y, width, progress, colors) {
@@ -1142,62 +1242,373 @@ function drawLeaveConfirmFuse(ctx, x, y, width, progress, colors) {
   }
 }
 
-function drawPlayerMap(ctx, mapState, asteroid, colors) {
+function drawPlayerMap(ctx, mapState, asteroid, colors, layout = null) {
   if (!mapState?.cells || !asteroid) {
     return;
   }
 
-  const cellSize = PLAYER_MAP_CELL_SIZE;
-  const width = mapState.widthChunks * cellSize;
-  const height = mapState.heightChunks * cellSize;
-  const canvasWidth = ctx.width ?? ctx.canvas?.width ?? width + PLAYER_MAP_MARGIN * 2;
-  const canvasHeight = ctx.height ?? ctx.canvas?.height ?? height + PLAYER_MAP_MARGIN * 2;
-  const x = Math.max(PLAYER_MAP_MARGIN, canvasWidth - width - PLAYER_MAP_MARGIN);
-  const y = Math.max(PLAYER_MAP_MARGIN, canvasHeight - height - PLAYER_MAP_MARGIN);
+  const localLayout = layout?.mode === "local";
+  const mapCircle = playerMapArenaCircle(mapState, asteroid);
+  const fixedRadius = Number(layout?.radius);
+  const fixedCenterX = Number(layout?.centerX);
+  const fixedCenterY = Number(layout?.centerY);
+  const hasFixedCircle = Number.isFinite(fixedRadius) && fixedRadius > 0 &&
+    Number.isFinite(fixedCenterX) &&
+    Number.isFinite(fixedCenterY);
+  const requestedCellSize = Number(layout?.cellSize);
+  const cellSize = hasFixedCircle
+    ? localLayout
+      ? Number.isFinite(requestedCellSize) && requestedCellSize > 0 ? requestedCellSize : PLAYER_MAP_CELL_SIZE
+      : fixedRadius / Math.max(1, mapCircle.radius)
+    : PLAYER_MAP_CELL_SIZE;
+  const scratchPadding = hasFixedCircle ? 0 : 1;
+  const mapRadius = hasFixedCircle ? fixedRadius : Math.ceil(mapCircle.radius * cellSize);
+  const mapSize = mapRadius * 2 + scratchPadding * 2;
+  const canvasWidth = ctx.width ?? ctx.canvas?.width ?? mapSize + PLAYER_MAP_MARGIN * 2;
+  const canvasHeight = ctx.height ?? ctx.canvas?.height ?? mapSize + PLAYER_MAP_MARGIN * 2;
+  const mapLeft = hasFixedCircle
+    ? fixedCenterX - mapRadius
+    : Math.max(PLAYER_MAP_MARGIN, canvasWidth - mapSize - PLAYER_MAP_MARGIN);
+  const mapTop = hasFixedCircle
+    ? fixedCenterY - mapRadius
+    : Math.max(PLAYER_MAP_MARGIN, canvasHeight - mapSize - PLAYER_MAP_MARGIN);
+  const desiredMapCenterX = hasFixedCircle ? fixedCenterX : mapLeft + scratchPadding + mapRadius;
+  const desiredMapCenterY = hasFixedCircle ? fixedCenterY : mapTop + scratchPadding + mapRadius;
+  const mapAnchor = localLayout && mapState.viewCircle ? mapState.viewCircle : mapCircle;
+  const mapOriginX = hasFixedCircle
+    ? desiredMapCenterX - mapAnchor.x * cellSize
+    : Math.round(desiredMapCenterX - mapCircle.x * cellSize);
+  const mapOriginY = hasFixedCircle
+    ? desiredMapCenterY - mapAnchor.y * cellSize
+    : Math.round(desiredMapCenterY - mapCircle.y * cellSize);
+  const mapCenterX = localLayout ? desiredMapCenterX : mapOriginX + mapCircle.x * cellSize;
+  const mapCenterY = localLayout ? desiredMapCenterY : mapOriginY + mapCircle.y * cellSize;
+  const viewCircle = playerMapViewCirclePixels(mapState.viewCircle, mapOriginX, mapOriginY, cellSize);
 
-  for (let chunkY = 0; chunkY < mapState.heightChunks; chunkY += 1) {
-    for (let chunkX = 0; chunkX < mapState.widthChunks; chunkX += 1) {
-      const cellIndex = chunkY * mapState.widthChunks + chunkX;
-      const stormState = playerMapChunkStormState(mapState, asteroid, chunkX, chunkY);
-      if (stormState === "hidden") {
+  drawPlayerMapFilledCircle(ctx, mapCenterX, mapCenterY, mapRadius, colors.backing || "#000000");
+
+  if (hasFixedCircle || localLayout) {
+    drawPlayerMapSampledCells(
+      ctx,
+      mapState,
+      asteroid,
+      mapOriginX,
+      mapOriginY,
+      cellSize,
+      mapCenterX,
+      mapCenterY,
+      mapRadius,
+      viewCircle,
+      colors
+    );
+  } else {
+    for (let chunkY = 0; chunkY < mapState.heightChunks; chunkY += 1) {
+      for (let chunkX = 0; chunkX < mapState.widthChunks; chunkX += 1) {
+        const cellIndex = chunkY * mapState.widthChunks + chunkX;
+        const cellX = playerMapCellX(mapOriginX, chunkX, cellSize);
+        const cellY = playerMapCellY(mapOriginY, chunkY, cellSize);
+        if (!playerMapCellInsideCircle(cellX, cellY, cellSize, mapCenterX, mapCenterY, mapRadius)) {
+          continue;
+        }
+
+        const stormState = playerMapChunkStormState(mapState, asteroid, chunkX, chunkY);
+        if (stormState === "hidden") {
+          continue;
+        }
+
+        const inView = playerMapCellInsideView(cellX, cellY, cellSize, viewCircle);
+        if (stormState === "band") {
+          drawPlayerMapCell(ctx, cellX, cellY, cellSize, mapState.storm, mapState, colors, chunkX, chunkY, !inView);
+          continue;
+        }
+
+        const value = playerMapChunkVisibleValue(mapState, cellIndex);
+        drawPlayerMapCell(ctx, cellX, cellY, cellSize, value, mapState, colors, chunkX, chunkY, !inView);
+      }
+    }
+
+    drawPlayerMapStormInnerBorder(ctx, mapState, asteroid, mapOriginX, mapOriginY, cellSize, colors, {
+      x: mapCenterX,
+      y: mapCenterY,
+      radius: mapRadius
+    });
+  }
+  drawPlayerMapOtherPlayers(ctx, mapState.players, mapOriginX, mapOriginY, cellSize, mapCenterX, mapCenterY, mapRadius, colors);
+  drawPlayerMapPlayerDot(ctx, viewCircle, colors);
+  if (localLayout) {
+    drawPlayerMapCircleBorder(ctx, mapCenterX, mapCenterY, mapRadius, colors);
+  }
+}
+
+function playerMapCellX(originX, chunkX, cellSize) {
+  return originX + chunkX * cellSize;
+}
+
+function playerMapCellY(originY, chunkY, cellSize) {
+  return originY + chunkY * cellSize;
+}
+
+function playerMapArenaCircle(mapState, asteroid) {
+  if (
+    mapState.circle &&
+    Number.isFinite(mapState.circle.x) &&
+    Number.isFinite(mapState.circle.y) &&
+    Number.isFinite(mapState.circle.radius) &&
+    mapState.circle.radius > 0
+  ) {
+    return mapState.circle;
+  }
+
+  const chunkTiles = Math.max(1, mapState.chunkTiles || 1);
+  const cacheKey = `${chunkTiles}:${asteroid.widthTiles}:${asteroid.heightTiles}`;
+  let cachedByKey = playerMapArenaCircleCache.get(asteroid);
+  if (!cachedByKey) {
+    cachedByKey = new Map();
+    playerMapArenaCircleCache.set(asteroid, cachedByKey);
+  } else if (cachedByKey.has(cacheKey)) {
+    return cachedByKey.get(cacheKey);
+  }
+
+  const centerTileX = asteroid.widthTiles / 2;
+  const centerTileY = asteroid.heightTiles / 2;
+  let hasPlayableTile = false;
+  let radiusTilesSq = 0;
+  for (let tileY = 0; tileY < asteroid.heightTiles; tileY += 1) {
+    for (let tileX = 0; tileX < asteroid.widthTiles; tileX += 1) {
+      if (!isPlayableTile(asteroid, tileX, tileY)) {
         continue;
       }
 
-      const cellX = x + chunkX * cellSize;
-      const cellY = y + chunkY * cellSize;
-      if (stormState === "band") {
-        drawPlayerMapCell(ctx, cellX, cellY, cellSize, mapState.storm, mapState, colors, chunkX, chunkY);
-        continue;
-      }
-
-      drawPlayerMapBaseCell(ctx, cellX, cellY, cellSize, mapState.baseCells?.[cellIndex], mapState, colors);
-      const cachedValue = mapState.cells[cellIndex];
-      const value = cachedValue === mapState.storm ? mapState.unknown : cachedValue;
-      if (value !== mapState.unknown) {
-        drawPlayerMapCell(ctx, cellX, cellY, cellSize, value, mapState, colors, chunkX, chunkY);
+      hasPlayableTile = true;
+      for (let cornerY = 0; cornerY <= 1; cornerY += 1) {
+        for (let cornerX = 0; cornerX <= 1; cornerX += 1) {
+          const dx = tileX + cornerX - centerTileX;
+          const dy = tileY + cornerY - centerTileY;
+          radiusTilesSq = Math.max(radiusTilesSq, dx * dx + dy * dy);
+        }
       }
     }
   }
 
-  drawPlayerMapStormInnerBorder(ctx, mapState, asteroid, x, y, cellSize, colors);
-  drawPlayerMapViewCircle(ctx, mapState.viewCircle, x, y, width, height, cellSize, colors);
+  const circle = {
+    x: centerTileX / chunkTiles,
+    y: centerTileY / chunkTiles,
+    radius: hasPlayableTile
+      ? (Math.sqrt(radiusTilesSq) + PLAYER_MAP_CIRCLE_PADDING_TILES) / chunkTiles
+      : Math.min(mapState.widthChunks, mapState.heightChunks) / 2
+  };
+  cachedByKey.set(cacheKey, circle);
+  return circle;
 }
 
-function drawPlayerMapBaseCell(ctx, x, y, size, value, mapState, colors) {
-  ctx.fillStyle = colors.backing || "#000000";
-  ctx.fillRect(x, y, size, size);
-  if (value !== mapState.foreground) {
+function playerMapCellInsideCircle(x, y, size, cx, cy, radius) {
+  const dx = x + size * 0.5 - cx;
+  const dy = y + size * 0.5 - cy;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+function drawPlayerMapFilledCircle(ctx, cx, cy, radius, color) {
+  const radiusSq = radius * radius;
+  const minY = Math.floor(cy - radius);
+  const maxY = Math.ceil(cy + radius);
+
+  ctx.fillStyle = color;
+  for (let y = minY; y <= maxY; y += 1) {
+    const dy = y + 0.5 - cy;
+    const spanSq = radiusSq - dy * dy;
+    if (spanSq < 0) {
+      continue;
+    }
+
+    const span = Math.sqrt(spanSq);
+    const x1 = Math.ceil(cx - span - 0.5);
+    const x2 = Math.floor(cx + span - 0.5);
+    if (x2 >= x1) {
+      ctx.fillRect(x1, y, x2 - x1 + 1, 1);
+    }
+  }
+}
+
+function drawPlayerMapCircleBorder(ctx, cx, cy, radius, colors) {
+  const radiusSq = radius * radius;
+  const minX = Math.floor(cx - radius);
+  const maxX = Math.ceil(cx + radius);
+  const minY = Math.floor(cy - radius);
+  const maxY = Math.ceil(cy + radius);
+
+  ctx.fillStyle = colors.foreground;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!playerMapCirclePixelInside(x, y, cx, cy, radiusSq)) {
+        continue;
+      }
+
+      if (playerMapCirclePixelTouchesOutside(x, y, cx, cy, radiusSq)) {
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+}
+
+function drawPlayerMapPlayerDot(ctx, circle, colors) {
+  if (!circle) {
     return;
   }
 
-  const previousAlpha = ctx.globalAlpha;
-  ctx.globalAlpha = previousAlpha * 0.25;
-  ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x, y, size, size);
-  ctx.globalAlpha = previousAlpha;
+  const x = Math.round(circle.x - 0.5);
+  const y = Math.round(circle.y - 0.5);
+  drawPlayerMapCrossMarker(ctx, x, y, colors);
 }
 
-function drawPlayerMapCell(ctx, x, y, size, value, mapState, colors, chunkX, chunkY) {
+function drawPlayerMapCrossMarker(ctx, x, y, colors) {
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x - 2, y - 1, 5, 3);
+  ctx.fillRect(x - 1, y - 2, 3, 5);
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x - 1, y, 3, 1);
+  ctx.fillRect(x, y - 1, 1, 3);
+}
+
+function drawPlayerMapOtherPlayers(ctx, players, mapOriginX, mapOriginY, cellSize, mapCenterX, mapCenterY, mapRadius, colors) {
+  if (!Array.isArray(players) || players.length === 0) {
+    return;
+  }
+
+  const mapRadiusSq = mapRadius * mapRadius;
+  for (const player of players) {
+    const cx = mapOriginX + Number(player.x) * cellSize;
+    const cy = mapOriginY + Number(player.y) * cellSize;
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
+      continue;
+    }
+
+    const marker = { x: cx, y: cy };
+    const markerX = Math.round(marker.x - 0.5);
+    const markerY = Math.round(marker.y - 0.5);
+    if (!playerMapCirclePixelInside(markerX, markerY, mapCenterX, mapCenterY, mapRadiusSq)) {
+      continue;
+    }
+
+    drawPlayerMapPlayerDot(ctx, marker, colors);
+  }
+}
+
+function drawPlayerMapSampledCells(
+  ctx,
+  mapState,
+  asteroid,
+  mapOriginX,
+  mapOriginY,
+  cellSize,
+  mapCenterX,
+  mapCenterY,
+  mapRadius,
+  viewCircle,
+  colors,
+  options = {}
+) {
+  const mapRadiusSq = mapRadius * mapRadius;
+  const canvasWidth = ctx.width ?? ctx.canvas?.width ?? 0;
+  const canvasHeight = ctx.height ?? ctx.canvas?.height ?? 0;
+  const minX = Math.max(0, Math.floor(mapCenterX - mapRadius));
+  const maxX = Math.min(canvasWidth - 1, Math.ceil(mapCenterX + mapRadius));
+  const minY = Math.max(0, Math.floor(mapCenterY - mapRadius));
+  const maxY = Math.min(canvasHeight - 1, Math.ceil(mapCenterY + mapRadius));
+  let currentColor = null;
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!playerMapCirclePixelInside(x, y, mapCenterX, mapCenterY, mapRadiusSq)) {
+        continue;
+      }
+
+      const chunkX = Math.floor((x + 0.5 - mapOriginX) / cellSize);
+      const chunkY = Math.floor((y + 0.5 - mapOriginY) / cellSize);
+      if (chunkX < 0 || chunkY < 0 || chunkX >= mapState.widthChunks || chunkY >= mapState.heightChunks) {
+        continue;
+      }
+
+      const color = playerMapSampledPixelColor(
+        mapState,
+        asteroid,
+        chunkX,
+        chunkY,
+        x,
+        y,
+        viewCircle,
+        colors,
+        options
+      );
+      if (!color) {
+        continue;
+      }
+
+      if (color !== currentColor) {
+        ctx.fillStyle = color;
+        currentColor = color;
+      }
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
+function playerMapSampledPixelColor(mapState, asteroid, chunkX, chunkY, x, y, viewCircle, colors, options = {}) {
+  const stormState = playerMapChunkStormState(mapState, asteroid, chunkX, chunkY);
+  if (stormState === "hidden") {
+    return null;
+  }
+
+  if (stormState !== "band" && playerMapChunkTouchesStorm(mapState, asteroid, chunkX, chunkY)) {
+    return colors.backing || "#000000";
+  }
+
+  const dimmed = options.dimOutsideView === false ? false : !playerMapPixelInsideView(x, y, viewCircle);
+  if (stormState === "band") {
+    return playerMapDitherPixelColor(x, y, colors, dimmed);
+  }
+
+  const value = playerMapChunkVisibleValue(mapState, chunkY * mapState.widthChunks + chunkX);
+  return playerMapValueColor(value, mapState, colors, dimmed);
+}
+
+function playerMapPixelInsideView(x, y, circle) {
+  if (!circle) {
+    return false;
+  }
+
+  const dx = x + 0.5 - circle.x;
+  const dy = y + 0.5 - circle.y;
+  return dx * dx + dy * dy <= circle.radius * circle.radius;
+}
+
+function playerMapChunkVisibleValue(mapState, cellIndex) {
+  const cachedValue = mapState.cells[cellIndex];
+  return cachedValue !== mapState.unknown && cachedValue !== mapState.storm
+    ? cachedValue
+    : mapState.baseCells?.[cellIndex] ?? mapState.unknown;
+}
+
+function playerMapValueColor(value, mapState, colors, dimmed = false) {
+  if (value === mapState.unknown) {
+    return colors.backing || "#000000";
+  }
+
+  if (value === mapState.foreground) {
+    return dimmed ? colors.background : colors.foreground;
+  }
+
+  return dimmed ? colors.backing || "#000000" : colors.background;
+}
+
+function playerMapDitherPixelColor(x, y, colors, dimmed = false) {
+  if ((x + y) % 2 !== 0) {
+    return dimmed ? colors.backing || "#000000" : colors.background;
+  }
+
+  return dimmed ? colors.background : colors.foreground;
+}
+
+function drawPlayerMapCell(ctx, x, y, size, value, mapState, colors, chunkX, chunkY, dimmed = false) {
   if (value === mapState.unknown) {
     ctx.fillStyle = colors.backing || "#000000";
     ctx.fillRect(x, y, size, size);
@@ -1205,30 +1616,33 @@ function drawPlayerMapCell(ctx, x, y, size, value, mapState, colors, chunkX, chu
   }
 
   if (value === mapState.storm) {
-    drawPlayerMapDitherCell(ctx, x, y, size, colors, chunkX, chunkY);
+    drawPlayerMapDitherCell(ctx, x, y, size, colors, chunkX, chunkY, dimmed);
     return;
   }
 
   if (value === mapState.foreground) {
-    ctx.fillStyle = colors.foreground;
+    ctx.fillStyle = dimmed ? colors.background : colors.foreground;
     ctx.fillRect(x, y, size, size);
     return;
   }
 
-  ctx.fillStyle = colors.background;
+  ctx.fillStyle = dimmed ? colors.backing || "#000000" : colors.background;
   ctx.fillRect(x, y, size, size);
 }
 
-function drawPlayerMapDitherCell(ctx, x, y, size, colors, chunkX, chunkY) {
-  ctx.fillStyle = colors.background;
+function drawPlayerMapDitherCell(ctx, x, y, size, colors, chunkX, chunkY, dimmed = false) {
+  ctx.fillStyle = dimmed ? colors.backing || "#000000" : colors.background;
   ctx.fillRect(x, y, size, size);
+  const ditherColor = dimmed ? colors.background : colors.foreground;
   if (size <= 1) {
-    ctx.fillStyle = (chunkX + chunkY) % 2 === 0 ? colors.foreground : colors.background;
-    ctx.fillRect(x, y, 1, 1);
+    if ((chunkX + chunkY) % 2 === 0) {
+      ctx.fillStyle = ditherColor;
+      ctx.fillRect(x, y, 1, 1);
+    }
     return;
   }
 
-  ctx.fillStyle = colors.foreground;
+  ctx.fillStyle = ditherColor;
   for (let offsetY = 0; offsetY < size; offsetY += 1) {
     for (let offsetX = 0; offsetX < size; offsetX += 1) {
       if ((offsetX + offsetY) % 2 === 0) {
@@ -1238,39 +1652,95 @@ function drawPlayerMapDitherCell(ctx, x, y, size, colors, chunkX, chunkY) {
   }
 }
 
-function drawPlayerMapViewCircle(ctx, circle, mapX, mapY, mapWidth, mapHeight, cellSize, colors) {
+function playerMapViewCirclePixels(circle, mapOriginX, mapOriginY, cellSize) {
+  if (!circle) {
+    return null;
+  }
+
+  const cx = mapOriginX + circle.x * cellSize;
+  const cy = mapOriginY + circle.y * cellSize;
+  const radius = circle.radius * cellSize;
+  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(radius) || radius <= 0) {
+    return null;
+  }
+
+  return { x: cx, y: cy, radius };
+}
+
+function playerMapCellInsideView(x, y, size, circle) {
+  if (!circle) {
+    return false;
+  }
+
+  const dx = x + size * 0.5 - circle.x;
+  const dy = y + size * 0.5 - circle.y;
+  return dx * dx + dy * dy <= circle.radius * circle.radius;
+}
+
+function drawPlayerMapViewCircle(ctx, circle, mapOriginX, mapOriginY, mapRadius, colors) {
   if (!circle) {
     return;
   }
 
-  const cx = mapX + circle.x * cellSize;
-  const cy = mapY + circle.y * cellSize;
-  const radius = circle.radius * cellSize;
-  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(radius) || radius <= 0) {
-    return;
-  }
+  const mapRadiusSq = mapRadius * mapRadius;
+  drawPlayerMapSolidCircleBoundary(
+    ctx,
+    circle.x,
+    circle.y,
+    circle.radius,
+    2,
+    2,
+    mapOriginX,
+    mapOriginY,
+    mapRadiusSq,
+    colors
+  );
+}
 
+function drawPlayerMapSolidCircleBoundary(
+  ctx,
+  cx,
+  cy,
+  radius,
+  insideInsetPixels,
+  insideCutoutPixels,
+  clipCx,
+  clipCy,
+  clipRadiusSq,
+  colors
+) {
   const radiusSq = radius * radius;
-  const minX = Math.max(mapX, Math.floor(cx - radius - 2));
-  const maxX = Math.min(mapX + mapWidth - 1, Math.ceil(cx + radius + 2));
-  const minY = Math.max(mapY, Math.floor(cy - radius - 2));
-  const maxY = Math.min(mapY + mapHeight - 1, Math.ceil(cy + radius + 2));
+  const cutoutOuterRadius = Math.max(0, radius - insideInsetPixels);
+  const cutoutInnerRadius = Math.max(0, cutoutOuterRadius - insideCutoutPixels);
+  const cutoutOuterRadiusSq = cutoutOuterRadius * cutoutOuterRadius;
+  const cutoutInnerRadiusSq = cutoutInnerRadius * cutoutInnerRadius;
+  const minX = Math.floor(cx - cutoutOuterRadius - 1);
+  const maxX = Math.ceil(cx + cutoutOuterRadius + 1);
+  const minY = Math.floor(cy - cutoutOuterRadius - 1);
+  const maxY = Math.ceil(cy + cutoutOuterRadius + 1);
 
   for (let y = minY; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
-      const inside = playerMapCirclePixelInside(x, y, cx, cy, radiusSq);
-      const edge = inside
-        ? playerMapCirclePixelTouchesOutside(x, y, cx, cy, radiusSq)
-        : playerMapCirclePixelTouchesInside(x, y, cx, cy, radiusSq);
-      if (!edge) {
+      if (!playerMapCirclePixelInside(x, y, clipCx, clipCy, clipRadiusSq)) {
         continue;
       }
 
-      if (inside) {
-        ctx.fillStyle = colors.background;
-      } else {
-        ctx.fillStyle = colors.foreground;
+      const insideVisualCircle = playerMapCirclePixelInside(x, y, cx, cy, radiusSq);
+      let color = null;
+      if (insideVisualCircle) {
+        if (
+          playerMapCirclePixelInside(x, y, cx, cy, cutoutOuterRadiusSq) &&
+          !playerMapCirclePixelInside(x, y, cx, cy, cutoutInnerRadiusSq)
+        ) {
+          color = colors.background;
+        }
       }
+
+      if (!color) {
+        continue;
+      }
+
+      ctx.fillStyle = color;
       ctx.fillRect(x, y, 1, 1);
     }
   }
@@ -1314,7 +1784,16 @@ function playerMapCirclePixelTouchesInside(x, y, cx, cy, radiusSq) {
   return false;
 }
 
-function drawPlayerMapStormInnerBorder(ctx, mapState, asteroid, mapX, mapY, cellSize, colors) {
+function drawPlayerMapStormInnerBorder(
+  ctx,
+  mapState,
+  asteroid,
+  mapOriginX,
+  mapOriginY,
+  cellSize,
+  colors,
+  clipCircle = null
+) {
   ctx.fillStyle = colors.backing || "#000000";
   for (let chunkY = 0; chunkY < mapState.heightChunks; chunkY += 1) {
     for (let chunkX = 0; chunkX < mapState.widthChunks; chunkX += 1) {
@@ -1326,7 +1805,13 @@ function drawPlayerMapStormInnerBorder(ctx, mapState, asteroid, mapX, mapY, cell
         continue;
       }
 
-      ctx.fillRect(mapX + chunkX * cellSize, mapY + chunkY * cellSize, cellSize, cellSize);
+      const x = playerMapCellX(mapOriginX, chunkX, cellSize);
+      const y = playerMapCellY(mapOriginY, chunkY, cellSize);
+      if (clipCircle && !playerMapCellInsideCircle(x, y, cellSize, clipCircle.x, clipCircle.y, clipCircle.radius)) {
+        continue;
+      }
+
+      ctx.fillRect(x, y, cellSize, cellSize);
     }
   }
 }
@@ -1356,32 +1841,40 @@ function playerMapChunkTouchesStorm(mapState, asteroid, chunkX, chunkY) {
 }
 
 function playerMapChunkStormState(mapState, asteroid, chunkX, chunkY) {
-  if (!playerMapChunkHasStorm(mapState, asteroid, chunkX, chunkY)) {
-    return "none";
+  if (chunkX < 0 || chunkY < 0 || chunkX >= mapState.widthChunks || chunkY >= mapState.heightChunks) {
+    return "hidden";
   }
 
-  const bandChunks = Math.max(1, Math.ceil(PLAYER_MAP_STORM_BAND_TILES / Math.max(1, mapState.chunkTiles)));
-  for (let offsetY = -bandChunks; offsetY <= bandChunks; offsetY += 1) {
-    for (let offsetX = -bandChunks; offsetX <= bandChunks; offsetX += 1) {
-      if (Math.max(Math.abs(offsetX), Math.abs(offsetY)) > bandChunks) {
-        continue;
-      }
+  const state = playerMapStormMask(mapState, asteroid)[chunkY * mapState.widthChunks + chunkX];
+  if (state === PLAYER_MAP_STORM_BAND) {
+    return "band";
+  }
 
-      const neighborX = chunkX + offsetX;
-      const neighborY = chunkY + offsetY;
-      if (
-        neighborX >= 0 &&
-        neighborY >= 0 &&
-        neighborX < mapState.widthChunks &&
-        neighborY < mapState.heightChunks &&
-        playerMapChunkHasNonStorm(mapState, asteroid, neighborX, neighborY)
-      ) {
-        return "band";
-      }
+  return "none";
+}
+
+function playerMapStormMask(mapState, asteroid) {
+  const cached = playerMapStormMaskCache.get(mapState);
+  if (cached?.asteroid === asteroid) {
+    return cached.states;
+  }
+
+  const width = mapState.widthChunks;
+  const height = mapState.heightChunks;
+  const count = width * height;
+  const states = new Uint8Array(count);
+
+  for (let chunkY = 0; chunkY < height; chunkY += 1) {
+    for (let chunkX = 0; chunkX < width; chunkX += 1) {
+      const index = chunkY * width + chunkX;
+      states[index] = playerMapChunkHasStorm(mapState, asteroid, chunkX, chunkY)
+        ? PLAYER_MAP_STORM_BAND
+        : PLAYER_MAP_STORM_NONE;
     }
   }
 
-  return "hidden";
+  playerMapStormMaskCache.set(mapState, { asteroid, states });
+  return states;
 }
 
 function playerMapChunkHasStorm(mapState, asteroid, chunkX, chunkY) {
@@ -1393,23 +1886,6 @@ function playerMapChunkHasStorm(mapState, asteroid, chunkX, chunkY) {
   for (let tileY = startY; tileY < endY; tileY += 1) {
     for (let tileX = startX; tileX < endX; tileX += 1) {
       if (stormTileStateAt(asteroid, tileX, tileY) === STORM_STATE.storm) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-function playerMapChunkHasNonStorm(mapState, asteroid, chunkX, chunkY) {
-  const startX = chunkX * mapState.chunkTiles;
-  const startY = chunkY * mapState.chunkTiles;
-  const endX = Math.min(asteroid.widthTiles, startX + mapState.chunkTiles);
-  const endY = Math.min(asteroid.heightTiles, startY + mapState.chunkTiles);
-
-  for (let tileY = startY; tileY < endY; tileY += 1) {
-    for (let tileX = startX; tileX < endX; tileX += 1) {
-      if (stormTileStateAt(asteroid, tileX, tileY) !== STORM_STATE.storm) {
         return true;
       }
     }
@@ -1872,6 +2348,19 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
   textRenderer.draw(ctx, "ESC - LEAVE", x, y + 2, {
     ...textOptions,
     width: 96
+  });
+}
+
+function drawTerminalConfirmLeaveAction(ctx, x, y, options, colors, textRenderer) {
+  if (options.controllerActive) {
+    drawControllerHudAction(ctx, "faceBottom", "CONFIRM", x, y, colors, textRenderer);
+    return;
+  }
+
+  textRenderer.draw(ctx, "ENTER - CONFIRM", x, y + 2, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: 112
   });
 }
 
@@ -4145,11 +4634,11 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
 
   if (!upgradesUi?.active) {
     if (controllerActive) {
-      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 72, colors, textRenderer);
+      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 74, colors, textRenderer);
       return;
     }
 
-    textRenderer.draw(ctx, "Q - UPGRADES", 10, 72, {
+    textRenderer.draw(ctx, "Q - UPGRADES", 10, 74, {
       fontSize: 8,
       color: colors.foreground
     });
@@ -4170,14 +4659,30 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
       "faceLeft",
       buildUi?.active ? "MINING RAY" : "BUILDER ARM",
       10,
-      88,
+      92,
       colors,
       textRenderer
     );
     return;
   }
 
-  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 82, {
+  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 88, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+}
+
+function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
+  if (!player || upgradesUi?.active) {
+    return;
+  }
+
+  if (controllerActive) {
+    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", 10, 110, colors, textRenderer);
+    return;
+  }
+
+  textRenderer.draw(ctx, "M - MAP", 10, 102, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -4285,6 +4790,18 @@ function drawControllerHudAction(ctx, buttonPosition, label, x, y, colors, textR
   });
 }
 
+function drawControllerDpadHudAction(ctx, buttonPosition, label, x, y, colors, textRenderer) {
+  const rowCenterY = y + 5;
+  const labelY = y + 2;
+
+  drawControllerDpadButtons(ctx, x + 7, rowCenterY, buttonPosition, colors);
+  textRenderer.draw(ctx, label, x + 19, labelY, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: 120
+  });
+}
+
 function drawControllerFaceButtons(ctx, cx, cy, selectedPosition, colors) {
   const buttons = [
     { position: "faceTop", x: 0, y: -4 },
@@ -4300,12 +4817,34 @@ function drawControllerFaceButtons(ctx, cx, cy, selectedPosition, colors) {
   }
 }
 
+function drawControllerDpadButtons(ctx, cx, cy, selectedPosition, colors) {
+  const x = Math.round(cx);
+  const y = Math.round(cy);
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x - 2, y - 6, 5, 13);
+  ctx.fillRect(x - 6, y - 2, 13, 5);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x - 1, y - 5, 3, 11);
+  ctx.fillRect(x - 5, y - 1, 11, 3);
+
+  ctx.fillStyle = colors.foreground;
+  if (selectedPosition === "dpadUp") {
+    ctx.fillRect(x - 1, y - 5, 3, 3);
+  } else if (selectedPosition === "dpadRight") {
+    ctx.fillRect(x + 3, y - 1, 3, 3);
+  } else if (selectedPosition === "dpadDown") {
+    ctx.fillRect(x - 1, y + 3, 3, 3);
+  } else if (selectedPosition === "dpadLeft") {
+    ctx.fillRect(x - 5, y - 1, 3, 3);
+  }
+}
+
 function drawControllerButtonGlyph(ctx, x, y, selected, colors) {
   ctx.fillStyle = colors.background;
   ctx.fillRect(x - 1, y - 1, 3, 3);
   ctx.fillStyle = colors.foreground;
   if (selected) {
-    ctx.fillRect(x - 1, y - 1, 3, 3);
+    drawControllerPressedGlyph(ctx, x, y);
     return;
   }
 
@@ -4313,6 +4852,12 @@ function drawControllerButtonGlyph(ctx, x, y, selected, colors) {
   ctx.fillRect(x + 1, y, 1, 1);
   ctx.fillRect(x, y - 1, 1, 1);
   ctx.fillRect(x, y + 1, 1, 1);
+}
+
+function drawControllerPressedGlyph(ctx, x, y) {
+  ctx.fillRect(x - 1, y - 2, 3, 1);
+  ctx.fillRect(x - 2, y - 1, 5, 3);
+  ctx.fillRect(x - 1, y + 2, 3, 1);
 }
 
 function measurePixelTableColumns(rows, textRenderer, options = {}) {

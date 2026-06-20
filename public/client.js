@@ -91,7 +91,8 @@ const CONTROLLER_DPAD_NAV_THRESHOLD = 0.5;
 const HUD_RESOURCE_FLASH_SECONDS = 0.55;
 const LEAVE_CONFIRM_SECONDS = 2.2;
 const BUILD_REPEAT_SECONDS = 0.08;
-const PLAYER_MAP_CHUNK_TILES = 2;
+const PLAYER_MAP_CHUNK_TILES = 1;
+const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
 const PLAYER_MAP_UNKNOWN = 255;
 const PLAYER_MAP_BACKGROUND = 0;
 const PLAYER_MAP_FOREGROUND = 2;
@@ -219,6 +220,8 @@ const state = {
     asteroidSeed: null,
     widthChunks: 0,
     heightChunks: 0,
+    large: false,
+    circle: null,
     baseCells: null,
     cells: null,
     dirty: false,
@@ -228,6 +231,7 @@ const state = {
   playerAliveById: new Map(),
   spectatorTargetId: null,
   lastRoomId: null,
+  lastActiveMatchKey: null,
   inputSeq: 0,
   nextHuckRockThunkAtSeconds: 0,
   hudFlash: {
@@ -373,6 +377,7 @@ function applyServerRoom(room) {
     state.eliminationNotices = [];
     state.playerAliveById.clear();
     state.spectatorTargetId = null;
+    state.lastActiveMatchKey = null;
     state.upgrades.active = false;
     closeBuildMode();
     state.menu.readySent = false;
@@ -389,6 +394,11 @@ function applyServerRoom(room) {
   } else {
     updateRoomPath("");
   }
+  const activeMatchKey = roomActiveMatchKey(room);
+  if (activeMatchKey && activeMatchKey !== state.lastActiveMatchKey) {
+    resetControlStateForNewMatch();
+  }
+  state.lastActiveMatchKey = activeMatchKey || (room.state === "ended" ? state.lastActiveMatchKey : null);
   if (previousState !== room.state || previousRoomId !== nextRoomId) {
     releaseSpaceUntilKeyup();
     state.upgrades.active = false;
@@ -402,6 +412,34 @@ function applyServerRoom(room) {
   if (room?.state === "menu") {
     state.menu.readySent = false;
   }
+}
+
+function roomActiveMatchKey(room) {
+  if (room?.state !== "active") {
+    return null;
+  }
+
+  return [
+    room.roomId || "",
+    room.startedAtMs || "",
+    room.seed || ""
+  ].join(":");
+}
+
+function resetControlStateForNewMatch() {
+  closeUpgrades();
+  state.upgrades.selectedIndex = null;
+  closeBuildMode();
+  closeTalk();
+  state.playerMap.large = false;
+  state.leaveConfirmUntilSeconds = 0;
+  state.uiHoverId = null;
+  state.hudFlash.rockUntilSeconds = 0;
+  state.controller.cursor.visible = false;
+  resetControllerCursorPosition();
+  resetControllerUpgradeNav();
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
 }
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
@@ -529,9 +567,27 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (
+    event.code === "Enter" &&
+    !event.repeat &&
+    leaveConfirmIsActive()
+  ) {
+    event.preventDefault();
+    confirmLeaveShortcut();
+    return;
+  }
+
   if (event.code === "Space" && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     keys.add(event.code);
+    return;
+  }
+
+  if (event.code === "KeyM" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    if (!event.repeat) {
+      state.playerMap.large = !state.playerMap.large;
+    }
     return;
   }
 
@@ -839,7 +895,7 @@ function draw(now = 0) {
   const buildTarget = buildTargetFromMouse();
   updateHeldBuild(buildTarget, timeSeconds);
   const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
-  const playerMap = playerMapRenderState(snapshot);
+  const playerMap = playerMapRenderState(snapshot, cameraPlayerId);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
@@ -873,6 +929,7 @@ function draw(now = 0) {
 	    hudFlash: hudFlashRenderState(timeSeconds),
 	    leaveConfirm: leaveConfirmRenderState(timeSeconds),
 	    playerMap,
+	    playerMapLarge: state.playerMap.large,
 	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
 	    botDebugOverlay,
 	    theme: state.theme,
@@ -899,6 +956,7 @@ function updateControllerState(timeSeconds) {
   state.controller.resetPressed = input.pressed.reset;
   state.controller.buildPressed = input.pressed.build;
   state.controller.upgradesPressed = input.pressed.upgrades;
+  state.controller.mapPressed = input.pressed.map;
 
   if (input.aim.active) {
     state.controller.aimActive = true;
@@ -923,6 +981,7 @@ function updateControllerState(timeSeconds) {
     input.pressed.reset ||
     input.pressed.build ||
     input.pressed.upgrades ||
+    input.pressed.map ||
     input.pressed.mining ||
     input.pressed.huckRock
   ) {
@@ -938,6 +997,11 @@ function handleControllerActions(input) {
   }
 
   if (handleWaitingRoomControllerActions(input)) {
+    return;
+  }
+
+  if (input.pressed.select && leaveConfirmIsActive()) {
+    confirmLeaveShortcut();
     return;
   }
 
@@ -965,6 +1029,10 @@ function handleControllerActions(input) {
 
   if (input.pressed.upgrades) {
     toggleUpgrades({ controller: true });
+  }
+
+  if (input.pressed.map && !state.upgrades.active) {
+    state.playerMap.large = !state.playerMap.large;
   }
 
   if (input.pressed.build) {
@@ -1470,6 +1538,7 @@ function createControllerState() {
     resetPressed: false,
     buildPressed: false,
     upgradesPressed: false,
+    mapPressed: false,
     lastTimeSeconds: 0,
     upgradeNavDirection: 0,
     upgradeNavRepeatSeconds: 0,
@@ -2542,10 +2611,8 @@ function startLocalBotGame() {
   state.playerId = localPlayerId;
   state.room = localBotRoomFromArena(arena, { state: "active" });
   state.lastRoomId = LOCAL_BOT_ROOM_ID;
-  state.upgrades.active = false;
-  closeBuildMode();
-  cancelMiningRay();
-  releaseSpaceUntilKeyup();
+  state.lastActiveMatchKey = `${LOCAL_BOT_ROOM_ID}:${seed}`;
+  resetControlStateForNewMatch();
   resetLocalDamageAudioState();
   resetEntitySmoothing();
   state.prediction.player = null;
@@ -2581,10 +2648,8 @@ function leaveLocalBotGame() {
   state.eliminationNotices = [];
   state.playerAliveById.clear();
   state.spectatorTargetId = null;
-  state.upgrades.active = false;
-  closeBuildMode();
-  cancelMiningRay();
-  releaseSpaceUntilKeyup();
+  state.lastActiveMatchKey = null;
+  resetControlStateForNewMatch();
   resetLocalDamageAudioState();
   enterMenuRoom(MENU_ROOMS.ready);
 }
@@ -5850,13 +5915,27 @@ function handleLeaveShortcut(nowSeconds = performance.now() / 1000) {
   }
 
   if (state.leaveConfirmUntilSeconds > nowSeconds) {
-    state.leaveConfirmUntilSeconds = 0;
-    leaveCurrentRoom();
     return true;
   }
 
   state.leaveConfirmUntilSeconds = nowSeconds + LEAVE_CONFIRM_SECONDS;
   return true;
+}
+
+function confirmLeaveShortcut(nowSeconds = performance.now() / 1000) {
+  if (!leaveConfirmIsActive(nowSeconds)) {
+    return false;
+  }
+
+  state.leaveConfirmUntilSeconds = 0;
+  leaveCurrentRoom();
+  return true;
+}
+
+function leaveConfirmIsActive(nowSeconds = performance.now() / 1000) {
+  return state.room?.state === "active" &&
+    canLeaveWithShortcut() &&
+    state.leaveConfirmUntilSeconds > nowSeconds;
 }
 
 function canLeaveWithShortcut() {
@@ -6385,6 +6464,8 @@ function resetPlayerMap(asteroid = null, roomId = null) {
       asteroidSeed: null,
       widthChunks: 0,
       heightChunks: 0,
+      large: state.playerMap.large,
+      circle: null,
       baseCells: null,
       cells: null,
       dirty: false,
@@ -6402,9 +6483,11 @@ function resetPlayerMap(asteroid = null, roomId = null) {
     asteroidSeed,
     widthChunks,
     heightChunks,
+    large: state.playerMap.large,
+    circle: buildPlayerMapCircle(asteroid),
     baseCells: cachedMap?.baseCells || buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks),
     cells: cachedMap?.cells || new Uint8Array(widthChunks * heightChunks).fill(PLAYER_MAP_UNKNOWN),
-    dirty: false,
+    dirty: true,
     lastSaveAtMs: 0
   };
 }
@@ -6431,7 +6514,8 @@ function loadPlayerMap(roomId, asteroidSeed, widthChunks, heightChunks) {
 
     return {
       cells,
-      baseCells: decodePlayerMapCells(parsed.baseCells, length)
+      baseCells: decodePlayerMapCells(parsed.baseCells, length),
+      circle: playerMapStoredCircle(parsed.circle)
     };
   } catch (error) {
     window.localStorage.removeItem(PLAYER_MAP_STORAGE_KEY);
@@ -6457,6 +6541,7 @@ function savePlayerMap(options = {}) {
       asteroidSeed: map.asteroidSeed || null,
       widthChunks: map.widthChunks,
       heightChunks: map.heightChunks,
+      circle: map.circle,
       baseCells: encodePlayerMapCells(map.baseCells),
       cells: encodePlayerMapCells(map.cells)
     }));
@@ -6465,6 +6550,24 @@ function savePlayerMap(options = {}) {
   } catch (error) {
     // The map is a convenience cache; gameplay should not depend on storage being available.
   }
+}
+
+function playerMapStoredCircle(circle) {
+  if (
+    !circle ||
+    !Number.isFinite(circle.x) ||
+    !Number.isFinite(circle.y) ||
+    !Number.isFinite(circle.radius) ||
+    circle.radius <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    x: circle.x,
+    y: circle.y,
+    radius: circle.radius
+  };
 }
 
 function encodePlayerMapCells(cells) {
@@ -6513,6 +6616,41 @@ function playerMapCellValue(code) {
   }
 }
 
+function buildPlayerMapCircle(asteroid) {
+  const chunkTiles = Math.max(1, PLAYER_MAP_CHUNK_TILES);
+  const centerTileX = asteroid.widthTiles / 2;
+  const centerTileY = asteroid.heightTiles / 2;
+  let radiusTilesSq = 0;
+  let hasPlayableTile = false;
+
+  for (let tileY = 0; tileY < asteroid.heightTiles; tileY += 1) {
+    for (let tileX = 0; tileX < asteroid.widthTiles; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const playable = asteroid.playable?.[index] === true || asteroid.playable?.[index] === "1";
+      if (!playable) {
+        continue;
+      }
+
+      hasPlayableTile = true;
+      for (let cornerY = 0; cornerY <= 1; cornerY += 1) {
+        for (let cornerX = 0; cornerX <= 1; cornerX += 1) {
+          const dx = tileX + cornerX - centerTileX;
+          const dy = tileY + cornerY - centerTileY;
+          radiusTilesSq = Math.max(radiusTilesSq, dx * dx + dy * dy);
+        }
+      }
+    }
+  }
+
+  return {
+    x: centerTileX / chunkTiles,
+    y: centerTileY / chunkTiles,
+    radius: hasPlayableTile
+      ? (Math.sqrt(radiusTilesSq) + PLAYER_MAP_CIRCLE_PADDING_TILES) / chunkTiles
+      : Math.min(Math.ceil(asteroid.widthTiles / chunkTiles), Math.ceil(asteroid.heightTiles / chunkTiles)) / 2
+  };
+}
+
 function buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks) {
   const cells = new Uint8Array(widthChunks * heightChunks);
   for (let chunkY = 0; chunkY < heightChunks; chunkY += 1) {
@@ -6523,12 +6661,15 @@ function buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks) {
   return cells;
 }
 
-function playerMapRenderState(snapshot) {
+function playerMapRenderState(snapshot, cameraPlayerId = state.playerId) {
   if (!snapshot || state.room?.state !== "active" || !state.asteroid || !state.playerMap.cells || !state.playerMap.baseCells) {
     return null;
   }
 
-  const player = predictedLocalPlayer() || snapshot.players?.find((candidate) => candidate.id === state.playerId);
+  const authoritativePlayer = snapshot.players?.find((candidate) => candidate.id === cameraPlayerId) ||
+    snapshot.players?.find((candidate) => candidate.id === state.playerId);
+  const predicted = cameraPlayerId === state.playerId ? predictedLocalPlayer() : null;
+  const player = predicted || authoritativePlayer;
   if (!player?.alive) {
     return null;
   }
@@ -6546,18 +6687,39 @@ function playerMapRenderState(snapshot) {
     widthChunks: state.playerMap.widthChunks,
     heightChunks: state.playerMap.heightChunks,
     chunkTiles: PLAYER_MAP_CHUNK_TILES,
+    circle: state.playerMap.circle,
     unknown: PLAYER_MAP_UNKNOWN,
     background: PLAYER_MAP_BACKGROUND,
     foreground: PLAYER_MAP_FOREGROUND,
     storm: PLAYER_MAP_STORM,
     baseCells: state.playerMap.baseCells,
     cells: state.playerMap.cells,
+    players: playerMapVisiblePlayers(snapshot, player, chunkWorldSize, visibleRadius),
     viewCircle: {
       x: player.x / chunkWorldSize,
       y: player.y / chunkWorldSize,
       radius: visibleRadius / chunkWorldSize
     }
   };
+}
+
+function playerMapVisiblePlayers(snapshot, localPlayer, chunkWorldSize, visibleRadius) {
+  if (!Array.isArray(snapshot?.players) || !localPlayer) {
+    return [];
+  }
+
+  const visibleRadiusSq = visibleRadius * visibleRadius;
+  return snapshot.players
+    .filter((player) => player?.alive && player.id !== localPlayer.id)
+    .filter((player) => {
+      const dx = player.x - localPlayer.x;
+      const dy = player.y - localPlayer.y;
+      return dx * dx + dy * dy <= visibleRadiusSq;
+    })
+    .map((player) => ({
+      x: player.x / chunkWorldSize,
+      y: player.y / chunkWorldSize
+    }));
 }
 
 function observePlayerMap(player) {

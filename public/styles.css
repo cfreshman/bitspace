@@ -27,6 +27,7 @@ body {
 #minimap {
   background: transparent;
   pointer-events: none;
+  z-index: 1;
 }
 
 .talk-input {
