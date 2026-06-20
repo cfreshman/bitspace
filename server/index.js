@@ -67,6 +67,10 @@ app.get("/health", (_request, response) => {
   });
 });
 
+app.get("*", (_request, response) => {
+  response.sendFile(path.join(publicDir, "index.html"));
+});
+
 let lastTickTime = performance.now();
 
 io.on("connection", (socket) => {
@@ -211,6 +215,38 @@ io.on("connection", (socket) => {
     if (result.room.arena) {
       broadcastGameState(result.room);
     }
+  });
+
+  socket.on(CLIENT_EVENTS.joinNamedRoom, (payload = {}) => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
+
+    const roomName = typeof payload === "string" ? payload : payload?.name;
+    const roomBeforeJoin = roomManager.clientRoom(clientId);
+    const result = roomManager.joinNamedRoom(clientId, roomName);
+    if (!result.ok) {
+      socket.emit(SERVER_EVENTS.notice, {
+        code: result.reason
+      });
+      emitRoom(socket);
+      return;
+    }
+
+    if (roomBeforeJoin && roomBeforeJoin.id !== result.room.id) {
+      socket.leave(roomChannel(roomBeforeJoin));
+      broadcastRoom(roomBeforeJoin);
+      if (roomBeforeJoin.arena) {
+        broadcastSnapshot(roomBeforeJoin);
+      }
+    }
+
+    socket.join(roomChannel(result.room));
+    if (!payload?.silent && result.joined && result.room.state === ROOM_STATES.waiting) {
+      broadcastBeep(result.room, "button");
+    }
+    emitGameState(socket, result.room);
+    broadcastRoom(result.room);
   });
 
   socket.on(CLIENT_EVENTS.resume, (payload = {}) => {

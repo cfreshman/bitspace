@@ -6,6 +6,7 @@ export const CLIENT_EVENTS = Object.freeze({
   buildWall: "client:build-wall",
   heartbeat: "client:heartbeat",
   ready: "client:ready",
+  joinNamedRoom: "client:join-named-room",
   resume: "client:resume",
   start: "client:start",
   leave: "client:leave"

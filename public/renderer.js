@@ -858,7 +858,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
   const leaveConfirmActive = options.leaveConfirm?.active === true;
   if (options.room?.state === "active" && !leaveConfirmActive) {
-    if (localPlayer && !localPlayer.alive) {
+    if (!localPlayer || !localPlayer.alive) {
       drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer);
     } else {
       const playersLeft = (snapshot.players || []).filter((player) => player.alive === true).length;
@@ -911,7 +911,7 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
     return;
   }
 
-  if (state === "active" && localPlayer && !localPlayer.alive) {
+  if (state === "active" && (!localPlayer || !localPlayer.alive)) {
     return;
   }
 
@@ -925,13 +925,15 @@ function drawMenuOverlay(ctx, options, colors, textRenderer) {
 }
 
 function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
-  const count = room.players?.length || 0;
+  const count = Number.isFinite(room.playerSlots) ? room.playerSlots : room.players?.length || 0;
   const maxPlayers = room.maxPlayers || ENGINE.maxPlayers;
   const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
   const secondsLeft = Math.max(0, Math.ceil(((room.autoStartAtMs || 0) - Date.now()) / 1000));
   const status = room.countdownArmed
     ? `STARTING ${formatClock(secondsLeft)}`
-    : count < minPlayers
+    : room.queued
+      ? `QUEUE ${room.queuePosition || 1}`
+      : count < minPlayers
       ? `NEED ${minPlayers} PLAYERS`
       : `START ${formatClock(secondsLeft)}`;
 
@@ -946,9 +948,12 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
 function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer) {
   const panel = { x: 8, y: 8, width: 132, height: 34 };
   const canStart = waitingRoomCanStart(room);
+  const lobbyLabel = room.roomName
+    ? `${String(room.roomName).toUpperCase()} ${count}/${maxPlayers}`
+    : `LOBBY ${count}/${maxPlayers}`;
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, `LOBBY ${count}/${maxPlayers}`, panel.x + panel.width / 2, panel.y + 8, {
+  drawCenteredText(ctx, textRenderer, lobbyLabel, panel.x + panel.width / 2, panel.y + 8, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -1028,8 +1033,9 @@ function waitingRoomCanStart(room) {
   }
 
   const count = room.players?.length || 0;
+  const slotCount = Number.isFinite(room.playerSlots) ? room.playerSlots : count;
   const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
-  return count >= minPlayers;
+  return slotCount >= minPlayers;
 }
 
 function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
@@ -1053,9 +1059,10 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
 
 function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
   const panel = { x: 8, y: 8, width: 132, height: 26 };
+  const title = localPlayer ? "ELIMINATED" : "SPECTATING";
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, "ELIMINATED", panel.x + panel.width / 2, panel.y + 9, {
+  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + 9, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -1397,13 +1404,22 @@ function drawDebugCross(ctx, centerX, centerY, color) {
 function drawEndedHud(ctx, room, options, colors, textRenderer) {
   const won = room.winnerId && room.winnerId === options.playerId;
   const title = won ? "YOU WON!" : "GAME OVER";
-  const panel = { x: 8, y: 8, width: 132, height: 26 };
+  const resetSeconds = Number.isFinite(room.resetToLobbyAtMs)
+    ? Math.max(0, Math.ceil((room.resetToLobbyAtMs - Date.now()) / 1000))
+    : null;
+  const panel = { x: 8, y: 8, width: 132, height: resetSeconds === null ? 26 : 38 };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + 9, {
+  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + (resetSeconds === null ? 9 : 6), {
     fontSize: 8,
     color: colors.foreground
   });
+  if (resetSeconds !== null) {
+    drawCenteredText(ctx, textRenderer, `LOBBY ${formatClock(resetSeconds)}`, panel.x + panel.width / 2, panel.y + 21, {
+      fontSize: 8,
+      color: colors.foreground
+    });
+  }
   drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
 }
 

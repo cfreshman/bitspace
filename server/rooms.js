@@ -20,8 +20,15 @@ export const ROOM_STATES = Object.freeze({
 
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
+const NAMED_ROOM_MAX_LENGTH = 24;
+const NAMED_ROOM_PATTERN = /^[a-zA-Z0-9 _-]{1,24}$/;
+const NAMED_ROOM_RESET_DELAY_MS = 10000;
 const HEARTBEAT_TIMEOUT_MS = ENGINE.heartbeat.timeoutSeconds * 1000;
 const FINAL_COUNTDOWN_BEEP_SECONDS = new Set([3, 2, 1, 0]);
+const ROOM_KIND = Object.freeze({
+  public: "public",
+  named: "named"
+});
 
 export function createRoomManager(options = {}) {
   const now = options.now ?? (() => Date.now());
@@ -29,7 +36,9 @@ export function createRoomManager(options = {}) {
   const clients = new Map();
   const rooms = new Map();
   const clientRooms = new Map();
+  const namedRoomIds = new Map();
   let nextRoomNumber = 1;
+  let nextJoinSequence = 1;
 
   function connectClient({ clientId, clientSecret, name, socketId }) {
     let normalizedClientId = sanitizeClientId(clientId);
@@ -73,6 +82,7 @@ export function createRoomManager(options = {}) {
       participant.socketId = socketId;
       participant.connected = true;
       participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs;
+      syncNamedRoomQueue(room);
       ensureWaitingPlayer(room, client);
       clearParticipantInput(room, client.clientId);
     }
@@ -157,6 +167,7 @@ export function createRoomManager(options = {}) {
       participant.socketId = client.socketId;
       participant.name = client.name;
       participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs || now();
+      syncNamedRoomQueue(existingRoom);
       ensureWaitingPlayer(existingRoom, client);
       syncLobbyControls(existingRoom);
       return { ok: true, room: existingRoom, rejoined: true };
@@ -172,15 +183,7 @@ export function createRoomManager(options = {}) {
     }
 
     const joinedAtMs = now();
-    room.participants.set(clientId, {
-      clientId,
-      name: client.name,
-      socketId: client.socketId,
-      connected: client.connected,
-      joinedAtMs,
-      lastHeartbeatAtMs: client.lastHeartbeatAtMs || joinedAtMs
-    });
-    clientRooms.set(clientId, room.id);
+    addParticipant(room, client, joinedAtMs);
     addPlayer(room.arena, {
       id: clientId,
       name: client.name,
@@ -204,6 +207,69 @@ export function createRoomManager(options = {}) {
     return { ok: true, room, joined: true };
   }
 
+  function joinNamedRoom(clientId, roomName) {
+    const client = clients.get(clientId);
+    if (!client) {
+      return { ok: false, reason: "unknown_client" };
+    }
+
+    const normalizedName = sanitizeNamedRoomName(roomName);
+    const nameKey = namedRoomNameKey(normalizedName);
+    if (!normalizedName || !nameKey) {
+      return { ok: false, reason: "invalid_room_name" };
+    }
+
+    const existingRoom = roomForClient(clientId);
+    if (existingRoom?.kind === ROOM_KIND.named && existingRoom.nameKey === nameKey) {
+      const participant = existingRoom.participants.get(clientId);
+      participant.connected = client.connected;
+      participant.socketId = client.socketId;
+      participant.name = client.name;
+      participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs || now();
+      syncNamedRoomQueue(existingRoom);
+      return {
+        ok: true,
+        room: existingRoom,
+        rejoined: true,
+        queued: isParticipantQueued(existingRoom, clientId)
+      };
+    }
+
+    if (existingRoom) {
+      leaveClient(clientId);
+    }
+
+    let room = namedRoomForKey(nameKey);
+    if (!room) {
+      room = createWaitingRoom({
+        kind: ROOM_KIND.named,
+        name: normalizedName,
+        nameKey
+      });
+    }
+
+    const joinedAtMs = now();
+    addParticipant(room, client, joinedAtMs);
+    if (room.state === ROOM_STATES.waiting) {
+      if (playableParticipantCount(room) === ENGINE.lobby.minPlayers) {
+        room.autoStartAtMs = joinedAtMs + ENGINE.lobby.autoStartSeconds * 1000;
+      }
+      syncNamedRoomQueue(room);
+      if (playableParticipantCount(room) >= ENGINE.maxPlayers) {
+        armStartCountdown(room, "full");
+      }
+    } else {
+      syncNamedRoomQueue(room);
+    }
+
+    return {
+      ok: true,
+      room,
+      joined: true,
+      queued: isParticipantQueued(room, clientId)
+    };
+  }
+
   function resumeClient(clientId, roomId) {
     const client = clients.get(clientId);
     if (!client) {
@@ -221,6 +287,7 @@ export function createRoomManager(options = {}) {
     participant.name = client.name;
     participant.lastHeartbeatAtMs = client.lastHeartbeatAtMs || now();
     clientRooms.set(clientId, room.id);
+    syncNamedRoomQueue(room);
     ensureWaitingPlayer(room, client);
     clearParticipantInput(room, clientId);
     syncLobbyControls(room);
@@ -261,8 +328,11 @@ export function createRoomManager(options = {}) {
     if (room.hostClientId === clientId) {
       room.hostClientId = firstParticipantId(room);
     }
-    if (room.state === ROOM_STATES.waiting && room.participants.size < ENGINE.lobby.minPlayers) {
-      cancelStartCountdown(room);
+    if (room.state === ROOM_STATES.waiting) {
+      syncNamedRoomQueue(room);
+      if (playableParticipantCount(room) < ENGINE.lobby.minPlayers) {
+        cancelStartCountdown(room);
+      }
     }
     syncLobbyControls(room);
 
@@ -294,7 +364,7 @@ export function createRoomManager(options = {}) {
           }
         }
 
-        if (room.participants.size < ENGINE.lobby.minPlayers) {
+        if (playableParticipantCount(room) < ENGINE.lobby.minPlayers) {
           cancelStartCountdown(room);
         } else if (!room.countdownArmed) {
           const remainingMs = room.autoStartAtMs - now();
@@ -314,7 +384,7 @@ export function createRoomManager(options = {}) {
           }
         }
 
-        if (room.participants.size >= ENGINE.lobby.minPlayers && now() >= room.autoStartAtMs) {
+        if (playableParticipantCount(room) >= ENGINE.lobby.minPlayers && now() >= room.autoStartAtMs) {
           const result = startWaitingRoom(room, room.countdownReason || "timer");
           if (result.ok) {
             events.push({ type: "started", room });
@@ -338,6 +408,16 @@ export function createRoomManager(options = {}) {
         if (maybeEndActiveRoom(room, "last_alive")) {
           events.push({ type: "ended", room });
         }
+      }
+
+      if (
+        room.kind === ROOM_KIND.named &&
+        room.state === ROOM_STATES.ended &&
+        room.resetToLobbyAtMs &&
+        now() >= room.resetToLobbyAtMs
+      ) {
+        resetNamedRoomToLobby(room);
+        events.push({ type: "started", room });
       }
     }
 
@@ -378,11 +458,23 @@ export function createRoomManager(options = {}) {
   function availableWaitingRoom() {
     return Array.from(rooms.values())
       .filter((room) =>
+        room.kind === ROOM_KIND.public &&
         room.state === ROOM_STATES.waiting &&
         !room.countdownArmed &&
         room.participants.size < ENGINE.maxPlayers
       )
       .sort((a, b) => a.createdAtMs - b.createdAtMs)[0] || createWaitingRoom();
+  }
+
+  function namedRoomForKey(nameKey) {
+    const roomId = namedRoomIds.get(nameKey);
+    const room = roomId ? rooms.get(roomId) : null;
+    if (room?.kind === ROOM_KIND.named && room.nameKey === nameKey) {
+      return room;
+    }
+
+    namedRoomIds.delete(nameKey);
+    return null;
   }
 
   function roomForClient(clientId) {
@@ -417,20 +509,30 @@ export function createRoomManager(options = {}) {
 
   function destroyRoom(room) {
     rooms.delete(room.id);
+    if (room.kind === ROOM_KIND.named && room.nameKey) {
+      namedRoomIds.delete(room.nameKey);
+    }
 
     for (const clientId of room.participants.keys()) {
       clientRooms.delete(clientId);
     }
   }
 
-  function createWaitingRoom() {
+  function createWaitingRoom(options = {}) {
     const createdAtMs = now();
     const roomNumber = nextRoomNumber;
     const seed = seedFactory(roomNumber);
     nextRoomNumber += 1;
+    const kind = options.kind === ROOM_KIND.named ? ROOM_KIND.named : ROOM_KIND.public;
+    const name = kind === ROOM_KIND.named ? sanitizeNamedRoomName(options.name) : "";
+    const nameKey = kind === ROOM_KIND.named ? namedRoomNameKey(options.nameKey || name) : "";
 
     const room = {
       id: `room-${roomNumber}`,
+      kind,
+      name,
+      nameKey,
+      cycle: 1,
       state: ROOM_STATES.waiting,
       seed,
       createdAtMs,
@@ -446,6 +548,7 @@ export function createRoomManager(options = {}) {
       endReason: null,
       winnerId: null,
       winnerName: null,
+      resetToLobbyAtMs: null,
       countdownArmed: false,
       countdownReason: null,
       countdownStartedAtMs: null,
@@ -453,6 +556,9 @@ export function createRoomManager(options = {}) {
       countdownBeepSeq: 0
     };
     rooms.set(room.id, room);
+    if (kind === ROOM_KIND.named) {
+      namedRoomIds.set(nameKey, room.id);
+    }
     return room;
   }
 
@@ -461,7 +567,7 @@ export function createRoomManager(options = {}) {
       return { ok: false, reason: "no_waiting_room" };
     }
 
-    if (room.participants.size < ENGINE.lobby.minPlayers) {
+    if (playableParticipantCount(room) < ENGINE.lobby.minPlayers) {
       return { ok: false, reason: "not_enough_players" };
     }
 
@@ -526,21 +632,30 @@ export function createRoomManager(options = {}) {
       return { ok: false, reason: "no_waiting_room" };
     }
 
-    if (room.participants.size < ENGINE.lobby.minPlayers) {
+    if (playableParticipantCount(room) < ENGINE.lobby.minPlayers) {
       return { ok: false, reason: "not_enough_players" };
     }
 
-    const participants = sortedParticipants(room);
+    syncNamedRoomQueue(room);
+    const participants = playableParticipants(room);
+    if (participants.length < ENGINE.lobby.minPlayers) {
+      return { ok: false, reason: "not_enough_players" };
+    }
+
     room.state = ROOM_STATES.active;
     room.startedAtMs = now();
     room.startReason = reason;
+    room.resetToLobbyAtMs = null;
+    const matchSeed = room.kind === ROOM_KIND.named
+      ? `${room.seed}:match:${room.cycle}`
+      : room.seed;
     room.arena = createArena({
       id: room.id,
-      seed: room.seed,
+      seed: matchSeed,
       playerCount: participants.length
     });
 
-    const spawnNumbers = randomizedSpawnNumbers(room.seed, participants.length);
+    const spawnNumbers = randomizedSpawnNumbers(matchSeed, participants.length);
     for (let index = 0; index < participants.length; index += 1) {
       const participant = participants[index];
       addPlayer(room.arena, {
@@ -570,6 +685,9 @@ export function createRoomManager(options = {}) {
     room.endReason = reason;
     room.winnerId = winner?.id ?? null;
     room.winnerName = winner?.name ?? null;
+    room.resetToLobbyAtMs = room.kind === ROOM_KIND.named
+      ? now() + NAMED_ROOM_RESET_DELAY_MS
+      : null;
     return true;
   }
 
@@ -604,7 +722,8 @@ export function createRoomManager(options = {}) {
     if (!room.participants.has(room.hostClientId)) {
       room.hostClientId = firstParticipantId(room);
     }
-    if (room.participants.size < ENGINE.lobby.minPlayers) {
+    syncNamedRoomQueue(room);
+    if (playableParticipantCount(room) < ENGINE.lobby.minPlayers) {
       cancelStartCountdown(room);
     }
     syncLobbyControls(room);
@@ -776,11 +895,113 @@ export function createRoomManager(options = {}) {
     player.buttonTargetActivated = false;
   }
 
+  function addParticipant(room, client, joinedAtMs = now()) {
+    room.participants.set(client.clientId, {
+      clientId: client.clientId,
+      name: client.name,
+      socketId: client.socketId,
+      connected: client.connected,
+      joinedAtMs,
+      joinSequence: nextJoinSequence++,
+      lastHeartbeatAtMs: client.lastHeartbeatAtMs || joinedAtMs,
+      queued: false,
+      playerSlot: true
+    });
+    clientRooms.set(client.clientId, room.id);
+  }
+
+  function playableParticipants(room) {
+    if (room.kind !== ROOM_KIND.named) {
+      return sortedParticipants(room).slice(0, ENGINE.maxPlayers);
+    }
+
+    return sortedParticipants(room)
+      .filter((participant) => participant.playerSlot === true)
+      .slice(0, ENGINE.maxPlayers);
+  }
+
+  function playableParticipantCount(room) {
+    return playableParticipants(room).length;
+  }
+
+  function isParticipantQueued(room, clientId) {
+    return room?.participants.get(clientId)?.queued === true;
+  }
+
+  function syncNamedRoomQueue(room) {
+    if (room.kind !== ROOM_KIND.named) {
+      return;
+    }
+
+    const participants = sortedParticipants(room);
+    const playableIds = room.state === ROOM_STATES.active && room.arena
+      ? new Set(room.arena.players.keys())
+      : new Set(participants.slice(0, ENGINE.maxPlayers).map((participant) => participant.clientId));
+
+    for (const participant of participants) {
+      const playerSlot = playableIds.has(participant.clientId);
+      participant.playerSlot = playerSlot;
+      participant.queued = !playerSlot;
+    }
+
+    if (!playableIds.has(room.hostClientId)) {
+      room.hostClientId = participants.find((participant) => playableIds.has(participant.clientId))?.clientId ?? null;
+    }
+
+    if (room.state !== ROOM_STATES.waiting || !room.arena) {
+      return;
+    }
+
+    for (const playerId of Array.from(room.arena.players.keys())) {
+      if (!playableIds.has(playerId)) {
+        room.arena.players.delete(playerId);
+      }
+    }
+
+    for (const participant of participants) {
+      if (!playableIds.has(participant.clientId) || room.arena.players.has(participant.clientId)) {
+        continue;
+      }
+
+      addPlayer(room.arena, {
+        id: participant.clientId,
+        name: participant.name,
+        spawnNumber: nextLobbySpawnNumber(room)
+      });
+    }
+
+    syncLobbyControls(room);
+  }
+
+  function resetNamedRoomToLobby(room) {
+    const resetAtMs = now();
+    room.cycle += 1;
+    room.state = ROOM_STATES.waiting;
+    room.waitingStartedAtMs = resetAtMs;
+    room.autoStartAtMs = resetAtMs + ENGINE.lobby.autoStartSeconds * 1000;
+    room.startedAtMs = null;
+    room.endedAtMs = null;
+    room.startReason = null;
+    room.endReason = null;
+    room.winnerId = null;
+    room.winnerName = null;
+    room.resetToLobbyAtMs = null;
+    room.countdownArmed = false;
+    room.countdownReason = null;
+    room.countdownStartedAtMs = null;
+    room.countdownLastBeepSecond = null;
+    room.countdownBeepSeq = 0;
+    room.lobbySpawnNumbers = randomizedSpawnNumbers(`${room.seed}:lobby:${room.cycle}`, ENGINE.maxPlayers);
+    room.arena = createLobbyArena(`${room.id}:waiting:${room.cycle}`, `${room.seed}:waiting:${room.cycle}`);
+    syncNamedRoomQueue(room);
+  }
+
   return {
     connectClient,
     disconnectClient,
     renameClient,
     readyClient,
+    joinNamedRoom,
     startRoom,
     leaveClient,
     recordHeartbeat,
@@ -828,11 +1049,18 @@ function syncLobbyControls(room) {
 
   const startButton = room.arena.entities.get("lobby-start");
   if (startButton) {
-    startButton.hidden = room.participants.size < ENGINE.lobby.minPlayers;
+    const count = room.kind === ROOM_KIND.named
+      ? Array.from(room.participants.values()).filter((participant) => participant.playerSlot === true).length
+      : room.participants.size;
+    startButton.hidden = count < ENGINE.lobby.minPlayers;
   }
 }
 
 function ensureWaitingPlayer(room, client) {
+  if (room?.kind === ROOM_KIND.named) {
+    return;
+  }
+
   if (room?.state !== ROOM_STATES.waiting || !room.arena || room.arena.players.has(client.clientId)) {
     return;
   }
@@ -874,17 +1102,52 @@ export function createClientSecret() {
   return randomBytes(24).toString("base64url");
 }
 
+export function sanitizeNamedRoomName(value) {
+  const text = String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, NAMED_ROOM_MAX_LENGTH);
+  return NAMED_ROOM_PATTERN.test(text) ? text : "";
+}
+
+export function namedRoomNameKey(value) {
+  return sanitizeNamedRoomName(value)
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "");
+}
+
 function createRoomSeed(roomNumber) {
   return `${randomBytes(5).toString("hex")}-${roomNumber}`;
 }
 
 function snapshotRoom(room, clientId) {
+  const participants = sortedParticipants(room);
+  const playerSlotCount = room.kind === ROOM_KIND.named
+    ? participants.filter((participant) => participant.playerSlot === true).length
+    : participants.length;
+  const queuedParticipants = room.kind === ROOM_KIND.named
+    ? participants.filter((participant) => participant.queued === true)
+    : [];
+  const queuePosition = clientId
+    ? queuedParticipants.findIndex((participant) => participant.clientId === clientId) + 1
+    : 0;
+
   return {
     state: room.state,
     roomId: room.id,
+    roomKind: room.kind || ROOM_KIND.public,
+    roomName: room.name || "",
+    roomPath: room.nameKey ? `/${room.nameKey}` : "",
     clientId,
     maxPlayers: ENGINE.maxPlayers,
     minPlayers: ENGINE.lobby.minPlayers,
+    playerSlots: playerSlotCount,
+    queuedCount: queuedParticipants.length,
+    queued: queuePosition > 0,
+    queuePosition,
     autoStartSeconds: ENGINE.lobby.autoStartSeconds,
     countdownSeconds: ENGINE.lobby.countdownSeconds,
     hostClientId: room.hostClientId,
@@ -898,14 +1161,17 @@ function snapshotRoom(room, clientId) {
     endReason: room.endReason,
     winnerId: room.winnerId,
     winnerName: room.winnerName,
+    resetToLobbyAtMs: room.resetToLobbyAtMs,
     countdownArmed: room.countdownArmed,
     countdownStartedAtMs: room.countdownStartedAtMs,
     countdownBeepSeq: room.countdownBeepSeq,
-    players: sortedParticipants(room).map((participant) => ({
+    players: participants.map((participant) => ({
       clientId: participant.clientId,
       name: participant.name,
       connected: participant.connected,
-      host: participant.clientId === room.hostClientId
+      host: participant.clientId === room.hostClientId,
+      queued: participant.queued === true,
+      playerSlot: participant.playerSlot !== false
     })),
     render: RENDER
   };
@@ -913,7 +1179,11 @@ function snapshotRoom(room, clientId) {
 
 function sortedParticipants(room) {
   return Array.from(room.participants.values())
-    .sort((a, b) => a.joinedAtMs - b.joinedAtMs || a.clientId.localeCompare(b.clientId));
+    .sort((a, b) =>
+      a.joinedAtMs - b.joinedAtMs ||
+      (a.joinSequence || 0) - (b.joinSequence || 0) ||
+      a.clientId.localeCompare(b.clientId)
+    );
 }
 
 function firstParticipantId(room) {

@@ -55,9 +55,11 @@ import { createGamepadControls } from "/gamepad.js";
 import { createRenderer } from "/renderer.js";
 
 const TALK_MAX_CHARS = 36;
+const ROOM_NAME_MAX_CHARS = 24;
 const CLIENT_ID_STORAGE_KEY = "bitspace.clientId";
 const CLIENT_SECRET_STORAGE_KEY = "bitspace.clientSecret";
 const ROOM_ID_STORAGE_KEY = "bitspace.roomId";
+const ROOM_NAME_STORAGE_KEY = "bitspace.roomName";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
@@ -142,6 +144,7 @@ const TERMINAL_LEAVE_ACTION = Object.freeze({
   x: 10,
   eliminatedY: 41,
   endedY: 41,
+  endedCountdownY: 53,
   width: 98,
   height: 13
 });
@@ -287,7 +290,11 @@ socket.on(SERVER_EVENTS.welcome, (payload) => {
   }
   emitHeartbeat();
   if (!isLocalBotGame()) {
-    requestRoomReattach(0, true);
+    if (storedRoomId()) {
+      requestRoomReattach(0, true);
+    } else {
+      requestPathNamedRoomJoin();
+    }
   }
 });
 
@@ -333,6 +340,7 @@ function applyServerRoom(room) {
   }
 
   if (!room || room.state === "menu") {
+    updateRoomPath("");
     releaseSpaceUntilKeyup();
     state.snapshot = null;
     state.asteroid = null;
@@ -354,6 +362,11 @@ function applyServerRoom(room) {
   }
 
   rememberRegisteredRoom(room.roomId);
+  if (room.roomKind === "named" && room.roomName) {
+    updateRoomPath(room.roomName);
+  } else {
+    updateRoomPath("");
+  }
   if (previousState !== room.state || previousRoomId !== nextRoomId) {
     releaseSpaceUntilKeyup();
     state.upgrades.active = false;
@@ -1459,6 +1472,7 @@ function createMenuState() {
     buttonTargetId: null,
     buttonTargetSeconds: 0,
     buttonTargetActivated: false,
+    roomNameDraft: initialRoomNameDraft(),
     asteroids,
     asteroid,
     huckRocks: [],
@@ -2377,6 +2391,11 @@ function activateMenuEntity(entity) {
     return;
   }
 
+  if (entity.action === "named-room") {
+    promptNamedRoomFromMenu();
+    return;
+  }
+
   if (entity.action === "bots") {
     startLocalBotGame();
     return;
@@ -2423,6 +2442,37 @@ function activateReadyFromMenu() {
 
   state.menu.readySent = true;
   socket.emit(CLIENT_EVENTS.ready, { button: true });
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+}
+
+function promptNamedRoomFromMenu() {
+  const initial = normalizedRoomNameDraft() || pathRoomName();
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+  const value = window.prompt("ROOM", initial);
+  if (value === null) {
+    return;
+  }
+
+  joinNamedRoomFromMenu(value);
+}
+
+function joinNamedRoomFromMenu(value = state.menu.roomNameDraft) {
+  const name = sanitizeRoomNameDraft(value).trim();
+  if (!name) {
+    return;
+  }
+
+  if (state.menu.readySent || !socket.connected) {
+    return;
+  }
+
+  window.localStorage.setItem(ROOM_NAME_STORAGE_KEY, name);
+  state.menu.roomNameDraft = name;
+  updateRoomPath(name);
+  state.menu.readySent = true;
+  socket.emit(CLIENT_EVENTS.joinNamedRoom, { name, button: true });
   cancelMiningRay();
   releaseSpaceUntilKeyup();
 }
@@ -3286,7 +3336,8 @@ function menuEntities() {
     menuButton("menu-ready", "ready", "READY", center.x - buttonWidth - buttonGap / 2, top, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + buttonGap / 2, top, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
-    menuButton("menu-bots", "bots", "BOTS", center.x - buttonWidth / 2, secondaryY, buttonWidth)
+    menuButton("menu-room", "named-room", "ROOM", center.x - buttonWidth - buttonGap / 2, secondaryY, buttonWidth),
+    menuButton("menu-bots", "bots", "BOTS", center.x + buttonGap / 2, secondaryY, buttonWidth)
   ];
 }
 
@@ -3976,6 +4027,53 @@ function syncTalkDraft() {
   state.chat.caret = talkInput.selectionStart ?? talkInput.value.length;
   state.chat.selectionStart = talkInput.selectionStart ?? state.chat.caret;
   state.chat.selectionEnd = talkInput.selectionEnd ?? state.chat.caret;
+}
+
+function sanitizeRoomNameDraft(value) {
+  return String(value || "")
+    .replace(/[^a-zA-Z0-9 _-]/g, "")
+    .replace(/\s+/g, " ")
+    .trimStart()
+    .slice(0, ROOM_NAME_MAX_CHARS);
+}
+
+function normalizedRoomNameDraft() {
+  return sanitizeRoomNameDraft(state.menu.roomNameDraft).trim();
+}
+
+function initialRoomNameDraft() {
+  return pathRoomName() ||
+    sanitizeRoomNameDraft(window.localStorage.getItem(ROOM_NAME_STORAGE_KEY) || "");
+}
+
+function pathRoomName() {
+  const pathname = decodeURIComponent(window.location.pathname || "/")
+    .replace(/^\/+|\/+$/g, "");
+  if (!pathname || pathname.includes("/") || pathname.includes(".")) {
+    return "";
+  }
+
+  return sanitizeRoomNameDraft(pathname.replace(/-/g, " "));
+}
+
+function roomPathForName(name) {
+  const key = sanitizeRoomNameDraft(name)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "");
+  return key ? `/${encodeURIComponent(key)}` : "/";
+}
+
+function updateRoomPath(name) {
+  const nextPath = name ? roomPathForName(name) : "/";
+  if (window.location.pathname === nextPath) {
+    return;
+  }
+
+  window.history.pushState({}, "", `${nextPath}${window.location.search || ""}${window.location.hash || ""}`);
 }
 
 function unlockAudio() {
@@ -5763,6 +5861,18 @@ function leaveCurrentRoom() {
   socket.emit(CLIENT_EVENTS.leave);
 }
 
+function requestPathNamedRoomJoin() {
+  const name = pathRoomName();
+  if (!name || !socket.connected || state.menu.readySent) {
+    return false;
+  }
+
+  state.menu.roomNameDraft = name;
+  state.menu.readySent = true;
+  socket.emit(CLIENT_EVENTS.joinNamedRoom, { name });
+  return true;
+}
+
 function requestRoomReattach(now = performance.now(), silent = true) {
   const roomId = storedRoomId();
   if (!roomId) {
@@ -5853,9 +5963,12 @@ function activeRoomButtons() {
 
 function terminalLeaveActionRect() {
   const ended = state.room?.state === "ended";
+  const endedY = ended && Number.isFinite(state.room?.resetToLobbyAtMs)
+    ? TERMINAL_LEAVE_ACTION.endedCountdownY
+    : TERMINAL_LEAVE_ACTION.endedY;
   return {
     x: TERMINAL_LEAVE_ACTION.x,
-    y: ended ? TERMINAL_LEAVE_ACTION.endedY : TERMINAL_LEAVE_ACTION.eliminatedY,
+    y: ended ? endedY : TERMINAL_LEAVE_ACTION.eliminatedY,
     width: TERMINAL_LEAVE_ACTION.width,
     height: TERMINAL_LEAVE_ACTION.height
   };
@@ -6170,6 +6283,13 @@ function cameraPlayerIdForRoom() {
     return room.winnerId;
   }
 
+  if (!player && (room?.state === "waiting" || room?.state === "active")) {
+    return randomAliveSpectatorTargetId({
+      id: state.playerId || state.clientId || "spectator",
+      eliminatedAtTick: state.snapshot?.tick ?? 0
+    }) || firstSnapshotPlayerId() || state.playerId;
+  }
+
   if (!player || player.alive) {
     state.spectatorTargetId = null;
     return state.playerId;
@@ -6204,6 +6324,10 @@ function randomAliveSpectatorTargetId(eliminatedPlayer) {
   );
   state.spectatorTargetId = alivePlayers[Math.floor(random() * alivePlayers.length)]?.id || alivePlayers[0].id;
   return state.spectatorTargetId;
+}
+
+function firstSnapshotPlayerId() {
+  return state.snapshot?.players?.[0]?.id ?? null;
 }
 
 function botChunkMapRenderState(cameraPlayerId) {
