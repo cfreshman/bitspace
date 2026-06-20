@@ -143,8 +143,12 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
 const TERMINAL_LEAVE_ACTION = Object.freeze({
   x: 10,
   eliminatedY: 41,
-  endedY: 41,
-  endedCountdownY: 53,
+  endedPanelY: 8,
+  endedRowStartY: 29,
+  endedRowStep: 10,
+  endedCountdownGap: 4,
+  endedBottomPadding: 4,
+  endedLeaveGap: 7,
   width: 98,
   height: 13
 });
@@ -5963,15 +5967,34 @@ function activeRoomButtons() {
 
 function terminalLeaveActionRect() {
   const ended = state.room?.state === "ended";
-  const endedY = ended && Number.isFinite(state.room?.resetToLobbyAtMs)
-    ? TERMINAL_LEAVE_ACTION.endedCountdownY
-    : TERMINAL_LEAVE_ACTION.endedY;
   return {
     x: TERMINAL_LEAVE_ACTION.x,
-    y: ended ? endedY : TERMINAL_LEAVE_ACTION.eliminatedY,
+    y: ended ? endedTerminalLeaveActionY() : TERMINAL_LEAVE_ACTION.eliminatedY,
     width: TERMINAL_LEAVE_ACTION.width,
     height: TERMINAL_LEAVE_ACTION.height
   };
+}
+
+function endedTerminalLeaveActionY() {
+  return TERMINAL_LEAVE_ACTION.endedPanelY +
+    endedHudPanelHeight() +
+    TERMINAL_LEAVE_ACTION.endedLeaveGap;
+}
+
+function endedHudPanelHeight() {
+  const rowCount = endedHudResultRowCount();
+  const contentBottom = TERMINAL_LEAVE_ACTION.endedRowStartY +
+    rowCount * TERMINAL_LEAVE_ACTION.endedRowStep;
+  const countdownBottom = Number.isFinite(state.room?.resetToLobbyAtMs)
+    ? contentBottom + TERMINAL_LEAVE_ACTION.endedCountdownGap + 8
+    : contentBottom;
+  return countdownBottom + TERMINAL_LEAVE_ACTION.endedBottomPadding;
+}
+
+function endedHudResultRowCount() {
+  const snapshotPlayers = Array.isArray(state.snapshot?.players) ? state.snapshot.players : [];
+  const roomPlayers = Array.isArray(state.room?.players) ? state.room.players : [];
+  return Math.max(1, Math.min(ENGINE.maxPlayers, snapshotPlayers.length || roomPlayers.length || 0));
 }
 
 function screenRoomButtonAtPoint(x, y) {

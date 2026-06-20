@@ -79,6 +79,18 @@ const HUD_FLASH_RATE = Object.freeze({
   slow: 4,
   fast: 14
 });
+const ENDED_HUD_LAYOUT = Object.freeze({
+  x: 8,
+  y: 8,
+  width: 116,
+  titleY: 5,
+  headerY: 18,
+  rowStartY: 29,
+  rowStep: 10,
+  rowHighlightHeight: 9,
+  countdownGap: 4,
+  bottomPadding: 4
+});
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
 const ORE_RING_STEPS = 16;
@@ -1404,23 +1416,144 @@ function drawDebugCross(ctx, centerX, centerY, color) {
 function drawEndedHud(ctx, room, options, colors, textRenderer) {
   const won = room.winnerId && room.winnerId === options.playerId;
   const title = won ? "YOU WON!" : "GAME OVER";
+  const results = endGameResults(room, options.snapshot);
+  const rowCount = Math.max(1, results.length);
   const resetSeconds = Number.isFinite(room.resetToLobbyAtMs)
     ? Math.max(0, Math.ceil((room.resetToLobbyAtMs - Date.now()) / 1000))
     : null;
-  const panel = { x: 8, y: 8, width: 132, height: resetSeconds === null ? 26 : 38 };
-
-  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + (resetSeconds === null ? 9 : 6), {
+  const panel = {
+    x: ENDED_HUD_LAYOUT.x,
+    y: ENDED_HUD_LAYOUT.y,
+    width: ENDED_HUD_LAYOUT.width,
+    height: endedHudPanelHeight(rowCount, resetSeconds !== null)
+  };
+  const textOptions = {
     fontSize: 8,
     color: colors.foreground
-  });
-  if (resetSeconds !== null) {
-    drawCenteredText(ctx, textRenderer, `LOBBY ${formatClock(resetSeconds)}`, panel.x + panel.width / 2, panel.y + 21, {
-      fontSize: 8,
-      color: colors.foreground
+  };
+  const placeX = panel.x + 8;
+  const killsRight = panel.x + 68;
+  const timeRight = panel.x + panel.width - 8;
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + ENDED_HUD_LAYOUT.titleY, textOptions);
+  drawRightAlignedText(ctx, textRenderer, "KILLS", killsRight, panel.y + ENDED_HUD_LAYOUT.headerY, textOptions);
+  drawRightAlignedText(ctx, textRenderer, "TIME", timeRight, panel.y + ENDED_HUD_LAYOUT.headerY, textOptions);
+
+  results.forEach((result, index) => {
+    const rowY = panel.y + ENDED_HUD_LAYOUT.rowStartY + index * ENDED_HUD_LAYOUT.rowStep;
+    const highlighted = result.id === options.playerId;
+    const rowTextOptions = {
+      ...textOptions,
+      color: highlighted ? colors.background : colors.foreground
+    };
+    if (highlighted) {
+      ctx.fillStyle = colors.foreground;
+      ctx.fillRect(
+        panel.x + 4,
+        rowY - 1,
+        panel.width - 8,
+        ENDED_HUD_LAYOUT.rowHighlightHeight
+      );
+    }
+
+    textRenderer.draw(ctx, placeLabel(index + 1), placeX, rowY, {
+      ...rowTextOptions,
+      width: 30
     });
+    drawRightAlignedText(ctx, textRenderer, result.killsLabel, killsRight, rowY, rowTextOptions);
+    drawRightAlignedText(ctx, textRenderer, result.timeLabel, timeRight, rowY, rowTextOptions);
+  });
+
+  if (resetSeconds !== null) {
+    const countdownY = panel.y + endedHudCountdownY(rowCount);
+    drawCenteredText(ctx, textRenderer, `LOBBY ${formatClock(resetSeconds)}`, panel.x + panel.width / 2, countdownY, textOptions);
   }
   drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+}
+
+function endedHudPanelHeight(rowCount, hasCountdown) {
+  const contentBottom = ENDED_HUD_LAYOUT.rowStartY + rowCount * ENDED_HUD_LAYOUT.rowStep;
+  const countdownBottom = hasCountdown
+    ? endedHudCountdownY(rowCount) + 8
+    : contentBottom;
+  return countdownBottom + ENDED_HUD_LAYOUT.bottomPadding;
+}
+
+function endedHudCountdownY(rowCount) {
+  return ENDED_HUD_LAYOUT.rowStartY +
+    rowCount * ENDED_HUD_LAYOUT.rowStep +
+    ENDED_HUD_LAYOUT.countdownGap;
+}
+
+function endGameResults(room, snapshot) {
+  const snapshotPlayers = Array.isArray(snapshot?.players) ? snapshot.players : [];
+  const roomPlayers = Array.isArray(room?.players) ? room.players : [];
+  const players = snapshotPlayers.length > 0
+    ? snapshotPlayers
+    : roomPlayers.map((player) => ({
+        id: player.id || player.clientId,
+        clientId: player.clientId,
+        name: player.name,
+        alive: player.alive !== false,
+        kills: 0,
+        eliminatedAtTick: null
+      }));
+  const winnerId = room?.winnerId || players.find((player) => player.alive === true)?.id || null;
+
+  return players
+    .map((player, index) => {
+      const rawEliminatedAtTick = player.eliminatedAtTick;
+      const eliminatedAtTick = Number(rawEliminatedAtTick);
+      const hasEliminatedAtTick = rawEliminatedAtTick !== null &&
+        rawEliminatedAtTick !== undefined &&
+        Number.isFinite(eliminatedAtTick);
+      const alive = player.alive === true || player.id === winnerId || player.clientId === winnerId;
+      const kills = Math.max(0, Math.floor(Number(player.kills || 0)));
+      return {
+        id: player.id || player.clientId || `player-${index}`,
+        number: Number.isFinite(player.number) ? player.number : index + 1,
+        alive,
+        kills,
+        eliminatedAtTick: hasEliminatedAtTick ? eliminatedAtTick : null,
+        killsLabel: kills > 0 ? String(kills) : "",
+        timeLabel: alive || !hasEliminatedAtTick
+          ? ""
+          : formatClock(Math.max(0, Math.floor(eliminatedAtTick / ENGINE.tickRate)))
+      };
+    })
+    .sort((a, b) => {
+      const aWinner = a.id === winnerId;
+      const bWinner = b.id === winnerId;
+      if (aWinner !== bWinner) {
+        return aWinner ? -1 : 1;
+      }
+
+      const aTick = Number.isFinite(a.eliminatedAtTick) ? a.eliminatedAtTick : Number.POSITIVE_INFINITY;
+      const bTick = Number.isFinite(b.eliminatedAtTick) ? b.eliminatedAtTick : Number.POSITIVE_INFINITY;
+      return bTick - aTick ||
+        b.kills - a.kills ||
+        a.number - b.number ||
+        a.id.localeCompare(b.id);
+    })
+    .slice(0, ENGINE.maxPlayers);
+}
+
+function placeLabel(place) {
+  if (place % 100 >= 11 && place % 100 <= 13) {
+    return `${place}TH`;
+  }
+
+  switch (place % 10) {
+    case 1:
+      return `${place}ST`;
+    case 2:
+      return `${place}ND`;
+    case 3:
+      return `${place}RD`;
+    default:
+      return `${place}TH`;
+  }
 }
 
 function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
@@ -1522,6 +1655,18 @@ function drawCenteredText(ctx, textRenderer, text, centerX, y, options = {}) {
   textRenderer.draw(ctx, text, Math.round(centerX - textWidth / 2), y, {
     ...options,
     width
+  });
+}
+
+function drawRightAlignedText(ctx, textRenderer, text, rightX, y, options = {}) {
+  if (!text) {
+    return;
+  }
+
+  const textWidth = textRenderer.measure(text, options);
+  textRenderer.draw(ctx, text, rightX - textWidth, y, {
+    ...options,
+    width: textWidth + 1
   });
 }
 

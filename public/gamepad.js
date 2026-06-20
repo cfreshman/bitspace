@@ -71,7 +71,15 @@ function selectedGamepad(boundGamepadIndex) {
     return bound;
   }
 
+  if (!windowHasFocus()) {
+    return null;
+  }
+
   return Array.from(gamepads).find((gamepad) => gamepad?.connected && gamepadHasInput(gamepad)) || null;
+}
+
+function windowHasFocus() {
+  return typeof document === "undefined" || document.hasFocus?.() !== false;
 }
 
 function gamepadHasInput(gamepad) {
