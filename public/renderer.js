@@ -53,7 +53,7 @@ const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
   { x: 0, y: 1 },
   { x: 1, y: 1 }
 ]);
-const ROCK_OUTER_CORNER_RADIUS = 3;
+const ROCK_OUTER_CORNER_RADIUS = Math.round(RENDER.tileSize / 3);
 const ROCK_INNER_CORNER_RADIUS = 1;
 const SMALL_ORB_RADIUS = 3;
 const REAR_ORBS = Object.freeze([
@@ -71,11 +71,45 @@ const MINING_RAY_EMITTER_RADIUS = 1;
 const MINING_RAY_EMITTER_LENGTH = 8;
 const MINING_RAY_HIT_FLARE_RADIUS = 3;
 const MAX_PARTICLES = 260;
+const HUD_FLASH_MODE = Object.freeze({
+  additive: "additive",
+  subtractive: "subtractive"
+});
+const HUD_FLASH_RATE = Object.freeze({
+  slow: 4,
+  fast: 14
+});
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
 const ORE_RING_STEPS = 16;
 const ORE_MINING_ROTATION = 0.26;
 const ORE_OCCLUSION_PADDING = 0.85;
+const BOT_CHUNK_MAP_DOT_SIZE = 1;
+const BOT_CHUNK_MAP_DOT_GAP = 1;
+const BOT_CHUNK_MAP_ACTIVE_SIZE = 3;
+const BOT_CHUNK_MAP_HEAT_SIZE = 2;
+const BOT_DEBUG_PANEL = Object.freeze({
+  x: 8,
+  y: 8,
+  width: 220,
+  padding: 5,
+  titleHeight: 11,
+  lineHeight: 9
+});
+const BOT_DEBUG_COLORS = Object.freeze({
+  panelBackground: "#060910",
+  panelBorder: "#65ceff",
+  title: "#ffe066",
+  text: "#d7f5ff",
+  muted: "#7894a8",
+  path: "#32d6ff",
+  pathDone: "#465d73",
+  pathActive: "#ffe066",
+  pathInvalid: "#ff3355",
+  mineable: "#ff8f3d",
+  player: "#ffffff",
+  mining: "#ff4d6d"
+});
 const stormNoiseCache = new Map();
 const stormPatternCache = new Map();
 let stormPatternCacheFrame = null;
@@ -794,7 +828,16 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     if (renderPlayer.mining) {
       drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
     }
-    drawShip(ctx, renderPlayer, camera, options.asteroid, colors, options.timeSeconds ?? snapshot.tick / 60, textRenderer);
+    drawShip(
+      ctx,
+      renderPlayer,
+      camera,
+      options.asteroid,
+      colors,
+      options.timeSeconds ?? snapshot.tick / 60,
+      textRenderer,
+      options.room?.state === "ended"
+    );
   }
 
   drawControllerAimCursor(ctx, localPlayer, camera, options.controllerAimCursor, colors);
@@ -810,28 +853,35 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   for (const renderPlayer of renderPlayers) {
     drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
   }
+  drawBotDebugWorldOverlay(ctx, options.botDebugOverlay, camera);
   endWorldViewport(ctx);
 
-  if (options.room?.state === "active") {
+  const leaveConfirmActive = options.leaveConfirm?.active === true;
+  if (options.room?.state === "active" && !leaveConfirmActive) {
     if (localPlayer && !localPlayer.alive) {
       drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer);
     } else {
+      const playersLeft = (snapshot.players || []).filter((player) => player.alive === true).length;
       drawPlayerHud(
         ctx,
         localPlayer,
         colors,
         textRenderer,
         options.hudFlash,
-        options.timeSeconds
+        options.timeSeconds,
+        playersLeft
       );
       drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
       drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
     }
-  }
-  drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
-  drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
-  drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
-  drawControllerCursor(ctx, options.controllerCursor, colors);
+	  }
+	  drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
+	  drawLeaveConfirmHud(ctx, options.leaveConfirm, options, colors, textRenderer);
+	  drawBotChunkMap(ctx, options.botChunkMap, colors, textRenderer);
+	  drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
+	  drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
+	  drawControllerCursor(ctx, options.controllerCursor, colors);
+	  drawBotDebugPanel(ctx, options.botDebugOverlay, textRenderer);
 }
 
 function beginWorldViewport(ctx, colors) {
@@ -958,11 +1008,10 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRe
 }
 
 function drawWaitingDisabledFlash(ctx, x, y, options, colors, textRenderer) {
-  if (!options.hudFlash?.miningRayDisabled) {
-    return;
-  }
-
-  if (Math.floor((options.timeSeconds || 0) * 4) % 2 === 0) {
+  if (!hudFlashVisible(options.hudFlash?.miningRayDisabled, options.timeSeconds, {
+    mode: HUD_FLASH_MODE.additive,
+    rate: HUD_FLASH_RATE.slow
+  })) {
     return;
   }
 
@@ -1011,6 +1060,338 @@ function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
     color: colors.foreground
   });
   drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+}
+
+function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
+  if (!leaveConfirm?.active) {
+    return;
+  }
+
+  const panel = { x: 8, y: 8, width: 132, height: 26 };
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, "CONFIRM LEAVE?", panel.x + panel.width / 2, panel.y + 5, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+  drawLeaveConfirmFuse(ctx, panel.x + 9, panel.y + 19, panel.width - 18, leaveConfirm.progress, colors);
+  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+}
+
+function drawLeaveConfirmFuse(ctx, x, y, width, progress, colors) {
+  const fuseProgress = clamp(Number(progress), 0, 1);
+  const litWidth = Math.round(width * fuseProgress);
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(x, y, width, 1);
+  ctx.fillRect(x, y + 2, width, 1);
+  ctx.fillRect(x, y, 1, 3);
+  ctx.fillRect(x + width - 1, y, 1, 3);
+
+  if (litWidth < width - 2) {
+    ctx.fillStyle = colors.background;
+    ctx.fillRect(x + 1 + litWidth, y + 1, width - 2 - litWidth, 1);
+  }
+
+  if (litWidth > 0) {
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(x + 1, y + 1, Math.min(width - 2, litWidth), 1);
+  }
+}
+
+function drawBotChunkMap(ctx, map, colors, textRenderer) {
+  if (!map || !Number.isFinite(map.cellsX) || !Number.isFinite(map.cellsY)) {
+    return;
+  }
+
+  const cellsX = Math.max(1, Math.floor(map.cellsX));
+  const cellsY = Math.max(1, Math.floor(map.cellsY));
+  const dotPitch = BOT_CHUNK_MAP_DOT_SIZE + BOT_CHUNK_MAP_DOT_GAP;
+  const activeInset = Math.floor(BOT_CHUNK_MAP_ACTIVE_SIZE / 2);
+  const mapWidth = (cellsX - 1) * dotPitch + BOT_CHUNK_MAP_DOT_SIZE;
+  const mapHeight = (cellsY - 1) * dotPitch + BOT_CHUNK_MAP_DOT_SIZE;
+  const padding = 4;
+  const titleHeight = 10;
+  const title = "AI CHUNKS";
+  const titleWidth = textRenderer.measure(title, { fontSize: 8 });
+  const panel = {
+    x: 8,
+    y: ctx.height - (mapHeight + activeInset * 2 + titleHeight + padding * 2) - 8,
+    width: Math.max(mapWidth + activeInset * 2 + padding * 2, titleWidth + padding * 2),
+    height: mapHeight + activeInset * 2 + titleHeight + padding * 2
+  };
+  const mapX = panel.x + padding + activeInset;
+  const mapY = panel.y + padding + titleHeight + activeInset;
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  textRenderer.draw(ctx, title, panel.x + padding, panel.y + padding, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: panel.width - padding * 2
+  });
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(mapX - activeInset - 1, mapY - activeInset - 1, mapWidth + activeInset * 2 + 2, 1);
+  ctx.fillRect(mapX - activeInset - 1, mapY + mapHeight + activeInset, mapWidth + activeInset * 2 + 2, 1);
+  ctx.fillRect(mapX - activeInset - 1, mapY - activeInset - 1, 1, mapHeight + activeInset * 2 + 2);
+  ctx.fillRect(mapX + mapWidth + activeInset, mapY - activeInset - 1, 1, mapHeight + activeInset * 2 + 2);
+
+  for (const cell of map.heat || []) {
+    drawBotChunkHeat(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  }
+
+  for (const cell of map.explored || []) {
+    drawBotChunkVisit(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  }
+
+  const navSeen = new Set();
+  for (const cell of map.nav || []) {
+    const key = `${cell.x}:${cell.y}`;
+    if (navSeen.has(key)) {
+      continue;
+    }
+    navSeen.add(key);
+    drawBotChunkDot(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  }
+
+  drawBotChunkTarget(ctx, map.wander, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  drawBotChunkTarget(ctx, map.resource, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  drawBotChunkTarget(ctx, map.flee, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  drawBotChunkThreat(ctx, map.threat, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+  drawBotChunkCurrent(ctx, map.current, mapX, mapY, dotPitch, cellsX, cellsY, colors);
+}
+
+function drawBotChunkVisit(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors) {
+  const point = botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY);
+  if (!point) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(point.x, point.y, BOT_CHUNK_MAP_DOT_SIZE, BOT_CHUNK_MAP_DOT_SIZE);
+}
+
+function drawBotChunkHeat(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors) {
+  const point = botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY);
+  if (!point) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(point.x, point.y, BOT_CHUNK_MAP_HEAT_SIZE, BOT_CHUNK_MAP_HEAT_SIZE);
+}
+
+function drawBotChunkDot(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors) {
+  const point = botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY);
+  if (!point) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(point.x, point.y, BOT_CHUNK_MAP_DOT_SIZE, BOT_CHUNK_MAP_DOT_SIZE);
+}
+
+function drawBotChunkTarget(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors) {
+  const point = botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY);
+  if (!point) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(point.x, point.y, BOT_CHUNK_MAP_DOT_SIZE, BOT_CHUNK_MAP_DOT_SIZE);
+}
+
+function drawBotChunkThreat(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors) {
+  const point = botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY);
+  if (!point) {
+    return;
+  }
+
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(point.x, point.y, BOT_CHUNK_MAP_DOT_SIZE, BOT_CHUNK_MAP_DOT_SIZE);
+}
+
+function drawBotChunkCurrent(ctx, cell, mapX, mapY, dotPitch, cellsX, cellsY, colors) {
+  const point = botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY);
+  if (!point) {
+    return;
+  }
+
+  const inset = Math.floor(BOT_CHUNK_MAP_ACTIVE_SIZE / 2);
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(
+    point.x - inset,
+    point.y - inset,
+    BOT_CHUNK_MAP_ACTIVE_SIZE,
+    BOT_CHUNK_MAP_ACTIVE_SIZE
+  );
+}
+
+function botChunkCellPoint(cell, mapX, mapY, dotPitch, cellsX, cellsY) {
+  if (!cell || !Number.isFinite(cell.x) || !Number.isFinite(cell.y)) {
+    return null;
+  }
+
+  const x = Math.floor(cell.x);
+  const y = Math.floor(cell.y);
+  if (x < 0 || y < 0 || x >= cellsX || y >= cellsY) {
+    return null;
+  }
+
+  return {
+    x: mapX + x * dotPitch,
+    y: mapY + y * dotPitch
+  };
+}
+
+function drawBotDebugWorldOverlay(ctx, overlay, camera) {
+  if (!overlay || !camera) {
+    return;
+  }
+
+  const path = Array.isArray(overlay.path) ? overlay.path : [];
+  const cursor = Math.max(0, Math.floor(Number(overlay.pathCursor || 0)));
+  for (let index = 1; index < path.length; index += 1) {
+    const from = worldToScreenExact(path[index - 1], camera);
+    const to = worldToScreenExact(path[index], camera);
+    const color = path[index].directFromPrevious === false
+      ? BOT_DEBUG_COLORS.pathInvalid
+      : index <= cursor
+      ? BOT_DEBUG_COLORS.pathDone
+      : index === cursor + 1
+        ? BOT_DEBUG_COLORS.pathActive
+        : path[index].mineable
+          ? BOT_DEBUG_COLORS.mineable
+          : BOT_DEBUG_COLORS.path;
+    drawDebugLine(ctx, from, to, color);
+  }
+
+  for (let index = 0; index < path.length; index += 1) {
+    const point = worldToScreen(path[index], camera);
+    const color = index === cursor + 1
+      ? BOT_DEBUG_COLORS.pathActive
+      : path[index].mineable
+        ? BOT_DEBUG_COLORS.mineable
+        : BOT_DEBUG_COLORS.path;
+    drawDebugBox(ctx, point.x, point.y, index === cursor + 1 ? 5 : 3, color);
+  }
+
+  for (const target of overlay.targets || []) {
+    const point = worldToScreen(target, camera);
+    drawDebugCross(ctx, point.x, point.y, target.color || BOT_DEBUG_COLORS.title);
+  }
+
+  if (overlay.miningTarget) {
+    const point = worldToScreen(overlay.miningTarget, camera);
+    drawDebugBox(ctx, point.x, point.y, 7, BOT_DEBUG_COLORS.mining);
+  }
+
+  if (overlay.player) {
+    const point = worldToScreen(overlay.player, camera);
+    drawDebugBox(ctx, point.x, point.y, 5, BOT_DEBUG_COLORS.player);
+  }
+}
+
+function drawBotDebugPanel(ctx, overlay, textRenderer) {
+  if (!overlay) {
+    return;
+  }
+
+  const lines = Array.isArray(overlay.lines) ? overlay.lines : [];
+  const panel = {
+    x: BOT_DEBUG_PANEL.x,
+    y: BOT_DEBUG_PANEL.y,
+    width: Math.min(BOT_DEBUG_PANEL.width, ctx.width - BOT_DEBUG_PANEL.x * 2),
+    height: BOT_DEBUG_PANEL.padding * 2 +
+      BOT_DEBUG_PANEL.titleHeight +
+      BOT_DEBUG_PANEL.lineHeight * Math.min(lines.length, 16)
+  };
+
+  ctx.fillStyle = BOT_DEBUG_COLORS.panelBackground;
+  ctx.fillRect(panel.x, panel.y, panel.width, panel.height);
+  ctx.fillStyle = BOT_DEBUG_COLORS.panelBorder;
+  ctx.fillRect(panel.x, panel.y, panel.width, 1);
+  ctx.fillRect(panel.x, panel.y + panel.height - 1, panel.width, 1);
+  ctx.fillRect(panel.x, panel.y, 1, panel.height);
+  ctx.fillRect(panel.x + panel.width - 1, panel.y, 1, panel.height);
+
+  textRenderer.draw(ctx, `BOT DEBUG: ${overlay.title || "-"}`, panel.x + BOT_DEBUG_PANEL.padding, panel.y + 4, {
+    fontSize: 8,
+    color: BOT_DEBUG_COLORS.title,
+    width: panel.width - BOT_DEBUG_PANEL.padding * 2
+  });
+
+  const lineX = panel.x + BOT_DEBUG_PANEL.padding;
+  let lineY = panel.y + BOT_DEBUG_PANEL.padding + BOT_DEBUG_PANEL.titleHeight;
+  for (const line of lines.slice(0, 16)) {
+    const color = line.startsWith("TARGET:") || line.startsWith("NAV:")
+      ? BOT_DEBUG_COLORS.pathActive
+      : line.startsWith("RES:") || line.startsWith("UP:")
+        ? "#9effa2"
+        : BOT_DEBUG_COLORS.text;
+    textRenderer.draw(ctx, line, lineX, lineY, {
+      fontSize: 8,
+      color,
+      width: panel.width - BOT_DEBUG_PANEL.padding * 2
+    });
+    lineY += BOT_DEBUG_PANEL.lineHeight;
+  }
+}
+
+function drawDebugLine(ctx, from, to, color) {
+  if (
+    !Number.isFinite(from?.x) ||
+    !Number.isFinite(from?.y) ||
+    !Number.isFinite(to?.x) ||
+    !Number.isFinite(to?.y)
+  ) {
+    return;
+  }
+
+  ctx.fillStyle = color;
+  let x = Math.round(from.x);
+  let y = Math.round(from.y);
+  const endX = Math.round(to.x);
+  const endY = Math.round(to.y);
+  const dx = Math.abs(endX - x);
+  const dy = -Math.abs(endY - y);
+  const stepX = x < endX ? 1 : -1;
+  const stepY = y < endY ? 1 : -1;
+  let error = dx + dy;
+
+  while (true) {
+    ctx.fillRect(x, y, 1, 1);
+    if (x === endX && y === endY) {
+      break;
+    }
+    const doubled = error * 2;
+    if (doubled >= dy) {
+      error += dy;
+      x += stepX;
+    }
+    if (doubled <= dx) {
+      error += dx;
+      y += stepY;
+    }
+  }
+}
+
+function drawDebugBox(ctx, centerX, centerY, size, color) {
+  const half = Math.floor(size / 2);
+  const x = Math.round(centerX) - half;
+  const y = Math.round(centerY) - half;
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, size, 1);
+  ctx.fillRect(x, y + size - 1, size, 1);
+  ctx.fillRect(x, y, 1, size);
+  ctx.fillRect(x + size - 1, y, 1, size);
+}
+
+function drawDebugCross(ctx, centerX, centerY, color) {
+  const x = Math.round(centerX);
+  const y = Math.round(centerY);
+  ctx.fillStyle = color;
+  ctx.fillRect(x - 4, y, 9, 1);
+  ctx.fillRect(x, y - 4, 1, 9);
+  ctx.fillRect(x - 1, y - 1, 3, 3);
 }
 
 function drawEndedHud(ctx, room, options, colors, textRenderer) {
@@ -1904,20 +2285,41 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
 
 function drawOuterRockCorners(ctx, x, y, right, bottom, corners) {
   if (corners.outerTopLeft) {
-    drawPixelLine(ctx, x, y + ROCK_OUTER_CORNER_RADIUS, x + ROCK_OUTER_CORNER_RADIUS, y);
+    drawRockCornerArc(ctx, x + ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, -1);
   }
 
   if (corners.outerTopRight) {
-    drawPixelLine(ctx, right - ROCK_OUTER_CORNER_RADIUS, y, right, y + ROCK_OUTER_CORNER_RADIUS);
+    drawRockCornerArc(ctx, right - ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, -1);
   }
 
   if (corners.outerBottomRight) {
-    drawPixelLine(ctx, right, bottom - ROCK_OUTER_CORNER_RADIUS, right - ROCK_OUTER_CORNER_RADIUS, bottom);
+    drawRockCornerArc(ctx, right - ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, 1);
   }
 
   if (corners.outerBottomLeft) {
-    drawPixelLine(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom, x, bottom - ROCK_OUTER_CORNER_RADIUS);
+    drawRockCornerArc(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, 1);
   }
+}
+
+function drawRockCornerArc(ctx, centerX, centerY, radius, signX, signY) {
+  const drawn = new Set();
+  for (let step = 0; step <= radius; step += 1) {
+    const other = Math.round(Math.sqrt(Math.max(0, radius * radius - step * step)));
+    drawRockArcPixel(ctx, drawn, centerX + signX * step, centerY + signY * other);
+    drawRockArcPixel(ctx, drawn, centerX + signX * other, centerY + signY * step);
+  }
+}
+
+function drawRockArcPixel(ctx, drawn, x, y) {
+  const px = Math.round(x);
+  const py = Math.round(y);
+  const key = `${px}:${py}`;
+  if (drawn.has(key)) {
+    return;
+  }
+
+  drawn.add(key);
+  ctx.fillRect(px, py, 1, 1);
 }
 
 function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
@@ -2934,7 +3336,7 @@ function drawRectOutline(ctx, x, y, width, height) {
   ctx.fillRect(x + width - 1, y, 1, height);
 }
 
-function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer) {
+function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -2967,19 +3369,25 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
     drawSphere(ctx, orbX, orbY, SMALL_ORB_RADIUS, player.angle, colors);
   }
 
-  drawMiningRayEmitters(ctx, player, camera, asteroid, colors);
+  drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim);
 
   drawShipHealthIndicator(ctx, x, y, player, colors);
   drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
 }
 
-function drawMiningRayEmitters(ctx, player, camera, asteroid, colors) {
+function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim = false) {
+  if (player.alive === false) {
+    return;
+  }
+
   const count = miningRayVisualCount(player);
   if (count <= 1) {
     return;
   }
 
-  const angle = player.aimAngle ?? player.angle ?? 0;
+  const angle = freezeAim
+    ? player.angle ?? player.aimAngle ?? 0
+    : player.aimAngle ?? player.angle ?? 0;
   const fallbackDirection = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -3014,7 +3422,7 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors) {
 }
 
 function drawShipStormWarning(ctx, x, y, player, colors, textRenderer) {
-  if (!player.stormWarning || !textRenderer) {
+  if (player.alive === false || !player.stormWarning || !textRenderer) {
     return;
   }
 
@@ -3212,7 +3620,7 @@ function drawControllerAimCursor(ctx, player, camera, cursor, colors) {
   fillSolidDisk(ctx, x, y, 1);
 }
 
-function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSeconds = 0) {
+function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSeconds = 0, playersLeft = 0) {
   if (!player) {
     return;
   }
@@ -3220,7 +3628,7 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   const x = 8;
   const y = 8;
   const width = 112;
-  const height = 48;
+  const height = 58;
   const padding = 4;
   const contentX = x + padding;
   const contentRight = x + width - padding;
@@ -3235,6 +3643,7 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     ENGINE.player.maxHealthBars
   );
   const resources = player.resources || {};
+  const killDropAmount = Math.max(0, Math.floor(Number(player.killDrop?.amount || 0)));
 
   ctx.fillStyle = colors.foreground;
   ctx.fillRect(x, y, width, height);
@@ -3253,6 +3662,17 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   });
   drawHudResource(ctx, "ORE", resources.ore || 0, contentX, contentRight, rowY + rowStep, textRenderer, colors);
   drawHudResource(ctx, "DIAMOND", resources.diamond || 0, contentX, contentRight, rowY + rowStep * 2, textRenderer, colors);
+  if (killDropAmount > 0) {
+    if (hudFlashVisible(true, timeSeconds, {
+      mode: HUD_FLASH_MODE.additive,
+      rate: HUD_FLASH_RATE.slow
+    })) {
+      drawHudMessage(ctx, `${killDropAmount} DIAMOND${killDropAmount === 1 ? "" : "S"}`, contentX, rowY + rowStep * 3, textRenderer, colors);
+    }
+    return;
+  }
+
+  drawHudKillRow(ctx, player.kills || 0, playersLeft, contentX, contentRight, rowY + rowStep * 3, textRenderer, colors);
 }
 
 function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
@@ -3262,11 +3682,11 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
 
   if (!upgradesUi?.active) {
     if (controllerActive) {
-      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 62, colors, textRenderer);
+      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 72, colors, textRenderer);
       return;
     }
 
-    textRenderer.draw(ctx, "Q - UPGRADES", 10, 62, {
+    textRenderer.draw(ctx, "Q - UPGRADES", 10, 72, {
       fontSize: 8,
       color: colors.foreground
     });
@@ -3287,14 +3707,14 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
       "faceLeft",
       buildUi?.active ? "MINING RAY" : "BUILDER ARM",
       10,
-      78,
+      88,
       colors,
       textRenderer
     );
     return;
   }
 
-  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 72, {
+  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 82, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -3609,8 +4029,10 @@ function drawHudResource(ctx, label, value, labelX, countRight, y, textRenderer,
   const count = String(Math.min(ENGINE.player.maxResourceAmount, Math.max(0, Math.floor(value))));
   const textOptions = { fontSize: 8 };
   const countWidth = textRenderer.measure(count, textOptions);
-  const flashOff = options.flash && Math.floor((options.timeSeconds || 0) * 14) % 2 === 0;
-  if (flashOff) {
+  if (!hudFlashVisible(options.flash, options.timeSeconds, {
+    mode: HUD_FLASH_MODE.subtractive,
+    rate: HUD_FLASH_RATE.fast
+  })) {
     return;
   }
 
@@ -3623,6 +4045,39 @@ function drawHudResource(ctx, label, value, labelX, countRight, y, textRenderer,
     fontSize: 8,
     color: colors.foreground,
     width: countWidth + 1
+  });
+}
+
+function hudFlashVisible(active, timeSeconds, options = {}) {
+  const mode = options.mode || HUD_FLASH_MODE.additive;
+  const enabled = Boolean(active);
+  if (!enabled) {
+    return mode === HUD_FLASH_MODE.subtractive;
+  }
+
+  const rate = Math.max(1, Number(options.rate || HUD_FLASH_RATE.slow));
+  return Math.floor((timeSeconds || 0) * rate) % 2 === 1;
+}
+
+function drawHudKillRow(ctx, kills, playersLeft, labelX, countRight, y, textRenderer, colors) {
+  const textOptions = { fontSize: 8 };
+  const killCount = Math.min(999, Math.max(0, Math.floor(Number(kills) || 0)));
+  const leftCount = Math.min(999, Math.max(0, Math.floor(Number(playersLeft) || 0)));
+  const text = `${killCount} KILLS / ${leftCount} LEFT`;
+  const width = textRenderer.measure(text, textOptions);
+
+  textRenderer.draw(ctx, text, labelX, y, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: Math.min(width + 1, countRight - labelX)
+  });
+}
+
+function drawHudMessage(ctx, text, x, y, textRenderer, colors) {
+  textRenderer.draw(ctx, text, x, y, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: 96
   });
 }
 
@@ -3999,13 +4454,11 @@ function drawMiningRayBeam(ctx, from, to, direction, normal, colors, timeSeconds
   const radius = sideOffset === 0
     ? MINING_RAY_VISUAL_RADIUS
     : MINING_RAY_VISUAL_RADIUS * 0.5;
-  drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sideOffset);
+  drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, colors, timeSeconds, sideOffset);
   void hit;
-  void direction;
-  void normal;
 }
 
-function drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sideOffset = 0) {
+function drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, colors, timeSeconds, sideOffset = 0) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const lengthSq = dx * dx + dy * dy;
@@ -4021,9 +4474,10 @@ function drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sid
   const minY = Math.floor(Math.min(from.y, to.y) - maxRadius);
   const maxY = Math.ceil(Math.max(from.y, to.y) + maxRadius);
   const length = Math.sqrt(lengthSq);
-  const normal = {
-    x: -dy / length,
-    y: dx / length
+  const rayDirection = normalizedRayBasis(direction, { x: dx / length, y: dy / length });
+  const rayNormal = {
+    x: -rayDirection.y,
+    y: rayDirection.x
   };
   const sideSign = Math.sign(sideOffset);
 
@@ -4032,13 +4486,14 @@ function drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sid
     for (let px = minX; px <= maxX; px += 1) {
       const pointX = px + 0.5;
       const pointY = py + 0.5;
-      const along = ((pointX - from.x) * dx + (pointY - from.y) * dy) / lengthSq;
-      if (along < 0 || along > 1) {
+      const relativeX = pointX - from.x;
+      const relativeY = pointY - from.y;
+      const alongDistance = relativeX * rayDirection.x + relativeY * rayDirection.y;
+      if (alongDistance < 0 || alongDistance > length) {
         continue;
       }
 
-      const alongDistance = along * length;
-      const signedCross = (pointX - from.x) * normal.x + (pointY - from.y) * normal.y;
+      const signedCross = relativeX * rayNormal.x + relativeY * rayNormal.y;
       const inside = sideSign === 0
         ? isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds)
         : isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign);
@@ -4047,6 +4502,21 @@ function drawMiningRaySquareBeam(ctx, from, to, radius, colors, timeSeconds, sid
       }
     }
   }
+  void normal;
+}
+
+function normalizedRayBasis(value, fallback) {
+  const x = Number(value?.x);
+  const y = Number(value?.y);
+  const length = Math.hypot(x, y);
+  if (length > 0.000001) {
+    return {
+      x: x / length,
+      y: y / length
+    };
+  }
+
+  return fallback;
 }
 
 function isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds) {
@@ -4096,6 +4566,10 @@ function drawMiningRayHitFlare(ctx, point, colors) {
 }
 
 function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
+  if (player.alive === false || player.mining !== true) {
+    return;
+  }
+
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
@@ -4107,9 +4581,9 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
     const laneStartWorld = { x: lane.startX, y: lane.startY };
     const laneFullTipWorld = { x: lane.fullEndX, y: lane.fullEndY };
     const laneActiveTipWorld = { x: lane.endX, y: lane.endY };
-    const start = worldToScreen(laneStartWorld, camera);
-    const fullTip = worldToScreen(laneFullTipWorld, camera);
-    const activeTip = worldToScreen(laneActiveTipWorld, camera);
+    const start = worldToScreenExact(laneStartWorld, camera);
+    const fullTip = worldToScreenExact(laneFullTipWorld, camera);
+    const activeTip = worldToScreenExact(laneActiveTipWorld, camera);
     const fullDx = fullTip.x - start.x;
     const fullDy = fullTip.y - start.y;
     const fullLength = Math.hypot(fullDx, fullDy);
@@ -4154,6 +4628,10 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
 
 function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colors) {
   void timeSeconds;
+
+  if (player.alive === false || player.mining !== true) {
+    return;
+  }
 
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
@@ -4346,6 +4824,13 @@ function worldToScreen(point, camera) {
   return {
     x: Math.round(point.x - camera.x),
     y: Math.round(point.y - camera.y)
+  };
+}
+
+function worldToScreenExact(point, camera) {
+  return {
+    x: point.x - camera.x,
+    y: point.y - camera.y
   };
 }
 

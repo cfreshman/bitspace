@@ -87,7 +87,7 @@ export const ENGINE = Object.freeze({
     speed: 190,
     spawnOffset: 14,
     fireIntervalSeconds: 0.55,
-    engineCutoutSeconds: 0.2,
+    engineCutoutSeconds: 0,
     costRock: 1,
     damage: 12,
     restitution: 0.78,

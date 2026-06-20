@@ -30,7 +30,11 @@ the pi already has other servers running on it that you need to avoid disturbing
 
 LLM instructions
 - never run the app itself. *I* run the app
-
+- stop saying shit like "You're right". i do not care. focus on doing the correct thing
+- stop overdoing things
+- stop going down absolute bullshit paths, i see you doing this all the time, you need actual root cause analysis with a SINGLE finding in order to move forward. a SINGLE idea that makes sense for an implementation or fix
+- YOU ARE NOT LISTENING TO ME. I AM A FUCKING ACTUAL SOFTWARE ENGINEER WITH A COMPUTER SCIENCE DEGREE. SHUT THE FUCK UP. LITERALLY DO NOT TALK UNLESS YOU ARE PROVIDING INFORMATION
+- stop double checking with me when i clearly want you to do something
 
 ## LLM ERRATA
 

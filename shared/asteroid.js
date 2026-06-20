@@ -100,6 +100,8 @@ const DEFAULT_GENERATION = Object.freeze({
   boundaryGap: 7
 });
 
+const ROCK_COLLISION_CORNER_RADIUS_SCALE = 1 / 3;
+
 export function createAsteroid(options = {}) {
   return createNaturalAsteroid({
     ...options,
@@ -460,15 +462,49 @@ export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance, op
     y: Math.sin(angle)
   };
   const step = 0.5;
+  let previousTileX = Math.floor(startX / asteroid.tileSize);
+  let previousTileY = Math.floor(startY / asteroid.tileSize);
+  let previousX = startX;
+  let previousY = startY;
 
   for (let distance = 0; distance <= maxDistance; distance += step) {
     const x = startX + direction.x * distance;
     const y = startY + direction.y * distance;
     const tileX = Math.floor(x / asteroid.tileSize);
     const tileY = Math.floor(y / asteroid.tileSize);
+    const cornerHit = raycastCornerBlock(
+      asteroid,
+      previousTileX,
+      previousTileY,
+      tileX,
+      tileY,
+      previousX,
+      previousY,
+      x,
+      y,
+      options
+    );
+    if (cornerHit) {
+      return {
+        ...cornerHit,
+        x,
+        y,
+        distance
+      };
+    }
+
     const hit = asteroidCollisionAt(asteroid, tileX, tileY, options);
 
     if (hit) {
+      const blocker = blockingTileDescriptor(asteroid, tileX, tileY);
+      if (!pointOverlapsBlockerShape(x, y, blocker)) {
+        previousTileX = tileX;
+        previousTileY = tileY;
+        previousX = x;
+        previousY = y;
+        continue;
+      }
+
       return {
         ...hit,
         x,
@@ -476,6 +512,11 @@ export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance, op
         distance
       };
     }
+
+    previousTileX = tileX;
+    previousTileY = tileY;
+    previousX = x;
+    previousY = y;
   }
 
   return {
@@ -485,6 +526,56 @@ export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance, op
     y: startY + direction.y * maxDistance,
     distance: maxDistance
   };
+}
+
+function raycastCornerBlock(
+  asteroid,
+  previousTileX,
+  previousTileY,
+  tileX,
+  tileY,
+  previousX,
+  previousY,
+  x,
+  y,
+  options = {}
+) {
+  const dx = tileX - previousTileX;
+  const dy = tileY - previousTileY;
+  if (Math.abs(dx) !== 1 || Math.abs(dy) !== 1) {
+    return null;
+  }
+
+  const sideA = {
+    tileX,
+    tileY: previousTileY
+  };
+  const sideB = {
+    tileX: previousTileX,
+    tileY
+  };
+  const sideAHit = asteroidCollisionAt(asteroid, sideA.tileX, sideA.tileY, options);
+  const sideBHit = asteroidCollisionAt(asteroid, sideB.tileX, sideB.tileY, options);
+  if (!sideAHit || !sideBHit) {
+    return null;
+  }
+
+  const segmentDx = x - previousX;
+  const segmentDy = y - previousY;
+  const verticalBoundary = dx > 0
+    ? tileX * asteroid.tileSize
+    : previousTileX * asteroid.tileSize;
+  const horizontalBoundary = dy > 0
+    ? tileY * asteroid.tileSize
+    : previousTileY * asteroid.tileSize;
+  const verticalT = Math.abs(segmentDx) > 0.000001
+    ? (verticalBoundary - previousX) / segmentDx
+    : Number.POSITIVE_INFINITY;
+  const horizontalT = Math.abs(segmentDy) > 0.000001
+    ? (horizontalBoundary - previousY) / segmentDy
+    : Number.POSITIVE_INFINITY;
+
+  return verticalT <= horizontalT ? sideAHit : sideBHit;
 }
 
 export function isAsteroidRockTile(tile) {
@@ -549,15 +640,489 @@ function isBlockingTile(asteroid, tileX, tileY, options = {}) {
 function blockingTileDescriptor(asteroid, tileX, tileY) {
   const inBounds = tileX >= 0 && tileY >= 0 && tileX < asteroid.widthTiles && tileY < asteroid.heightTiles;
   const index = inBounds ? tileY * asteroid.widthTiles + tileX : null;
+  const tile = inBounds ? asteroid.tiles[index] : ASTEROID_TILE.empty;
+  const x = tileX * asteroid.tileSize;
+  const y = tileY * asteroid.tileSize;
+  const size = asteroid.tileSize;
   return {
     tileX,
     tileY,
     index,
+    tile,
     key: `${tileX}:${tileY}`,
-    x: tileX * asteroid.tileSize,
-    y: tileY * asteroid.tileSize,
-    size: asteroid.tileSize
+    x,
+    y,
+    size,
+    width: size,
+    height: size,
+    right: x + size,
+    bottom: y + size,
+    shape: inBounds ? rockCollisionShape(asteroid, tileX, tileY, tile) : null
   };
+}
+
+export function pointOverlapsBlockerShape(x, y, blocker) {
+  if (!blocker) {
+    return false;
+  }
+
+  const bounds = blockerBounds(blocker);
+  if (!pointInBounds(x, y, bounds)) {
+    return false;
+  }
+
+  const shape = blocker.shape;
+  if (!shape?.rounded) {
+    return true;
+  }
+
+  return !pointInRoundedCutout(x, y, bounds, shape);
+}
+
+export function pointDistanceToBlockerShape(x, y, blocker) {
+  const bounds = blockerBounds(blocker);
+  if (!blocker?.shape?.rounded) {
+    return pointDistanceToBounds(x, y, bounds);
+  }
+
+  if (pointOverlapsBlockerShape(x, y, blocker)) {
+    return -pointInsideBoundsDepth(x, y, bounds);
+  }
+
+  let distance = Number.POSITIVE_INFINITY;
+  for (const primitive of roundedBlockerPrimitives(blocker)) {
+    distance = Math.min(distance, pointDistanceToPrimitive(x, y, primitive));
+  }
+  return distance;
+}
+
+export function circleBlockerOverlap(circle, blocker) {
+  if (!circle || !blocker) {
+    return null;
+  }
+
+  const bounds = blockerBounds(blocker);
+  const broad = circleBoundsOverlap(circle, bounds.x, bounds.y, bounds.width, bounds.height);
+  if (!broad) {
+    return null;
+  }
+
+  if (!blocker.shape?.rounded) {
+    return broad;
+  }
+
+  if (pointOverlapsBlockerShape(circle.x, circle.y, blocker)) {
+    return broad;
+  }
+
+  let best = null;
+  for (const primitive of roundedBlockerPrimitives(blocker)) {
+    const hit = circlePrimitiveOverlap(circle, primitive);
+    best = betterCircleOverlap(best, hit);
+  }
+
+  return best;
+}
+
+export function sweptCircleBlockerHit(previousX, previousY, x, y, radius, blocker) {
+  if (!blocker) {
+    return null;
+  }
+
+  const bounds = blockerBounds(blocker);
+  if (!blocker.shape?.rounded) {
+    return sweptCircleBoundsHit(previousX, previousY, x, y, radius, bounds.x, bounds.y, bounds.width, bounds.height);
+  }
+
+  const startOverlap = circleBlockerOverlap({ x: previousX, y: previousY, radius }, blocker);
+  if (startOverlap) {
+    return {
+      ...startOverlap,
+      time: 0,
+      x: previousX,
+      y: previousY
+    };
+  }
+
+  const broad = sweptCircleBoundsHit(previousX, previousY, x, y, radius, bounds.x, bounds.y, bounds.width, bounds.height);
+  const endOverlap = circleBlockerOverlap({ x, y, radius }, blocker);
+  if (!broad && !endOverlap) {
+    return null;
+  }
+
+  const dx = x - previousX;
+  const dy = y - previousY;
+  let low = 0;
+  let high = null;
+  const scanSteps = 16;
+  for (let step = 1; step <= scanSteps; step += 1) {
+    const t = step / scanSteps;
+    const probe = {
+      x: previousX + dx * t,
+      y: previousY + dy * t,
+      radius
+    };
+    if (circleBlockerOverlap(probe, blocker)) {
+      high = t;
+      break;
+    }
+    low = t;
+  }
+
+  if (high === null) {
+    return null;
+  }
+
+  for (let step = 0; step < 8; step += 1) {
+    const t = (low + high) * 0.5;
+    const probe = {
+      x: previousX + dx * t,
+      y: previousY + dy * t,
+      radius
+    };
+    if (circleBlockerOverlap(probe, blocker)) {
+      high = t;
+    } else {
+      low = t;
+    }
+  }
+
+  const hitX = previousX + dx * high;
+  const hitY = previousY + dy * high;
+  const hit = circleBlockerOverlap({ x: hitX, y: hitY, radius }, blocker);
+  if (!hit) {
+    return null;
+  }
+
+  return {
+    ...hit,
+    time: high,
+    x: hitX,
+    y: hitY
+  };
+}
+
+function rockCollisionShape(asteroid, tileX, tileY, tile) {
+  if (!isAsteroidRockTile(tile) || tile === ASTEROID_TILE.wall) {
+    return null;
+  }
+
+  const north = isRockCollisionTileAt(asteroid, tileX, tileY - 1);
+  const east = isRockCollisionTileAt(asteroid, tileX + 1, tileY);
+  const south = isRockCollisionTileAt(asteroid, tileX, tileY + 1);
+  const west = isRockCollisionTileAt(asteroid, tileX - 1, tileY);
+  const corners = {
+    topLeft: !north && !west,
+    topRight: !north && !east,
+    bottomRight: !south && !east,
+    bottomLeft: !south && !west
+  };
+
+  if (!corners.topLeft && !corners.topRight && !corners.bottomRight && !corners.bottomLeft) {
+    return null;
+  }
+
+  return {
+    rounded: true,
+    radius: Math.max(1, Math.round(asteroid.tileSize * ROCK_COLLISION_CORNER_RADIUS_SCALE)),
+    corners
+  };
+}
+
+function isRockCollisionTileAt(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  const tile = asteroid.tiles[tileY * asteroid.widthTiles + tileX];
+  return isAsteroidRockTile(tile) && tile !== ASTEROID_TILE.wall;
+}
+
+function blockerBounds(blocker) {
+  if (
+    Number.isFinite(blocker?.right) &&
+    Number.isFinite(blocker?.bottom) &&
+    Number.isFinite(blocker?.width) &&
+    Number.isFinite(blocker?.height)
+  ) {
+    return blocker;
+  }
+
+  const width = Number(blocker.width ?? blocker.size ?? 0);
+  const height = Number(blocker.height ?? blocker.size ?? width);
+  return {
+    x: Number(blocker.x || 0),
+    y: Number(blocker.y || 0),
+    width,
+    height,
+    right: Number(blocker.x || 0) + width,
+    bottom: Number(blocker.y || 0) + height
+  };
+}
+
+function pointInBounds(x, y, bounds) {
+  return x >= bounds.x && x <= bounds.right && y >= bounds.y && y <= bounds.bottom;
+}
+
+function pointInRoundedCutout(x, y, bounds, shape) {
+  const radius = Math.max(0, Number(shape.radius || 0));
+  if (radius <= 0) {
+    return false;
+  }
+
+  const corners = shape.corners || {};
+  if (
+    corners.topLeft &&
+    x < bounds.x + radius &&
+    y < bounds.y + radius &&
+    Math.hypot(x - (bounds.x + radius), y - (bounds.y + radius)) > radius
+  ) {
+    return true;
+  }
+
+  if (
+    corners.topRight &&
+    x > bounds.right - radius &&
+    y < bounds.y + radius &&
+    Math.hypot(x - (bounds.right - radius), y - (bounds.y + radius)) > radius
+  ) {
+    return true;
+  }
+
+  if (
+    corners.bottomRight &&
+    x > bounds.right - radius &&
+    y > bounds.bottom - radius &&
+    Math.hypot(x - (bounds.right - radius), y - (bounds.bottom - radius)) > radius
+  ) {
+    return true;
+  }
+
+  return corners.bottomLeft &&
+    x < bounds.x + radius &&
+    y > bounds.bottom - radius &&
+    Math.hypot(x - (bounds.x + radius), y - (bounds.bottom - radius)) > radius;
+}
+
+function roundedBlockerPrimitives(blocker) {
+  const bounds = blockerBounds(blocker);
+  const shape = blocker.shape || {};
+  const radius = Math.max(
+    0,
+    Math.min(Math.min(bounds.width, bounds.height) * 0.5, Number(shape.radius || 0))
+  );
+  if (!shape.rounded || radius <= 0) {
+    return [{ type: "rect", x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }];
+  }
+
+  const primitives = [];
+  const centerWidth = Math.max(0, bounds.width - radius * 2);
+  const centerHeight = Math.max(0, bounds.height - radius * 2);
+  if (centerWidth > 0) {
+    primitives.push({
+      type: "rect",
+      x: bounds.x + radius,
+      y: bounds.y,
+      width: centerWidth,
+      height: bounds.height
+    });
+  }
+  if (centerHeight > 0) {
+    primitives.push({
+      type: "rect",
+      x: bounds.x,
+      y: bounds.y + radius,
+      width: bounds.width,
+      height: centerHeight
+    });
+  }
+
+  addRoundedCornerPrimitive(primitives, bounds, shape.corners?.topLeft, bounds.x, bounds.y, bounds.x + radius, bounds.y + radius, radius);
+  addRoundedCornerPrimitive(primitives, bounds, shape.corners?.topRight, bounds.right - radius, bounds.y, bounds.right - radius, bounds.y + radius, radius);
+  addRoundedCornerPrimitive(primitives, bounds, shape.corners?.bottomRight, bounds.right - radius, bounds.bottom - radius, bounds.right - radius, bounds.bottom - radius, radius);
+  addRoundedCornerPrimitive(primitives, bounds, shape.corners?.bottomLeft, bounds.x, bounds.bottom - radius, bounds.x + radius, bounds.bottom - radius, radius);
+
+  return primitives;
+}
+
+function addRoundedCornerPrimitive(primitives, bounds, rounded, rectX, rectY, circleX, circleY, radius) {
+  if (rounded) {
+    primitives.push({
+      type: "circle",
+      x: circleX,
+      y: circleY,
+      radius
+    });
+    return;
+  }
+
+  primitives.push({
+    type: "rect",
+    x: rectX,
+    y: rectY,
+    width: radius,
+    height: radius
+  });
+}
+
+function circlePrimitiveOverlap(circle, primitive) {
+  if (primitive.type === "circle") {
+    const combinedRadius = Number(circle.radius || 0) + primitive.radius;
+    const dx = circle.x - primitive.x;
+    const dy = circle.y - primitive.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance >= combinedRadius) {
+      return null;
+    }
+    const normalX = distance > 0.0001 ? dx / distance : 1;
+    const normalY = distance > 0.0001 ? dy / distance : 0;
+    return {
+      normalX,
+      normalY,
+      overlap: combinedRadius - distance,
+      distance: Math.max(0, distance - primitive.radius)
+    };
+  }
+
+  return circleBoundsOverlap(circle, primitive.x, primitive.y, primitive.width, primitive.height);
+}
+
+function betterCircleOverlap(current, candidate) {
+  if (!candidate) {
+    return current;
+  }
+  if (!current) {
+    return candidate;
+  }
+  return candidate.overlap > current.overlap ? candidate : current;
+}
+
+function pointDistanceToPrimitive(x, y, primitive) {
+  if (primitive.type === "circle") {
+    return Math.max(0, Math.hypot(x - primitive.x, y - primitive.y) - primitive.radius);
+  }
+
+  return pointDistanceToBounds(x, y, {
+    x: primitive.x,
+    y: primitive.y,
+    right: primitive.x + primitive.width,
+    bottom: primitive.y + primitive.height,
+    width: primitive.width,
+    height: primitive.height
+  });
+}
+
+function pointDistanceToBounds(x, y, bounds) {
+  const dx = x < bounds.x ? bounds.x - x : x > bounds.right ? x - bounds.right : 0;
+  const dy = y < bounds.y ? bounds.y - y : y > bounds.bottom ? y - bounds.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+function pointInsideBoundsDepth(x, y, bounds) {
+  if (!pointInBounds(x, y, bounds)) {
+    return 0;
+  }
+
+  return Math.min(x - bounds.x, bounds.right - x, y - bounds.y, bounds.bottom - y);
+}
+
+function circleBoundsOverlap(circle, x, y, width, height) {
+  const right = x + width;
+  const bottom = y + height;
+  const closestX = clampNumber(circle.x, x, right);
+  const closestY = clampNumber(circle.y, y, bottom);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+  const distanceSq = dx * dx + dy * dy;
+
+  if (distanceSq > 0) {
+    if (distanceSq >= circle.radius * circle.radius) {
+      return null;
+    }
+
+    const distance = Math.sqrt(distanceSq);
+    return {
+      normalX: dx / distance,
+      normalY: dy / distance,
+      overlap: circle.radius - distance,
+      distance
+    };
+  }
+
+  const left = circle.x - x;
+  const rightDistance = right - circle.x;
+  const top = circle.y - y;
+  const bottomDistance = bottom - circle.y;
+  const nearest = Math.min(left, rightDistance, top, bottomDistance);
+
+  if (nearest === left) {
+    return { normalX: -1, normalY: 0, overlap: circle.radius + left, distance: 0 };
+  }
+
+  if (nearest === rightDistance) {
+    return { normalX: 1, normalY: 0, overlap: circle.radius + rightDistance, distance: 0 };
+  }
+
+  if (nearest === top) {
+    return { normalX: 0, normalY: -1, overlap: circle.radius + top, distance: 0 };
+  }
+
+  return { normalX: 0, normalY: 1, overlap: circle.radius + bottomDistance, distance: 0 };
+}
+
+function sweptCircleBoundsHit(previousX, previousY, x, y, radius, boundsX, boundsY, width, height) {
+  const dx = x - previousX;
+  const dy = y - previousY;
+  const minX = boundsX - radius;
+  const minY = boundsY - radius;
+  const maxX = boundsX + width + radius;
+  const maxY = boundsY + height + radius;
+  const axisX = sweptAxisInterval(previousX, dx, minX, maxX);
+  const axisY = sweptAxisInterval(previousY, dy, minY, maxY);
+  if (!axisX || !axisY) {
+    return null;
+  }
+
+  const entry = Math.max(axisX.entry, axisY.entry);
+  const exit = Math.min(axisX.exit, axisY.exit);
+  if (entry > exit || entry < 0 || entry > 1) {
+    return null;
+  }
+
+  const hitX = previousX + dx * entry;
+  const hitY = previousY + dy * entry;
+  const normal = axisX.entry > axisY.entry
+    ? { x: dx > 0 ? -1 : 1, y: 0 }
+    : { x: 0, y: dy > 0 ? -1 : 1 };
+
+  return {
+    time: entry,
+    x: hitX,
+    y: hitY,
+    normalX: normal.x,
+    normalY: normal.y,
+    overlap: 0,
+    distance: 0
+  };
+}
+
+function sweptAxisInterval(position, delta, min, max) {
+  if (Math.abs(delta) < 0.000001) {
+    return position >= min && position <= max
+      ? { entry: Number.NEGATIVE_INFINITY, exit: Number.POSITIVE_INFINITY }
+      : null;
+  }
+
+  const t1 = (min - position) / delta;
+  const t2 = (max - position) / delta;
+  return {
+    entry: Math.min(t1, t2),
+    exit: Math.max(t1, t2)
+  };
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function isPlayableCell(asteroid, index) {

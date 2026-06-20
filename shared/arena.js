@@ -5,10 +5,12 @@ import {
   blockingTilesAlongSegment,
   STORM_STATE,
   blockingTilesNearCircle,
+  circleBlockerOverlap,
   createAsteroid,
   isAsteroidRockTile,
   raycastAsteroid,
-  serializeAsteroid
+  serializeAsteroid,
+  sweptCircleBlockerHit
 } from "./asteroid.js";
 import { createEmptyInput, normalizeInput } from "./input.js";
 import {
@@ -36,6 +38,8 @@ import {
 
 const DEFAULT_ARENA_ID = "main";
 const INITIAL_SPAWN_ANGLE = Math.PI / 4;
+const KILL_DROP_SINGLE_DIAMOND_CHANCE = 2 / 3;
+const KILL_DROP_NOTICE_TICKS = ENGINE.tickRate * 3;
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
@@ -111,6 +115,9 @@ export function addPlayer(arena, playerOptions) {
     healthBars: ENGINE.player.startingHealthBars,
     health: playerMaxHealth(ENGINE.player.startingHealthBars),
     maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars),
+    kills: 0,
+    lastKillDropAmount: 0,
+    lastKillDropTick: Number.NEGATIVE_INFINITY,
     lastDamageTick: Number.NEGATIVE_INFINITY,
     killedById: null,
     eliminatedAtTick: null,
@@ -143,6 +150,7 @@ export function eliminatePlayer(arena, playerId, options = {}) {
   }
 
   killPlayer(player, {
+    arena,
     tick: options.tick ?? arena.tick,
     killedById: options.killedById ?? null
   });
@@ -323,7 +331,7 @@ export function snapshotArena(arena) {
     serverTime: Date.now(),
     render: RENDER,
     world: ENGINE.world,
-    players: Array.from(arena.players.values()).map(snapshotPlayer),
+    players: Array.from(arena.players.values()).map((player) => snapshotPlayer(player, arena.tick)),
     asteroidMining: snapshotAsteroidMining(arena),
     entities: Array.from(arena.entities.values()).filter((entity) => entity.destroyed !== true),
     effects: arena.effects
@@ -388,14 +396,14 @@ export function sanitizeTalkText(text) {
 
 function stepPlayer(arena, player, dtSeconds) {
   player.shake = Math.max(0, player.shake - ENGINE.collision.shakeDecay * dtSeconds);
-  player.huckRockEngineCutoutSeconds = Math.max(0, (player.huckRockEngineCutoutSeconds || 0) - dtSeconds);
+  player.huckRockEngineCutoutSeconds = 0;
   syncPlayerDerivedStats(player);
   const effects = aggregateUpgradeEffects(player.upgrades);
   applyShipFriction(player, dtSeconds);
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
-  const canThrust = hasMoveIntent && player.huckRockEngineCutoutSeconds <= 0;
+  const canThrust = hasMoveIntent;
   player.thrusting = canThrust;
 
   updateShipFacing(player, move, dtSeconds);
@@ -437,7 +445,7 @@ function resolveAsteroidCollisions(asteroid, player, options = {}) {
     const blockers = blockingTilesNearCircle(asteroid, player.x, player.y, player.radius, options);
 
     for (const blocker of blockers) {
-      const hit = circleTileOverlap(player, blocker);
+      const hit = circleBlockerOverlap(player, blocker);
       if (!hit) {
         continue;
       }
@@ -513,8 +521,7 @@ function processHuckRockInput(arena, player, dtSeconds) {
   });
   applyHuckRockRecoil(player, direction);
   player.huckRockCooldownSeconds = config.fireIntervalSeconds;
-  player.huckRockEngineCutoutSeconds = config.engineCutoutSeconds || 0;
-  player.thrusting = false;
+  player.huckRockEngineCutoutSeconds = 0;
   trimHuckRocks(arena);
 }
 
@@ -953,7 +960,7 @@ function huckRockPlayerHit(arena, rock, previousX = rock.x, previousY = rock.y) 
     applyHuckRockPlayerImpulse(rock, player, hit);
     addShake(player, Math.max(ENGINE.collision.shakeThreshold + 10, relativeSpeed * 0.35));
     if (arena.rules.playerDamage) {
-      damagePlayer(player, ENGINE.huckRock.damage, arena.tick, rock.ownerId);
+      damagePlayer(arena, player, ENGINE.huckRock.damage, arena.tick, rock.ownerId);
     }
     breakHuckRock(arena, rock, "player");
     return true;
@@ -1033,17 +1040,14 @@ function nearestHuckRockAsteroidHit(arena, rock, previousX, previousY) {
     }
     seen.add(key);
 
-    const hit = sweptCircleBoundsHit(
+    const hit = sweptCircleBlockerHit(
       previousX,
       previousY,
       rock.x,
       rock.y,
       rock.radius,
-      blocker.x,
-      blocker.y,
-      blocker.size,
-      blocker.size
-    ) || circleTileOverlap(rock, blocker);
+      blocker
+    ) || circleBlockerOverlap(rock, blocker);
     if (!hit) {
       continue;
     }
@@ -1332,6 +1336,7 @@ function processPlayerMining(arena, player, dtSeconds) {
     if (arena.rules.playerDamage) {
       if (playerHit) {
         damagePlayer(
+          arena,
           playerHit.target,
           ENGINE.mining.playerDamagePerSecond * effects.rayDamageMultiplier * lane.power * dtSeconds,
           arena.tick,
@@ -1859,7 +1864,7 @@ function applyStormDamage(arena, player, dtSeconds) {
   const tier = stormDamageTier(arena);
   player.stormWarning = tier.warning;
   player.stormDamagePerSecond = tier.damagePerSecond;
-  damagePlayer(player, tier.damagePerSecond * dtSeconds, arena.tick, null);
+  damagePlayer(arena, player, tier.damagePerSecond * dtSeconds, arena.tick, null);
 }
 
 function playerStormHit(arena, player) {
@@ -2133,7 +2138,11 @@ function rayCircleIntersection(start, direction, circle, radius, maxDistance) {
   };
 }
 
-function damagePlayer(player, amount, tick = 0, attackerId = null) {
+function damagePlayer(arena, player, amount, tick = 0, attackerId = null) {
+  if (!player || player.alive === false) {
+    return;
+  }
+
   const effects = aggregateUpgradeEffects(player.upgrades);
   const damage = Math.max(0, amount * effects.damageTakenMultiplier);
 
@@ -2143,10 +2152,15 @@ function damagePlayer(player, amount, tick = 0, attackerId = null) {
     return;
   }
 
-  killPlayer(player, { tick, killedById: attackerId });
+  killPlayer(player, { arena, tick, killedById: attackerId });
 }
 
 function killPlayer(player, options = {}) {
+  if (!player || player.alive === false) {
+    return;
+  }
+
+  awardKill(options.arena, options.killedById, player.id, options.tick);
   player.alive = false;
   player.health = 0;
   player.killedById = options.killedById ?? null;
@@ -2162,6 +2176,33 @@ function killPlayer(player, options = {}) {
   clearPendingFacing(player);
   player.vx = 0;
   player.vy = 0;
+}
+
+function awardKill(arena, killerId, victimId, tick = 0) {
+  if (!arena || !killerId || killerId === victimId) {
+    return;
+  }
+
+  const killer = arena.players.get(killerId);
+  if (!killer) {
+    return;
+  }
+
+  killer.kills = Math.max(0, Math.floor(Number(killer.kills || 0))) + 1;
+  const dropAmount = killDiamondDropAmount(arena, killerId, victimId, tick);
+  const before = Math.max(0, Math.floor(Number(killer.resources?.diamond || 0)));
+  addPlayerResource(killer, "diamond", dropAmount);
+  const after = Math.max(0, Math.floor(Number(killer.resources?.diamond || 0)));
+  const gained = after - before;
+  if (gained > 0) {
+    killer.lastKillDropAmount = gained;
+    killer.lastKillDropTick = Number.isFinite(tick) ? tick : arena.tick;
+  }
+}
+
+function killDiamondDropAmount(arena, killerId, victimId, tick) {
+  const random = createSeededRandom(`${arena.seed}:kill-drop:${tick}:${killerId}:${victimId}`);
+  return random() < KILL_DROP_SINGLE_DIAMOND_CHANCE ? 1 : 2;
 }
 
 function playerMaxHealth(healthBars) {
@@ -2213,7 +2254,7 @@ function syncPlayerDerivedStats(player) {
 
 function rechargePlayerHealth(arena, player, dtSeconds, effects) {
   const rechargePerSecond = effects.healthRechargePerSecond;
-  if (rechargePerSecond <= 0 || player.health >= player.maxHealth || player.mining) {
+  if (rechargePerSecond <= 0 || player.health >= player.maxHealth) {
     return;
   }
 
@@ -2374,7 +2415,16 @@ function spawnForPlayerNumber(number, asteroid) {
   return spawns[(number - 1) % spawns.length];
 }
 
-function snapshotPlayer(player) {
+function snapshotPlayer(player, tick = 0) {
+  const killDropAge = tick - Number(player.lastKillDropTick ?? Number.NEGATIVE_INFINITY);
+  const killDropAmount = Math.max(0, Math.floor(Number(player.lastKillDropAmount || 0)));
+  const killDrop = killDropAmount > 0 && killDropAge >= 0 && killDropAge <= KILL_DROP_NOTICE_TICKS
+    ? {
+        amount: killDropAmount,
+        tick: player.lastKillDropTick
+      }
+    : null;
+
   return {
     id: player.id,
     number: player.number,
@@ -2401,6 +2451,8 @@ function snapshotPlayer(player) {
     healthBars: player.healthBars,
     health: roundForSnapshot(player.health),
     maxHealth: player.maxHealth,
+    kills: Math.max(0, Math.floor(Number(player.kills || 0))),
+    killDrop,
     killedById: player.killedById,
     eliminatedAtTick: player.eliminatedAtTick,
     resources: {

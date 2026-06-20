@@ -5,15 +5,40 @@ import {
   blockingTilesAlongSegment,
   STORM_STATE,
   blockingTilesNearCircle,
+  circleBlockerOverlap,
   createLobbyAsteroid,
   createNaturalAsteroid,
   createThemeAsteroid,
   isAsteroidRockTile,
-  raycastAsteroid
+  raycastAsteroid,
+  sweptCircleBlockerHit
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import { createSeededRandom, inheritedVelocityLaunchAngle } from "/shared/math.js";
+import {
+  addPlayer,
+  buildPlayerWall,
+  createArena,
+  purchasePlayerUpgrade,
+  setPlayerInput,
+  setPlayerTalk,
+  snapshotArena,
+  snapshotAsteroid,
+  stepArena,
+  takeAsteroidUpdates
+} from "/shared/arena.js";
+import {
+  botProfileActive,
+  botProfileMeasure,
+  botProfileSnapshot,
+  createPilotBotBrain,
+  resetBotProfile,
+  setBotProfileEnabled,
+  snapshotPilotBotBrain,
+  updatePilotBotBrain,
+  updatePilotBotLocalPlanner
+} from "/shared/bots.js";
 import {
   miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
@@ -35,6 +60,8 @@ const CLIENT_SECRET_STORAGE_KEY = "bitspace.clientSecret";
 const ROOM_ID_STORAGE_KEY = "bitspace.roomId";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
+const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
+const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
 const ROOM_ID_PATTERN = /^room-\d+$/;
@@ -50,7 +77,7 @@ const ELIMINATION_NOTICE_MAX = 3;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
 const WORLD_LENS_POWER = RENDER.lensPower || 2;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
-const MINING_AUDIO_MAX_GAIN = 0.011;
+const MINING_AUDIO_MAX_GAIN = 0.0055;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
 const AUDIO_COLLISION_CLUNK_SPEED = 18;
 const CONTROLLER_CURSOR_SPEED = 160;
@@ -59,8 +86,16 @@ const CONTROLLER_UPGRADE_NAV_INITIAL_DELAY_SECONDS = 0.28;
 const CONTROLLER_UPGRADE_NAV_REPEAT_SECONDS = 0.11;
 const CONTROLLER_DPAD_NAV_THRESHOLD = 0.5;
 const HUD_RESOURCE_FLASH_SECONDS = 0.55;
+const LEAVE_CONFIRM_SECONDS = 2.2;
 const BUILD_REPEAT_SECONDS = 0.08;
 const MENU_PLAYER_ID = "menu-player";
+const LOCAL_BOT_ROOM_ID = "local-bots";
+const LOCAL_BOT_PLAYER_ID = "local-player";
+const LOCAL_BOT_COUNT = 7;
+const LOCAL_BOT_SAVE_VERSION = 2;
+const LOCAL_BOT_SAVE_INTERVAL_SECONDS = 1;
+const LOCAL_BOT_PLAN_INTERVAL_TICKS = 12;
+const BOT_DEBUG_CHUNK_TILES = 16;
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
   theme: "theme"
@@ -148,17 +183,33 @@ const state = {
     huckRocks: [],
     huckRockSeq: 0
   },
+  localGame: {
+    active: false,
+    arena: null,
+    bots: new Map(),
+    lastStepTimeSeconds: 0,
+    accumulatorSeconds: 0,
+    inputSeq: 0,
+    lastSaveTimeSeconds: 0
+  },
+  botDebugLog: {
+    lastId: "",
+    lastAtSeconds: 0
+  },
+  botDebugOverlay: loadBotDebugOverlay(),
   entitySmoothing: {
     byId: new Map()
   },
   eliminationNotices: [],
   playerAliveById: new Map(),
+  spectatorTargetId: null,
   lastRoomId: null,
   inputSeq: 0,
   nextHuckRockThunkAtSeconds: 0,
   hudFlash: {
     rockUntilSeconds: 0
   },
+  leaveConfirmUntilSeconds: 0,
   mouse: {
     x: 0,
     y: 0,
@@ -195,7 +246,12 @@ const state = {
   resumeFallbackTimer: null
 };
 
+installControlHandles();
+
 const mapGenMode = isMapGenMode();
+if (!mapGenMode) {
+  restoreLocalBotGame();
+}
 if (mapGenMode) {
   setupMapGenMode();
 }
@@ -212,7 +268,9 @@ const socket = mapGenMode
 
 socket.on(SERVER_EVENTS.welcome, (payload) => {
   state.clientId = payload.clientId;
-  state.playerId = payload.playerId;
+  if (!isLocalBotGame()) {
+    state.playerId = payload.playerId;
+  }
   if (payload.clientId) {
     window.localStorage.setItem(CLIENT_ID_STORAGE_KEY, payload.clientId);
     socket.auth = {
@@ -228,7 +286,9 @@ socket.on(SERVER_EVENTS.welcome, (payload) => {
     };
   }
   emitHeartbeat();
-  requestRoomReattach(0, true);
+  if (!isLocalBotGame()) {
+    requestRoomReattach(0, true);
+  }
 });
 
 socket.on("connect", () => {
@@ -238,6 +298,10 @@ socket.on("connect", () => {
 socket.on(SERVER_EVENTS.room, handleServerRoom);
 
 function handleServerRoom(room) {
+  if (isLocalBotGame()) {
+    return;
+  }
+
   if (state.resumePending && room?.state === "menu" && storedRoomId()) {
     state.deferredMenuRoom = room;
     return;
@@ -265,6 +329,7 @@ function applyServerRoom(room) {
     releaseSpaceUntilKeyup();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
+    state.spectatorTargetId = null;
   }
 
   if (!room || room.state === "menu") {
@@ -277,6 +342,7 @@ function applyServerRoom(room) {
     resetEntitySmoothing();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
+    state.spectatorTargetId = null;
     state.upgrades.active = false;
     closeBuildMode();
     state.menu.readySent = false;
@@ -304,6 +370,10 @@ function applyServerRoom(room) {
 }
 
 socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
+  if (isLocalBotGame()) {
+    return;
+  }
+
   const receivedAtSeconds = performance.now() / 1000;
   snapshot.receivedAtSeconds = receivedAtSeconds;
   recordEntitySnapshot(snapshot, receivedAtSeconds);
@@ -317,6 +387,22 @@ socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
 });
 
 socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
+  if (isLocalBotGame()) {
+    return;
+  }
+
+  setClientAsteroid(asteroid);
+});
+
+socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
+  if (isLocalBotGame()) {
+    return;
+  }
+
+  applyClientAsteroidUpdates(updates);
+});
+
+function setClientAsteroid(asteroid) {
   state.asteroid = {
     ...asteroid,
     tiles: asteroid.tiles.split(""),
@@ -326,9 +412,9 @@ socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
     stormWarningUntil: asteroid.storm ? new Int32Array(asteroid.tiles.length) : null
   };
   applyStormWarnings(state.asteroid, asteroid.stormWarnings || []);
-});
+}
 
-socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
+function applyClientAsteroidUpdates(updates) {
   if (!state.asteroid) {
     return;
   }
@@ -354,7 +440,7 @@ socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
     state.asteroid.tiles[update.index] = update.tile;
     state.asteroid.amounts[update.index] = update.amount;
   }
-});
+}
 
 function applyStormWarnings(asteroid, warnings) {
   if (!asteroid.storm || !asteroid.stormWarningStarted || !asteroid.stormWarningUntil) {
@@ -400,10 +486,10 @@ window.addEventListener("keydown", (event) => {
   if (
     event.code === "Escape" &&
     !event.repeat &&
-    canLeaveWithControllerReset()
+    canLeaveWithShortcut()
   ) {
     event.preventDefault();
-    leaveCurrentRoom();
+    handleLeaveShortcut();
     return;
   }
 
@@ -495,6 +581,12 @@ window.addEventListener("blur", () => {
   keys.clear();
   releasedKeysUntilKeyup.clear();
   state.mouse.down = false;
+});
+window.addEventListener("pagehide", () => {
+  saveLocalBotGame({ force: true });
+});
+window.addEventListener("beforeunload", () => {
+  saveLocalBotGame({ force: true });
 });
 
 talkInput.addEventListener("input", syncTalkDraft);
@@ -654,6 +746,10 @@ function handleMenuRayCountKey(event) {
 }
 
 setInterval(() => {
+  if (isLocalBotGame()) {
+    return;
+  }
+
   if (!socket.connected || !state.playerId) {
     return;
   }
@@ -684,12 +780,15 @@ function draw(now = 0) {
   const timeSeconds = now / 1000;
   const loadingRoom = isLoadingRoom();
   const readyMenu = isReadyMenu();
+  const localBotGame = isLocalBotGame();
 
   updateControllerState(timeSeconds);
   syncThemeFromCss();
   pruneEliminationNotices(timeSeconds);
   if (loadingRoom) {
     state.mouse.down = false;
+  } else if (localBotGame) {
+    updateLocalBotGame(timeSeconds);
   } else if (readyMenu) {
     updateMenuSimulation(timeSeconds);
   } else {
@@ -697,6 +796,8 @@ function draw(now = 0) {
     updateAimFromSnapshot();
   }
   const cameraPlayerId = cameraPlayerIdForRoom();
+  logSpectatedBotDebug(cameraPlayerId, timeSeconds);
+  const botDebugOverlay = botDebugOverlayRenderState(cameraPlayerId);
   const screenPointer = screenPointerPoint();
   state.uiHoverId = screenRoomButtonAtPoint(screenPointer.x, screenPointer.y);
   const buildTarget = buildTargetFromMouse();
@@ -730,12 +831,15 @@ function draw(now = 0) {
     predictedPlayer: readyMenu ? null : predictedLocalPlayer(),
     eliminationNotices: state.eliminationNotices,
     controllerActive: state.controller.connected,
-    controllerCursor: controllerCursorRenderState(),
-    controllerAimCursor: controllerAimCursorRenderState(),
-    hudFlash: hudFlashRenderState(timeSeconds),
-    theme: state.theme,
-    timeSeconds
-  });
+	    controllerCursor: controllerCursorRenderState(),
+	    controllerAimCursor: controllerAimCursorRenderState(),
+	    hudFlash: hudFlashRenderState(timeSeconds),
+	    leaveConfirm: leaveConfirmRenderState(timeSeconds),
+	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
+	    botDebugOverlay,
+	    theme: state.theme,
+	    timeSeconds
+	  });
   requestAnimationFrame(draw);
 }
 
@@ -801,7 +905,7 @@ function handleControllerActions(input) {
 
   if (input.pressed.reset) {
     if (canLeaveWithControllerReset()) {
-      leaveCurrentRoom();
+      handleLeaveShortcut();
       return;
     }
 
@@ -812,6 +916,11 @@ function handleControllerActions(input) {
 
     if (state.build.active) {
       closeBuildMode();
+      return;
+    }
+
+    if (canLeaveWithShortcut()) {
+      handleLeaveShortcut();
       return;
     }
   }
@@ -936,6 +1045,26 @@ function hudFlashRenderState(timeSeconds) {
   return {
     rock: timeSeconds < state.hudFlash.rockUntilSeconds,
     miningRayDisabled: lobbyMiningRayAttemptActive()
+  };
+}
+
+function leaveConfirmRenderState(timeSeconds) {
+  if (state.leaveConfirmUntilSeconds <= timeSeconds) {
+    state.leaveConfirmUntilSeconds = 0;
+    return null;
+  }
+
+  if (!canLeaveWithShortcut() || state.room?.state !== "active") {
+    state.leaveConfirmUntilSeconds = 0;
+    return null;
+  }
+
+  const remainingSeconds = Math.max(0, state.leaveConfirmUntilSeconds - timeSeconds);
+  return {
+    active: true,
+    expiresAt: state.leaveConfirmUntilSeconds,
+    remainingSeconds,
+    progress: clamp(remainingSeconds / LEAVE_CONFIRM_SECONDS, 0, 1)
   };
 }
 
@@ -1380,6 +1509,9 @@ function createMenuPlayer(asteroid) {
     healthBars: ENGINE.player.startingHealthBars,
     health: maxHealth,
     maxHealth,
+    kills: 0,
+    lastKillDropAmount: 0,
+    lastKillDropTick: Number.NEGATIVE_INFINITY,
     resources: {
       rock: 0,
       ore: 0,
@@ -1457,10 +1589,7 @@ function updateMenuSimulation(timeSeconds) {
   state.menu.lastTimeSeconds = timeSeconds;
   state.menu.tick += 1;
   player.shake = Math.max(0, (player.shake || 0) - ENGINE.collision.shakeDecay * dtSeconds);
-  player.huckRockEngineCutoutSeconds = Math.max(
-    0,
-    (player.huckRockEngineCutoutSeconds || 0) - dtSeconds
-  );
+  player.huckRockEngineCutoutSeconds = 0;
   applyShipFriction(player, dtSeconds);
 
   updateMenuAim(player);
@@ -1469,7 +1598,7 @@ function updateMenuSimulation(timeSeconds) {
   const move = state.chat.active ? { x: 0, y: 0 } : readMoveVector();
   const effects = aggregateUpgradeEffects(player.upgrades);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
-  const canThrust = hasMoveIntent && player.huckRockEngineCutoutSeconds <= 0;
+  const canThrust = hasMoveIntent;
 
   updateShipFacing(player, move, dtSeconds);
 
@@ -1939,8 +2068,7 @@ function spawnMenuHuckRock(player) {
     bornTick: state.menu.tick
   });
   applyHuckRockRecoil(player, direction);
-  player.huckRockEngineCutoutSeconds = ENGINE.huckRock.engineCutoutSeconds || 0;
-  player.thrusting = false;
+  player.huckRockEngineCutoutSeconds = 0;
 
   while (state.menu.huckRocks.length > ENGINE.huckRock.maxLobbyRocks) {
     state.menu.huckRocks.shift();
@@ -2096,17 +2224,14 @@ function nearestMenuHuckRockAsteroidHit(rock, previousX, previousY) {
     }
     seen.add(key);
 
-    const hit = sweptCircleBoundsHit(
+    const hit = sweptCircleBlockerHit(
       previousX,
       previousY,
       rock.x,
       rock.y,
       rock.radius,
-      blocker.x,
-      blocker.y,
-      blocker.size,
-      blocker.size
-    ) || circleTileOverlap(rock, blocker);
+      blocker
+    ) || circleBlockerOverlap(rock, blocker);
     if (!hit) {
       continue;
     }
@@ -2187,7 +2312,7 @@ function resolveMenuAsteroidCollisions(player) {
   const blockers = blockingTilesNearCircle(state.menu.asteroid, player.x, player.y, player.radius);
 
     for (const blocker of blockers) {
-      const hit = circleTileOverlap(player, blocker);
+      const hit = circleBlockerOverlap(player, blocker);
       if (!hit) {
         continue;
       }
@@ -2252,6 +2377,11 @@ function activateMenuEntity(entity) {
     return;
   }
 
+  if (entity.action === "bots") {
+    startLocalBotGame();
+    return;
+  }
+
   if (entity.action === "next-theme") {
     cycleThemePreset();
     return;
@@ -2295,6 +2425,755 @@ function activateReadyFromMenu() {
   socket.emit(CLIENT_EVENTS.ready, { button: true });
   cancelMiningRay();
   releaseSpaceUntilKeyup();
+}
+
+function startLocalBotGame() {
+  forgetRegisteredRoom();
+  const seed = `local-bots:${Date.now().toString(36)}`;
+  const arena = createArena({
+    id: LOCAL_BOT_ROOM_ID,
+    seed,
+    playerCount: LOCAL_BOT_COUNT + 1,
+    playerDamage: true,
+    storm: true
+  });
+  const spawnNumbers = shuffledSpawnNumbers(LOCAL_BOT_COUNT + 1, seed);
+  const playerName = getPlayerName();
+  const localPlayerId = LOCAL_BOT_PLAYER_ID;
+  addPlayer(arena, {
+    id: localPlayerId,
+    name: playerName || "Pilot",
+    spawnNumber: spawnNumbers[0]
+  });
+
+  const bots = new Map();
+  for (let index = 0; index < LOCAL_BOT_COUNT; index += 1) {
+    const id = `bot-${index + 1}`;
+    addPlayer(arena, {
+      id,
+      name: `Bot ${index + 1}`,
+      spawnNumber: spawnNumbers[index + 1]
+    });
+    bots.set(id, createPilotBotBrain(id, { seed: `${seed}:${id}` }));
+  }
+
+  state.localGame.active = true;
+  state.localGame.arena = arena;
+  state.localGame.bots = bots;
+  state.localGame.lastStepTimeSeconds = 0;
+  state.localGame.accumulatorSeconds = 0;
+  state.localGame.inputSeq = 0;
+  state.localGame.lastSaveTimeSeconds = 0;
+  state.playerId = localPlayerId;
+  state.room = localBotRoomFromArena(arena, { state: "active" });
+  state.lastRoomId = LOCAL_BOT_ROOM_ID;
+  state.upgrades.active = false;
+  closeBuildMode();
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+  resetLocalDamageAudioState();
+  resetEntitySmoothing();
+  state.prediction.player = null;
+  state.prediction.huckRockCooldownSeconds = 0;
+  clearPredictedHuckRocks();
+  state.eliminationNotices = [];
+  state.playerAliveById.clear();
+  state.spectatorTargetId = null;
+  setClientAsteroid(snapshotAsteroid(arena));
+  syncLocalArenaSnapshot(performance.now() / 1000);
+}
+
+function leaveLocalBotGame() {
+  state.localGame.active = false;
+  state.localGame.arena = null;
+  state.localGame.bots.clear();
+  state.localGame.lastStepTimeSeconds = 0;
+  state.localGame.accumulatorSeconds = 0;
+  state.localGame.inputSeq = 0;
+  state.localGame.lastSaveTimeSeconds = 0;
+  clearLocalBotSave();
+  state.playerId = state.clientId;
+  state.room = {
+    state: "menu",
+    clientId: state.clientId
+  };
+  state.snapshot = null;
+  state.asteroid = null;
+  state.prediction.player = null;
+  state.prediction.huckRockCooldownSeconds = 0;
+  clearPredictedHuckRocks();
+  resetEntitySmoothing();
+  state.eliminationNotices = [];
+  state.playerAliveById.clear();
+  state.spectatorTargetId = null;
+  state.upgrades.active = false;
+  closeBuildMode();
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+  resetLocalDamageAudioState();
+  enterMenuRoom(MENU_ROOMS.ready);
+}
+
+function updateLocalBotGame(timeSeconds) {
+  if (!botProfileActive()) {
+    return updateLocalBotGameImpl(timeSeconds);
+  }
+  return botProfileMeasure("updateLocalBotGame", () => updateLocalBotGameImpl(timeSeconds));
+}
+
+function updateLocalBotGameImpl(timeSeconds) {
+  const localGame = state.localGame;
+  const arena = localGame.arena;
+  if (!localGame.active || !arena) {
+    return;
+  }
+
+  if (state.room?.state === "ended") {
+    syncLocalArenaSnapshot(timeSeconds);
+    return;
+  }
+
+  if (localGame.lastStepTimeSeconds <= 0) {
+    localGame.lastStepTimeSeconds = timeSeconds;
+    syncLocalArenaSnapshot(timeSeconds);
+    return;
+  }
+
+  const elapsed = clamp(timeSeconds - localGame.lastStepTimeSeconds, 0, 0.25);
+  localGame.lastStepTimeSeconds = timeSeconds;
+  localGame.accumulatorSeconds += elapsed;
+
+  const stepSeconds = 1 / ENGINE.tickRate;
+  let steps = 0;
+  while (localGame.accumulatorSeconds >= stepSeconds && steps < 8) {
+    if (botProfileActive()) {
+      botProfileMeasure("stepLocalBotArena", () => stepLocalBotArena(stepSeconds));
+    } else {
+      stepLocalBotArena(stepSeconds);
+    }
+    localGame.accumulatorSeconds -= stepSeconds;
+    steps += 1;
+  }
+
+  if (steps >= 8) {
+    localGame.accumulatorSeconds = 0;
+  }
+
+  if (botProfileActive()) {
+    botProfileMeasure("syncLocalArenaSnapshot", () => syncLocalArenaSnapshot(timeSeconds));
+  } else {
+    syncLocalArenaSnapshot(timeSeconds);
+  }
+}
+
+function stepLocalBotArena(stepSeconds) {
+  const arena = state.localGame.arena;
+  if (!arena) {
+    return;
+  }
+
+  setPlayerInput(arena, LOCAL_BOT_PLAYER_ID, readLocalPlayerInput());
+  for (const [botId, brain] of state.localGame.bots.entries()) {
+    const bot = arena.players.get(botId);
+    if (!bot?.alive) {
+      continue;
+    }
+
+    const decision = shouldUpdateLocalBotBrain(arena, botId, brain)
+      ? updatePilotBotBrain(arena, bot, brain)
+      : updatePilotBotLocalPlanner(arena, bot, brain);
+    setPlayerInput(arena, botId, decision.input);
+    if (decision.upgradeId) {
+      purchasePlayerUpgrade(arena, botId, decision.upgradeId);
+    }
+  }
+
+  if (botProfileActive()) {
+    botProfileMeasure("stepArena", () => stepArena(arena, stepSeconds));
+  } else {
+    stepArena(arena, stepSeconds);
+  }
+  applyClientAsteroidUpdates(takeAsteroidUpdates(arena));
+  updateLocalRoomEndState(arena);
+}
+
+function shouldUpdateLocalBotBrain(arena, botId, brain) {
+  if (
+    !brain?.input ||
+    !Number.isFinite(brain.seq) ||
+    brain.seq <= 0 ||
+    !Number.isFinite(brain.lastPlanTick)
+  ) {
+    return true;
+  }
+
+  return arena.tick % LOCAL_BOT_PLAN_INTERVAL_TICKS === localBotPlanPhase(botId);
+}
+
+function localBotPlanPhase(botId) {
+  const match = /(\d+)$/.exec(String(botId || ""));
+  const number = match ? Number(match[1]) : stableTextHash(botId);
+  return Math.abs(Math.floor(number)) % LOCAL_BOT_PLAN_INTERVAL_TICKS;
+}
+
+function stableTextHash(value) {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function readLocalPlayerInput() {
+  state.localGame.inputSeq += 1;
+  const player = localPlayerFromSnapshot();
+  const aimAngle = inputAimAngleForPlayer(player);
+  if (state.chat.active || isInputBlocked()) {
+    return normalizeInput({
+      sessionId: inputSessionId,
+      seq: state.localGame.inputSeq,
+      moveX: 0,
+      moveY: 0,
+      aimAngle,
+      mining: false,
+      huckRock: false,
+      huckRockTargetX: null,
+      huckRockTargetY: null,
+      interact: false,
+      build: false
+    });
+  }
+
+  const move = readMoveVector();
+  const huckRock = readHuckRockInput();
+  const huckRockTarget = huckRock ? huckRockTargetForPlayer(player) : null;
+  return normalizeInput({
+    sessionId: inputSessionId,
+    seq: state.localGame.inputSeq,
+    moveX: move.x,
+    moveY: move.y,
+    aimAngle,
+    mining: activeRoomMiningInputAllowed(),
+    huckRock,
+    huckRockTargetX: huckRockTarget?.x ?? null,
+    huckRockTargetY: huckRockTarget?.y ?? null,
+    interact: false,
+    build: false
+  });
+}
+
+function syncLocalArenaSnapshot(timeSeconds, options = {}) {
+  const arena = state.localGame.arena;
+  if (!arena) {
+    return;
+  }
+
+  const snapshot = snapshotArena(arena);
+  snapshot.receivedAtSeconds = timeSeconds;
+  recordEntitySnapshot(snapshot, timeSeconds);
+  updateLocalDamageAudio(snapshot, timeSeconds);
+  if (options.skipEliminations) {
+    primePlayerAliveState(snapshot);
+  } else {
+    recordEliminations(snapshot, timeSeconds);
+  }
+  state.snapshot = snapshot;
+  if (state.asteroid) {
+    state.asteroid.tick = snapshot.tick;
+  }
+  saveLocalBotGame({ timeSeconds });
+}
+
+function primePlayerAliveState(snapshot) {
+  state.playerAliveById.clear();
+  for (const player of snapshot.players || []) {
+    state.playerAliveById.set(player.id, player.alive !== false);
+  }
+}
+
+function updateLocalRoomEndState(arena) {
+  const alive = Array.from(arena.players.values()).filter((player) => player.alive);
+  if (alive.length > 1 || state.room?.state === "ended") {
+    return;
+  }
+
+  state.room = localBotRoomFromArena(arena, {
+    state: "ended",
+    winnerId: alive[0]?.id ?? null
+  });
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+  saveLocalBotGame({ force: true });
+}
+
+function isLocalBotGame() {
+  return state.localGame.active === true;
+}
+
+function shuffledSpawnNumbers(count, seed) {
+  const random = createSeededRandom(`${seed}:spawns`);
+  const numbers = Array.from({ length: count }, (_, index) => index + 1);
+  for (let index = numbers.length - 1; index > 0; index -= 1) {
+    const other = Math.floor(random() * (index + 1));
+    [numbers[index], numbers[other]] = [numbers[other], numbers[index]];
+  }
+  return numbers;
+}
+
+function saveLocalBotGame(options = {}) {
+  const localGame = state.localGame;
+  if (!localGame.active || !localGame.arena) {
+    return;
+  }
+
+  const timeSeconds = Number.isFinite(options.timeSeconds)
+    ? options.timeSeconds
+    : performance.now() / 1000;
+  if (
+    !options.force &&
+    localGame.lastSaveTimeSeconds > 0 &&
+    timeSeconds - localGame.lastSaveTimeSeconds < LOCAL_BOT_SAVE_INTERVAL_SECONDS
+  ) {
+    return;
+  }
+
+  const save = createLocalBotSave();
+  if (!save) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(LOCAL_BOT_SAVE_STORAGE_KEY, JSON.stringify(save));
+    localGame.lastSaveTimeSeconds = timeSeconds;
+  } catch (error) {
+    console.warn("Unable to save local bot game", error);
+  }
+}
+
+function createLocalBotSave() {
+  const arena = state.localGame.arena;
+  if (!arena) {
+    return null;
+  }
+
+  return {
+    version: LOCAL_BOT_SAVE_VERSION,
+    savedAt: Date.now(),
+    seed: arena.seed,
+    tick: arena.tick,
+    inputSeq: state.localGame.inputSeq,
+    roomState: state.room?.state === "ended" ? "ended" : "active",
+    winnerId: state.room?.winnerId ?? null,
+    asteroid: snapshotAsteroid(arena),
+    asteroidMining: Array.from(arena.asteroidMining.entries()).map(([index, mining]) => ({
+      index,
+      phase: mining.phase,
+      progress: mining.progress
+    })),
+    players: Array.from(arena.players.values())
+      .sort((a, b) => a.number - b.number)
+      .map(serializeLocalBotPlayer),
+    bots: Array.from(state.localGame.bots.values()).map(snapshotPilotBotBrain),
+    entities: Array.from(arena.entities.values())
+      .filter((entity) => entity.destroyed !== true)
+      .map((entity) => ({ ...entity }))
+  };
+}
+
+function serializeLocalBotPlayer(player) {
+  return {
+    id: player.id,
+    number: player.number,
+    spawnNumber: player.spawnNumber,
+    name: player.name,
+    talk: player.talk,
+    x: player.x,
+    y: player.y,
+    vx: player.vx,
+    vy: player.vy,
+    angle: player.angle,
+    facingMoveX: player.facingMoveX,
+    facingMoveY: player.facingMoveY,
+    pendingFacingSignX: player.pendingFacingSignX,
+    pendingFacingSignY: player.pendingFacingSignY,
+    pendingFacingSeconds: player.pendingFacingSeconds,
+    aimAngle: player.aimAngle,
+    mining: player.mining,
+    miningRayCount: player.miningRayCount,
+    miningHoldSeconds: player.miningHoldSeconds,
+    rayExtension: player.rayExtension,
+    buttonTargetId: player.buttonTargetId,
+    buttonTargetSeconds: player.buttonTargetSeconds,
+    buttonTargetActivated: player.buttonTargetActivated,
+    huckRockCooldownSeconds: player.huckRockCooldownSeconds,
+    huckRockEngineCutoutSeconds: player.huckRockEngineCutoutSeconds,
+    miningTargetIndex: player.miningTargetIndex,
+    miningPhase: player.miningPhase,
+    miningProgress: player.miningProgress,
+    thrusting: player.thrusting,
+    shake: player.shake,
+    radius: player.radius,
+    upgrades: { ...player.upgrades },
+    healthBars: player.healthBars,
+    health: player.health,
+    maxHealth: player.maxHealth,
+    kills: player.kills || 0,
+    lastKillDropAmount: player.lastKillDropAmount || 0,
+    lastKillDropTick: player.lastKillDropTick,
+    lastDamageTick: player.lastDamageTick,
+    killedById: player.killedById,
+    eliminatedAtTick: player.eliminatedAtTick,
+    resources: { ...player.resources },
+    stormWarning: player.stormWarning,
+    stormDamagePerSecond: player.stormDamagePerSecond,
+    alive: player.alive,
+    input: player.input ? { ...player.input } : null,
+    inputSessionId: player.inputSessionId,
+    lastInputSeq: player.lastInputSeq,
+    joinedAtTick: player.joinedAtTick
+  };
+}
+
+function restoreLocalBotGame() {
+  let save = null;
+  try {
+    save = JSON.parse(window.localStorage.getItem(LOCAL_BOT_SAVE_STORAGE_KEY) || "null");
+  } catch (error) {
+    clearLocalBotSave();
+    return false;
+  }
+
+  if (!validLocalBotSave(save)) {
+    clearLocalBotSave();
+    return false;
+  }
+
+  const asteroid = hydrateLocalBotAsteroid(save.asteroid);
+  if (!asteroid) {
+    clearLocalBotSave();
+    return false;
+  }
+
+  const arena = createArena({
+    id: LOCAL_BOT_ROOM_ID,
+    seed: save.seed,
+    playerCount: LOCAL_BOT_COUNT + 1,
+    playerDamage: true,
+    storm: true,
+    asteroid
+  });
+  arena.tick = Math.max(0, Math.floor(Number(save.tick) || 0));
+  arena.players.clear();
+  arena.entities.clear();
+  arena.asteroidMining.clear();
+  arena.asteroidUpdates = [];
+  arena.stormUpdates = [];
+  arena.effects = [];
+  arena.huckRockButtonHits = [];
+
+  for (const savedPlayer of save.players.slice().sort((a, b) => numberOr(a.number, 0) - numberOr(b.number, 0))) {
+    addPlayer(arena, {
+      id: String(savedPlayer.id),
+      name: savedPlayer.name,
+      spawnNumber: numberOr(savedPlayer.spawnNumber, savedPlayer.number || 1)
+    });
+    const player = arena.players.get(String(savedPlayer.id));
+    if (player) {
+      restoreLocalBotPlayer(player, savedPlayer);
+    }
+  }
+
+  restoreLocalBotStorm(arena, save.asteroid);
+  restoreLocalBotMining(arena, save.asteroidMining);
+  restoreLocalBotEntities(arena, save.entities);
+
+  const savedBrainById = new Map((save.bots || []).map((brain) => [String(brain.id), brain]));
+  const bots = new Map();
+  for (const player of arena.players.values()) {
+    if (player.id === LOCAL_BOT_PLAYER_ID) {
+      continue;
+    }
+
+    const savedBrain = savedBrainById.get(player.id) || {};
+    const brain = createPilotBotBrain(player.id, {
+      ...savedBrain,
+      seed: savedBrain.seed || `${save.seed}:${player.id}`
+    });
+    resetRestoredBotBrainTransientState(brain);
+    bots.set(player.id, brain);
+    player.inputSessionId = brain.sessionId;
+    player.lastInputSeq = brain.seq || 0;
+  }
+
+  state.localGame.active = true;
+  state.localGame.arena = arena;
+  state.localGame.bots = bots;
+  state.localGame.lastStepTimeSeconds = 0;
+  state.localGame.accumulatorSeconds = 0;
+  state.localGame.inputSeq = numberOr(save.inputSeq, 0);
+  state.localGame.lastSaveTimeSeconds = 0;
+  state.playerId = LOCAL_BOT_PLAYER_ID;
+  state.room = localBotRoomFromArena(arena, {
+    state: save.roomState,
+    winnerId: save.winnerId
+  });
+  state.lastRoomId = LOCAL_BOT_ROOM_ID;
+  state.resumePending = false;
+  state.deferredMenuRoom = null;
+  state.upgrades.active = false;
+  closeBuildMode();
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+  resetLocalDamageAudioState();
+  resetEntitySmoothing();
+  state.prediction.player = null;
+  state.prediction.huckRockCooldownSeconds = 0;
+  clearPredictedHuckRocks();
+  state.eliminationNotices = [];
+  state.playerAliveById.clear();
+  setClientAsteroid(snapshotAsteroid(arena));
+  syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
+  return true;
+}
+
+function resetRestoredBotBrainTransientState(brain) {
+  brain.wanderTarget = null;
+  brain.targetResource = null;
+  brain.resourceTargetCache = null;
+  brain.fleeTarget = null;
+  brain.chaseMemory = null;
+  brain.navGoalKey = "";
+  brain.navPath = [];
+  brain.navPathSteps = [];
+  brain.navPathCursor = 0;
+  brain.navSegmentCursor = -1;
+  brain.navSegmentProgress = 0;
+  brain.navAttachIndex = 0;
+  brain.navUpdatedTick = 0;
+  brain.navFailedKey = "";
+  brain.navFailedUntilTick = 0;
+  brain.attackFallbackTarget = null;
+  brain.mineQueue = [];
+  brain.input = null;
+  brain.lastPlanTick = null;
+  brain.trajectoryPlan = null;
+  brain.lastX = null;
+  brain.lastY = null;
+  brain.stuckTicks = 0;
+  brain.debug = null;
+}
+
+function validLocalBotSave(save) {
+  return save &&
+    save.version === LOCAL_BOT_SAVE_VERSION &&
+    typeof save.seed === "string" &&
+    save.asteroid &&
+    Array.isArray(save.players) &&
+    save.players.some((player) => player?.id === LOCAL_BOT_PLAYER_ID);
+}
+
+function hydrateLocalBotAsteroid(savedAsteroid) {
+  const widthTiles = Math.floor(Number(savedAsteroid?.widthTiles) || 0);
+  const heightTiles = Math.floor(Number(savedAsteroid?.heightTiles) || 0);
+  const tileCount = widthTiles * heightTiles;
+  if (
+    tileCount <= 0 ||
+    typeof savedAsteroid.tiles !== "string" ||
+    typeof savedAsteroid.amounts !== "string" ||
+    typeof savedAsteroid.playable !== "string" ||
+    savedAsteroid.tiles.length !== tileCount ||
+    savedAsteroid.amounts.length !== tileCount ||
+    savedAsteroid.playable.length !== tileCount
+  ) {
+    return null;
+  }
+
+  return {
+    seed: savedAsteroid.seed || "local-bots:asteroid",
+    widthTiles,
+    heightTiles,
+    tileSize: Math.max(1, Math.floor(Number(savedAsteroid.tileSize) || RENDER.tileSize)),
+    generation: savedAsteroid.generation || {},
+    tiles: savedAsteroid.tiles.split(""),
+    amounts: Uint8Array.from(savedAsteroid.amounts, (amount) => parseInt(amount, 36) || 0),
+    playable: Array.from(savedAsteroid.playable, (cell) => cell === "1"),
+    pockets: Array.isArray(savedAsteroid.pockets)
+      ? savedAsteroid.pockets.map((pocket) => ({
+          playerNumber: numberOr(pocket.playerNumber, 0),
+          tileX: numberOr(pocket.tileX, 0),
+          tileY: numberOr(pocket.tileY, 0),
+          radius: numberOr(pocket.radius, 0),
+          spawnX: numberOr(pocket.spawnX, 0),
+          spawnY: numberOr(pocket.spawnY, 0)
+        }))
+      : []
+  };
+}
+
+function restoreLocalBotPlayer(player, savedPlayer) {
+  const numericFields = [
+    "number",
+    "spawnNumber",
+    "x",
+    "y",
+    "vx",
+    "vy",
+    "angle",
+    "facingMoveX",
+    "facingMoveY",
+    "pendingFacingSignX",
+    "pendingFacingSignY",
+    "pendingFacingSeconds",
+    "aimAngle",
+    "miningRayCount",
+    "miningHoldSeconds",
+    "rayExtension",
+    "buttonTargetSeconds",
+    "huckRockCooldownSeconds",
+    "huckRockEngineCutoutSeconds",
+    "miningTargetIndex",
+    "miningProgress",
+    "shake",
+    "radius",
+    "healthBars",
+    "health",
+    "maxHealth",
+    "kills",
+    "lastKillDropAmount",
+    "lastKillDropTick",
+    "lastDamageTick",
+    "eliminatedAtTick",
+    "stormDamagePerSecond",
+    "lastInputSeq",
+    "joinedAtTick"
+  ];
+
+  for (const field of numericFields) {
+    if (Number.isFinite(savedPlayer[field])) {
+      player[field] = savedPlayer[field];
+    }
+  }
+
+  player.name = savedPlayer.name || player.name;
+  player.talk = savedPlayer.talk || "";
+  player.mining = savedPlayer.mining === true;
+  player.buttonTargetId = savedPlayer.buttonTargetId ?? null;
+  player.buttonTargetActivated = savedPlayer.buttonTargetActivated === true;
+  player.miningPhase = savedPlayer.miningPhase ?? null;
+  player.thrusting = savedPlayer.thrusting === true;
+  player.upgrades = { ...player.upgrades, ...(savedPlayer.upgrades || {}) };
+  player.killedById = savedPlayer.killedById ?? null;
+  player.resources = {
+    rock: numberOr(savedPlayer.resources?.rock, 0),
+    ore: numberOr(savedPlayer.resources?.ore, 0),
+    diamond: numberOr(savedPlayer.resources?.diamond, 0)
+  };
+  player.stormWarning = savedPlayer.stormWarning || "";
+  player.alive = savedPlayer.alive !== false;
+  player.input = normalizeInput(savedPlayer.input || {});
+  player.inputSessionId = savedPlayer.inputSessionId || player.input.sessionId || "";
+}
+
+function restoreLocalBotStorm(arena, savedAsteroid) {
+  if (!arena.storm || typeof savedAsteroid?.storm !== "string") {
+    return;
+  }
+
+  const tileCount = arena.asteroid.tiles.length;
+  if (savedAsteroid.storm.length !== tileCount) {
+    return;
+  }
+
+  arena.storm.state = Uint8Array.from(savedAsteroid.storm, (state) => parseInt(state, 36) || 0);
+  arena.storm.warningStartedTick = new Int32Array(tileCount);
+  arena.storm.warningUntilTick = new Int32Array(tileCount);
+  for (const warning of savedAsteroid.stormWarnings || []) {
+    const index = Math.floor(Number(warning.index));
+    if (index < 0 || index >= tileCount) {
+      continue;
+    }
+
+    arena.storm.warningStartedTick[index] = Math.floor(Number(warning.startedTick) || 0);
+    arena.storm.warningUntilTick[index] = Math.floor(Number(warning.untilTick) || 0);
+  }
+
+  arena.storm.playableCount = 0;
+  arena.storm.claimedCount = 0;
+  for (let index = 0; index < tileCount; index += 1) {
+    if (!localBotPlayableCell(arena.asteroid, index)) {
+      continue;
+    }
+
+    arena.storm.playableCount += 1;
+    if (arena.storm.state[index] !== STORM_STATE.safe) {
+      arena.storm.claimedCount += 1;
+    }
+  }
+}
+
+function restoreLocalBotMining(arena, asteroidMining) {
+  if (!Array.isArray(asteroidMining)) {
+    return;
+  }
+
+  for (const mining of asteroidMining) {
+    const index = Math.floor(Number(mining.index));
+    if (
+      index < 0 ||
+      index >= arena.asteroid.tiles.length ||
+      typeof mining.phase !== "string" ||
+      !Number.isFinite(mining.progress) ||
+      mining.progress <= 0
+    ) {
+      continue;
+    }
+
+    arena.asteroidMining.set(index, {
+      phase: mining.phase,
+      progress: mining.progress
+    });
+  }
+}
+
+function restoreLocalBotEntities(arena, entities) {
+  if (!Array.isArray(entities)) {
+    return;
+  }
+
+  for (const entity of entities) {
+    if (!entity?.id || entity.destroyed === true) {
+      continue;
+    }
+    arena.entities.set(String(entity.id), { ...entity, id: String(entity.id) });
+  }
+}
+
+function localBotRoomFromArena(arena, options = {}) {
+  return {
+    state: options.state === "ended" ? "ended" : "active",
+    roomId: LOCAL_BOT_ROOM_ID,
+    local: true,
+    winnerId: options.state === "ended" ? options.winnerId ?? null : null,
+    players: Array.from(arena.players.values()).map((player) => ({
+      id: player.id,
+      name: player.name,
+      alive: player.alive
+    }))
+  };
+}
+
+function clearLocalBotSave() {
+  window.localStorage.removeItem(LOCAL_BOT_SAVE_STORAGE_KEY);
+}
+
+function localBotPlayableCell(asteroid, index) {
+  return asteroid.playable[index] === true || asteroid.playable[index] === "1";
+}
+
+function numberOr(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function rayRectIntersection(start, direction, rect, maxDistance) {
@@ -2391,6 +3270,12 @@ function isLoadingRoom() {
 function menuEntities() {
   const center = menuCenter(state.menu.asteroid);
   const top = center.y + 28;
+  const buttonWidth = 88;
+  const buttonGap = 16;
+  const controlsRows = menuControlHintRows();
+  const controlsY = top + MENU_BUTTON_HEIGHT + 30;
+  const controlsHeight = controlsRows.length * 11 - 1;
+  const secondaryY = controlsY + controlsHeight + 18;
 
   if (state.menu.room === MENU_ROOMS.theme) {
     return themeSwatchEntities(center);
@@ -2398,9 +3283,10 @@ function menuEntities() {
 
   return [
     menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, center.y - 84),
-    menuButton("menu-ready", "ready", "READY", center.x - MENU_BUTTON_WIDTH - MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
-    menuButton("menu-theme", "theme", "THEME", center.x + MENU_BUTTON_GAP / 2, top, MENU_BUTTON_WIDTH),
-    menuHint("menu-controls", menuControlHintRows(), center.x, top + MENU_BUTTON_HEIGHT + 30)
+    menuButton("menu-ready", "ready", "READY", center.x - buttonWidth - buttonGap / 2, top, buttonWidth),
+    menuButton("menu-theme", "theme", "THEME", center.x + buttonGap / 2, top, buttonWidth),
+    menuHint("menu-controls", controlsRows, center.x, controlsY),
+    menuButton("menu-bots", "bots", "BOTS", center.x - buttonWidth / 2, secondaryY, buttonWidth)
   ];
 }
 
@@ -2559,6 +3445,52 @@ function loadTheme() {
   }
 
   return readThemeSource() || defaultTheme();
+}
+
+function loadBotDebugOverlay() {
+  return window.localStorage.getItem(BOT_DEBUG_OVERLAY_STORAGE_KEY) === "1";
+}
+
+function setBotDebugOverlay(enabled) {
+  state.botDebugOverlay = Boolean(enabled);
+  window.localStorage.setItem(BOT_DEBUG_OVERLAY_STORAGE_KEY, state.botDebugOverlay ? "1" : "0");
+  console.log(`BITSPACE bot debug overlay ${state.botDebugOverlay ? "on" : "off"}`);
+  return state.botDebugOverlay;
+}
+
+function installControlHandles() {
+  const handles = window.controls && typeof window.controls === "object"
+    ? window.controls
+    : {};
+  handles.debugBot = (enabled = null) => setBotDebugOverlay(
+    typeof enabled === "boolean" ? enabled : !state.botDebugOverlay
+  );
+  handles.profileBots = (seconds = 5) => {
+    const durationSeconds = clamp(Number(seconds) || 5, 0.5, 60);
+    resetBotProfile();
+    setBotProfileEnabled(true);
+    console.log(`BITSPACE bot profiler on for ${durationSeconds}s`);
+    return new Promise((resolve) => {
+      window.setTimeout(() => {
+        setBotProfileEnabled(false);
+        const snapshot = botProfileSnapshot();
+        console.table(snapshot.entries);
+        resolve(snapshot);
+      }, durationSeconds * 1000);
+    });
+  };
+  handles.profileBotsStop = () => {
+    setBotProfileEnabled(false);
+    const snapshot = botProfileSnapshot();
+    console.table(snapshot.entries);
+    return snapshot;
+  };
+  handles.profileBotsNow = () => {
+    const snapshot = botProfileSnapshot();
+    console.table(snapshot.entries);
+    return snapshot;
+  };
+  window.controls = handles;
 }
 
 function resetTheme() {
@@ -3025,6 +3957,13 @@ function closeTalk() {
 
 function submitTalk() {
   const text = talkInput.value.trim().replace(/\s+/g, " ");
+  if (isLocalBotGame()) {
+    setPlayerTalk(state.localGame.arena, LOCAL_BOT_PLAYER_ID, text);
+    syncLocalArenaSnapshot(performance.now() / 1000);
+    closeTalk();
+    return;
+  }
+
   if (socket.connected) {
     socket.emit(CLIENT_EVENTS.talk, text);
   }
@@ -3098,8 +4037,8 @@ function flushPendingBeeps() {
 
 function playMechanicalBeep(context, delay = 0) {
   const start = context.currentTime + 0.01;
-  playMechanicalTone(context, 760, start + delay, 0.075, 0.065);
-  playMechanicalTone(context, 520, start + delay + 0.092, 0.07, 0.055);
+  playMechanicalTone(context, 760, start + delay, 0.075, 0.0325);
+  playMechanicalTone(context, 520, start + delay + 0.092, 0.07, 0.0275);
 }
 
 function playMechanicalTone(context, frequency, start, duration, volume) {
@@ -3181,7 +4120,7 @@ function updateLocalShipAudio(player, timeSeconds) {
   const speed = alive ? Math.hypot(player.vx || 0, player.vy || 0) : 0;
   const speedLevel = clamp(speed / Math.max(1, ENGINE.ship.audioSpeedReference), 0, 1);
   const engineLevel = alive && player.thrusting ? Math.max(0.28, speedLevel) : 0;
-  const miningActive = alive && player.mining === true;
+  const miningActive = state.room?.state !== "ended" && alive && player.mining === true;
 
   updateEngineAudio(context, engineLevel, speedLevel, timeSeconds);
   updateMiningAudio(context, miningActive, timeSeconds);
@@ -3459,6 +4398,10 @@ function huckRockInputAllowed() {
   }
 
   if (roomState === "active") {
+    if (!localPlayerCanUseCombat()) {
+      return false;
+    }
+
     const player = localPlayerFromSnapshot();
     if ((player?.resources?.rock || 0) < (ENGINE.huckRock.costRock || 0)) {
       flashRockHud();
@@ -3487,11 +4430,16 @@ function physicalMiningInputActive() {
 
 function activeRoomMiningInputAllowed() {
   return state.room?.state === "active" &&
+    localPlayerCanUseCombat() &&
     physicalMiningInputActive() &&
     !state.chat.active &&
     !state.upgrades.active &&
     !state.build.active &&
     !isInputBlocked();
+}
+
+function localPlayerCanUseCombat() {
+  return state.room?.state === "active" && !isLocalPlayerEliminated();
 }
 
 function controllerMiningActive() {
@@ -3711,7 +4659,9 @@ function reconcilePrediction(snapshot, timeSeconds) {
     pendingFacingSignX: predicted.pendingFacingSignX,
     pendingFacingSignY: predicted.pendingFacingSignY,
     pendingFacingSeconds: predicted.pendingFacingSeconds,
-    aimAngle: inputAimAngleForPlayer(predicted),
+    aimAngle: isInputBlocked()
+      ? predicted.aimAngle
+      : inputAimAngleForPlayer(predicted),
     mining: activeRoomMiningInputAllowed()
   };
 }
@@ -3744,13 +4694,10 @@ function updatePrediction(timeSeconds) {
     ? { x: 0, y: 0 }
     : readMoveVector();
   const effects = aggregateUpgradeEffects(predicted.upgrades);
-  predicted.huckRockEngineCutoutSeconds = Math.max(
-    0,
-    (predicted.huckRockEngineCutoutSeconds || 0) - dtSeconds
-  );
+  predicted.huckRockEngineCutoutSeconds = 0;
   applyShipFriction(predicted, dtSeconds);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
-  const canThrust = hasMoveIntent && predicted.huckRockEngineCutoutSeconds <= 0;
+  const canThrust = hasMoveIntent;
 
   updateShipFacing(predicted, move, dtSeconds);
 
@@ -3758,7 +4705,9 @@ function updatePrediction(timeSeconds) {
     applyThrusterAcceleration(predicted, move, effects, dtSeconds);
   }
 
-  predicted.aimAngle = inputAimAngleForPlayer(predicted);
+  if (!isInputBlocked()) {
+    predicted.aimAngle = inputAimAngleForPlayer(predicted);
+  }
   predicted.mining = activeRoomMiningInputAllowed();
   if (predicted.mining) {
     predicted.miningHoldSeconds = (predicted.miningHoldSeconds || 0) + dtSeconds;
@@ -3845,8 +4794,7 @@ function applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds) {
   };
   spawnPredictedHuckRock(predicted, direction, timeSeconds);
   applyHuckRockRecoil(predicted, direction);
-  predicted.huckRockEngineCutoutSeconds = ENGINE.huckRock.engineCutoutSeconds || 0;
-  predicted.thrusting = false;
+  predicted.huckRockEngineCutoutSeconds = 0;
   state.prediction.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
 }
 
@@ -4151,17 +5099,14 @@ function nearestRenderHuckRockAsteroidHit(rock, previousX, previousY) {
     }
     seen.add(key);
 
-    const hit = sweptCircleBoundsHit(
+    const hit = sweptCircleBlockerHit(
       previousX,
       previousY,
       rock.x,
       rock.y,
       rock.radius,
-      blocker.x,
-      blocker.y,
-      blocker.size,
-      blocker.size
-    ) || circleTileOverlap(rock, blocker);
+      blocker
+    ) || circleBlockerOverlap(rock, blocker);
     if (!hit) {
       continue;
     }
@@ -4293,7 +5238,7 @@ function resolvePredictionAsteroidCollisions(player) {
     });
 
     for (const blocker of blockers) {
-      const hit = circleTileOverlap(player, blocker);
+      const hit = circleBlockerOverlap(player, blocker);
       if (!hit) {
         continue;
       }
@@ -4683,7 +5628,16 @@ function updateMouse(event) {
 }
 
 function handleRoomUiClick(buttonId) {
-  if (!buttonId || !socket.connected) {
+  if (!buttonId) {
+    return;
+  }
+
+  if (buttonId === "leaveSpectating" || buttonId === "leaveEnded" || buttonId === "terminalLeave") {
+    leaveCurrentRoom();
+    return;
+  }
+
+  if (!socket.connected) {
     return;
   }
 
@@ -4697,9 +5651,6 @@ function handleRoomUiClick(buttonId) {
     return;
   }
 
-  if (buttonId === "leaveSpectating" || buttonId === "leaveEnded" || buttonId === "terminalLeave") {
-    leaveCurrentRoom();
-  }
 }
 
 function handleWaitingRoomShortcutKey(event) {
@@ -4763,7 +5714,47 @@ function canLeaveWithControllerReset() {
     (state.room?.state === "active" && isLocalPlayerEliminated());
 }
 
+function handleLeaveShortcut(nowSeconds = performance.now() / 1000) {
+  if (!canLeaveWithShortcut()) {
+    state.leaveConfirmUntilSeconds = 0;
+    return false;
+  }
+
+  if (state.room?.state !== "active") {
+    state.leaveConfirmUntilSeconds = 0;
+    leaveCurrentRoom();
+    return true;
+  }
+
+  if (state.leaveConfirmUntilSeconds > nowSeconds) {
+    state.leaveConfirmUntilSeconds = 0;
+    leaveCurrentRoom();
+    return true;
+  }
+
+  state.leaveConfirmUntilSeconds = nowSeconds + LEAVE_CONFIRM_SECONDS;
+  return true;
+}
+
+function canLeaveWithShortcut() {
+  const roomState = state.room?.state;
+  if (roomState === "ended" || (roomState === "active" && isLocalPlayerEliminated())) {
+    return !state.chat.active;
+  }
+
+  return !state.chat.active &&
+    !state.upgrades.active &&
+    !state.build.active &&
+    (roomState === "waiting" || roomState === "active" || roomState === "ended");
+}
+
 function leaveCurrentRoom() {
+  state.leaveConfirmUntilSeconds = 0;
+  if (isLocalBotGame() || state.room?.local) {
+    leaveLocalBotGame();
+    return;
+  }
+
   if (!socket.connected) {
     return;
   }
@@ -4965,6 +5956,14 @@ function buySelectedUpgrade() {
   }
 
   const cost = nextUpgradeCost(player.upgrades, definition.id);
+  if (isLocalBotGame()) {
+    if (canAffordUpgrade(player.resources, cost)) {
+      purchasePlayerUpgrade(state.localGame.arena, LOCAL_BOT_PLAYER_ID, definition.id);
+      syncLocalArenaSnapshot(performance.now() / 1000);
+    }
+    return;
+  }
+
   if (socket.connected && canAffordUpgrade(player.resources, cost)) {
     socket.emit(CLIENT_EVENTS.upgrade, definition.id);
   }
@@ -5014,7 +6013,21 @@ function buildWallAtMouse(options = {}) {
   state.build.lastTargetKey = targetKey;
   state.build.nextAttemptSeconds = timeSeconds + BUILD_REPEAT_SECONDS;
 
-  if (!target?.valid || !socket.connected) {
+  if (!target?.valid) {
+    return;
+  }
+
+  if (isLocalBotGame()) {
+    buildPlayerWall(state.localGame.arena, LOCAL_BOT_PLAYER_ID, {
+      tileX: target.tileX,
+      tileY: target.tileY
+    });
+    applyClientAsteroidUpdates(takeAsteroidUpdates(state.localGame.arena));
+    syncLocalArenaSnapshot(timeSeconds);
+    return;
+  }
+
+  if (!socket.connected) {
     return;
   }
 
@@ -5158,14 +6171,519 @@ function cameraPlayerIdForRoom() {
   }
 
   if (!player || player.alive) {
+    state.spectatorTargetId = null;
     return state.playerId;
   }
 
   if (player.killedById) {
-    return player.killedById;
+    const killer = state.snapshot?.players.find((candidate) => (
+      candidate.id === player.killedById && candidate.alive === true
+    ));
+    if (killer) {
+      state.spectatorTargetId = killer.id;
+      return killer.id;
+    }
   }
 
-  return state.snapshot?.players.find((candidate) => candidate.alive)?.id || state.playerId;
+  return randomAliveSpectatorTargetId(player) || state.playerId;
+}
+
+function randomAliveSpectatorTargetId(eliminatedPlayer) {
+  const alivePlayers = (state.snapshot?.players || []).filter((candidate) => candidate.alive === true);
+  if (alivePlayers.length <= 0) {
+    state.spectatorTargetId = null;
+    return null;
+  }
+
+  if (alivePlayers.some((candidate) => candidate.id === state.spectatorTargetId)) {
+    return state.spectatorTargetId;
+  }
+
+  const random = createSeededRandom(
+    `${eliminatedPlayer.id}:${eliminatedPlayer.eliminatedAtTick ?? state.snapshot?.tick ?? 0}:spectator`
+  );
+  state.spectatorTargetId = alivePlayers[Math.floor(random() * alivePlayers.length)]?.id || alivePlayers[0].id;
+  return state.spectatorTargetId;
+}
+
+function botChunkMapRenderState(cameraPlayerId) {
+  if (!state.localGame.active || !state.asteroid || !cameraPlayerId || cameraPlayerId === state.playerId) {
+    return null;
+  }
+
+  const brain = state.localGame.bots.get(cameraPlayerId);
+  const bot = state.snapshot?.players.find((candidate) => candidate.id === cameraPlayerId);
+  if (!brain || !bot) {
+    return null;
+  }
+
+  const cellsX = Math.ceil(state.asteroid.widthTiles / BOT_DEBUG_CHUNK_TILES);
+  const cellsY = Math.ceil(state.asteroid.heightTiles / BOT_DEBUG_CHUNK_TILES);
+  const current = pointChunkForDebugMap(bot);
+  return {
+    label: bot.name || cameraPlayerId,
+    cellsX,
+    cellsY,
+    current,
+    explored: Array.from(brain.exploredCells || [])
+      .map(([key, visits]) => {
+        const cell = debugChunkFromKey(key);
+        return cell ? { ...cell, visits: Math.max(1, Math.floor(Number(visits) || 1)) } : null;
+      })
+      .filter(Boolean),
+    heat: Array.from(brain.exploreHeat || [])
+      .map(([key, entry]) => {
+        const cell = debugChunkFromKey(key);
+        const heat = debugExploreHeat(entry);
+        return cell && heat > 0 ? { ...cell, heat } : null;
+      })
+      .filter(Boolean),
+    threat: debugChunkFromSector(brain.lastThreatSector),
+    wander: debugChunkFromTarget(brain.wanderTarget),
+    resource: debugChunkFromTarget(brain.targetResource),
+    flee: debugChunkFromTarget(brain.fleeTarget),
+    nav: Array.isArray(brain.navPath)
+      ? brain.navPath.map((index) => debugChunkFromTileIndex(index)).filter(Boolean)
+      : []
+  };
+}
+
+function botDebugOverlayRenderState(cameraPlayerId) {
+  if (!state.botDebugOverlay) {
+    return null;
+  }
+
+  const details = spectatedBotDebugDetails(cameraPlayerId);
+  if (!details) {
+    return null;
+  }
+
+  const brain = state.localGame.bots.get(cameraPlayerId);
+  const bot = state.snapshot?.players.find((candidate) => candidate.id === cameraPlayerId);
+  if (!brain || !bot) {
+    return null;
+  }
+
+  return {
+    title: details.name || details.id,
+    lines: botDebugOverlayLines(details),
+    player: {
+      x: bot.x,
+      y: bot.y,
+      radius: bot.radius || ENGINE.ship.radius
+    },
+    path: botDebugPathPoints(brain),
+    pathCursor: Math.max(0, Math.floor(Number(brain.navPathCursor || 0))),
+    targets: botDebugTargetPoints(brain),
+    miningTarget: Number.isInteger(bot.miningTargetIndex)
+      ? debugTileCenter(bot.miningTargetIndex)
+      : null
+  };
+}
+
+function spectatedBotDebugDetails(cameraPlayerId) {
+  if (!state.localGame.active || !cameraPlayerId || cameraPlayerId === state.playerId) {
+    return null;
+  }
+
+  const brain = state.localGame.bots.get(cameraPlayerId);
+  const bot = state.snapshot?.players.find((candidate) => candidate.id === cameraPlayerId);
+  if (!brain || !bot) {
+    return null;
+  }
+
+  return {
+    id: cameraPlayerId,
+    name: bot.name,
+    tick: state.snapshot?.tick ?? null,
+    alive: bot.alive,
+    position: debugPoint(bot),
+    velocity: debugVector(bot.vx, bot.vy),
+    health: {
+      current: debugNumber(bot.health),
+      max: debugNumber(bot.maxHealth),
+      bars: bot.healthBars
+    },
+    resources: { ...(bot.resources || {}) },
+    upgrades: { ...(bot.upgrades || {}) },
+    input: bot.input ? {
+      seq: bot.input.seq,
+      moveX: debugNumber(bot.input.moveX),
+      moveY: debugNumber(bot.input.moveY),
+      aimAngle: debugNumber(bot.input.aimAngle),
+      mining: bot.input.mining,
+      huckRock: bot.input.huckRock
+    } : null,
+    mining: {
+      active: bot.mining,
+      targetIndex: bot.miningTargetIndex ?? null,
+      phase: bot.miningPhase ?? null,
+      progress: debugNumber(bot.miningProgress)
+    },
+    brain: {
+      plan: brain.upgradePlan,
+      seq: brain.seq,
+      mode: brain.debug?.mode ?? null,
+      target: brain.debug?.target ?? null,
+      nav: brain.debug?.nav ?? null,
+      threat: brain.debug?.threat ?? null,
+      stormPressure: brain.debug?.stormPressure ?? null,
+      effects: brain.debug?.effects ?? null,
+      input: brain.debug?.input ?? null,
+      stuckTicks: brain.stuckTicks || 0,
+      targetResource: debugTarget(brain.targetResource),
+      wanderTarget: debugTarget(brain.wanderTarget),
+      fleeTarget: debugTarget(brain.fleeTarget),
+      lastThreatSector: brain.lastThreatSector || null,
+      chaseMemory: brain.chaseMemory || null,
+      navGoalKey: brain.navGoalKey || "",
+      navFailedKey: brain.navFailedKey || "",
+      navFailedUntilTick: brain.navFailedUntilTick || 0,
+      navPathCursor: brain.navPathCursor || 0,
+      navAttachIndex: brain.navAttachIndex ?? brain.navPathCursor ?? 0,
+      navPathLength: Array.isArray(brain.navPath) ? brain.navPath.length : 0,
+      navNextIndex: Array.isArray(brain.navPath) ? brain.navPath[(brain.navPathCursor || 0) + 1] ?? null : null
+    },
+    tile: debugTileAtPoint(bot.x, bot.y)
+  };
+}
+
+function logSpectatedBotDebug(cameraPlayerId, timeSeconds) {
+  const details = spectatedBotDebugDetails(cameraPlayerId);
+  if (!details) {
+    state.botDebugLog.lastId = "";
+    state.botDebugLog.lastAtSeconds = 0;
+    return;
+  }
+
+  if (state.botDebugLog.lastId !== cameraPlayerId) {
+    state.botDebugLog.lastId = cameraPlayerId;
+    state.botDebugLog.lastAtSeconds = 0;
+  }
+
+  if (timeSeconds - state.botDebugLog.lastAtSeconds < 1) {
+    return;
+  }
+
+  state.botDebugLog.lastAtSeconds = timeSeconds;
+  console.log(botDebugSummary(details), details);
+}
+
+function botDebugOverlayLines(details) {
+  const brain = details.brain || {};
+  const input = brain.input || details.input || {};
+  const nav = brain.nav || {};
+  const target = brain.target || brain.targetResource || brain.wanderTarget || brain.fleeTarget || {};
+  const targetIndex = target.index ?? "-";
+  const actualMine = details.mining?.targetIndex ?? "-";
+  const targetKind = target.resource ?? target.cellKey ?? target.id ?? "target";
+
+  return [
+    `MODE: ${brain.mode ?? "-"}   STUCK: ${brain.stuckTicks ?? 0}`,
+    `TARGET: ${targetKind} ${targetIndex}`,
+    `PATH: ${brain.navPathCursor ?? 0}/${brain.navPathLength ?? 0} A:${brain.navAttachIndex ?? "-"} -> ${brain.navNextIndex ?? "-"}`,
+    `MINE: WANT ${targetIndex}  HIT ${actualMine}`,
+    `MOVE: ${debugPair(input.moveX, input.moveY)}  SPEED: ${details.velocity?.speed ?? "-"}`
+  ];
+}
+
+function botDebugTargetText(target) {
+  if (!target) {
+    return "-";
+  }
+
+  const kind = target.resource ?? target.cellKey ?? target.id ?? "target";
+  const index = target.index ?? "-";
+  const clear = target.clear ?? "-";
+  const needed = target.needed ?? "-";
+  return `${kind} IDX:${index} CLR:${clear} NEED:${needed}`;
+}
+
+function botDebugPathPoints(brain) {
+  const steps = Array.isArray(brain.navPathSteps) && brain.navPathSteps.length > 0
+    ? brain.navPathSteps
+    : Array.isArray(brain.navPath)
+      ? brain.navPath.map((index) => debugTileCenter(index)).filter(Boolean)
+      : [];
+
+  return steps
+    .slice(0, 128)
+    .map((step, pathIndex) => {
+      if (!Number.isFinite(step?.x) || !Number.isFinite(step?.y)) {
+        return null;
+      }
+      return {
+        x: step.x,
+        y: step.y,
+        index: Number.isInteger(step.index) ? step.index : null,
+        mineable: step.mineable === true || isDebugMineableIndex(step.index),
+        directFromPrevious: step.directFromPrevious === true,
+        pathIndex
+      };
+    })
+    .filter(Boolean);
+}
+
+function botDebugTargetPoints(brain) {
+  const points = [];
+  addBotDebugTargetPoint(points, "target", brain.debug?.target, "#ffd34d");
+  return points;
+}
+
+function addBotDebugTargetPoint(points, label, target, color) {
+  const point = debugWorldPointFromTarget(target, label);
+  if (!point) {
+    return;
+  }
+
+  const key = `${label}:${Math.round(point.x)}:${Math.round(point.y)}`;
+  if (points.some((candidate) => candidate.key === key)) {
+    return;
+  }
+
+  points.push({ ...point, label, color, key });
+}
+
+function debugWorldPointFromTarget(target, label = "") {
+  if (!target || typeof target !== "object") {
+    return null;
+  }
+
+  if (Number.isFinite(target.lastX) && Number.isFinite(target.lastY)) {
+    return { x: target.lastX, y: target.lastY };
+  }
+
+  if (Number.isFinite(target.sectorEntryX) && Number.isFinite(target.sectorEntryY)) {
+    return { x: target.sectorEntryX, y: target.sectorEntryY };
+  }
+
+  if (label === "threat" && Number.isFinite(target.x) && Number.isFinite(target.y)) {
+    return debugChunkCenter(target.x, target.y);
+  }
+
+  if (Number.isFinite(target.sectorX) && Number.isFinite(target.sectorY)) {
+    return debugChunkCenter(target.sectorX, target.sectorY);
+  }
+
+  if (Number.isFinite(target.x) && Number.isFinite(target.y)) {
+    return { x: target.x, y: target.y };
+  }
+
+  if (Number.isInteger(target.index)) {
+    return debugTileCenter(target.index);
+  }
+
+  if (target.cellKey) {
+    const cell = debugChunkFromKey(target.cellKey);
+    return cell ? debugChunkCenter(cell.x, cell.y) : null;
+  }
+
+  return null;
+}
+
+function debugTileCenter(index) {
+  if (!state.asteroid || !Number.isInteger(index) || index < 0 || index >= state.asteroid.tiles.length) {
+    return null;
+  }
+
+  const tileX = index % state.asteroid.widthTiles;
+  const tileY = Math.floor(index / state.asteroid.widthTiles);
+  return {
+    x: (tileX + 0.5) * state.asteroid.tileSize,
+    y: (tileY + 0.5) * state.asteroid.tileSize,
+    index
+  };
+}
+
+function debugChunkCenter(cellX, cellY) {
+  if (!state.asteroid || !Number.isFinite(cellX) || !Number.isFinite(cellY)) {
+    return null;
+  }
+
+  const tileSize = state.asteroid.tileSize || RENDER.tileSize || 16;
+  const minTileX = cellX * BOT_DEBUG_CHUNK_TILES;
+  const minTileY = cellY * BOT_DEBUG_CHUNK_TILES;
+  const maxTileX = Math.min(state.asteroid.widthTiles, minTileX + BOT_DEBUG_CHUNK_TILES);
+  const maxTileY = Math.min(state.asteroid.heightTiles, minTileY + BOT_DEBUG_CHUNK_TILES);
+  return {
+    x: (minTileX + maxTileX) * tileSize * 0.5,
+    y: (minTileY + maxTileY) * tileSize * 0.5
+  };
+}
+
+function isDebugMineableIndex(index) {
+  return state.asteroid &&
+    Number.isInteger(index) &&
+    index >= 0 &&
+    index < state.asteroid.tiles.length &&
+    isAsteroidRockTile(state.asteroid.tiles[index]);
+}
+
+function botDebugSummary(details) {
+  const brain = details.brain || {};
+  const nav = brain.nav || {};
+  const input = brain.input || details.input || {};
+  const target = brain.target || brain.targetResource || brain.wanderTarget || brain.fleeTarget || {};
+  const tile = details.tile || {};
+  const effects = brain.effects || {};
+  return [
+    "BITSPACE bot spectate",
+    `${details.id}`,
+    `tick=${details.tick}`,
+    `mode=${brain.mode ?? "?"}`,
+    `move=${debugPair(input.moveX, input.moveY)}`,
+    `mining=${Boolean(input.mining || details.mining?.active)}`,
+    `mine=${details.mining?.targetIndex ?? "-"}/${details.mining?.phase ?? "-"}/${details.mining?.progress ?? "-"}`,
+    `nav=${brain.navPathCursor ?? 0}/${brain.navPathLength ?? 0}->${brain.navNextIndex ?? "-"}`,
+    `attach=${brain.navAttachIndex ?? "-"}`,
+    `navFail=${brain.navFailedUntilTick > details.tick ? brain.navFailedUntilTick - details.tick : "-"}`,
+    `navMove=${debugPair(nav.moveX, nav.moveY)}`,
+    `target=${target.resource ?? target.cellKey ?? target.id ?? target.index ?? "-"}`,
+    `targetIndex=${target.index ?? "-"}`,
+    `targetClear=${target.clear ?? "-"}`,
+    `targetNeed=${target.needed ?? "-"}`,
+    `route=${target.routeSeconds ?? "-"}/${target.minedTiles ?? "-"}`,
+    `fx=${effects.thrust ?? "-"}/${effects.range ?? "-"}/${effects.miningPower ?? "-"}/${effects.damage ?? "-"}/${effects.rays ?? "-"}`,
+    `pos=${debugPair(details.position?.x, details.position?.y)}`,
+    `speed=${details.velocity?.speed ?? "-"}`,
+    `stuck=${brain.stuckTicks ?? 0}`,
+    `tile=${tile.index ?? "-"}:${tile.tile ?? "-"}`
+  ].join(" ");
+}
+
+function debugPair(x, y) {
+  return `(${x ?? "-"},${y ?? "-"})`;
+}
+
+function debugPoint(point) {
+  if (!point) {
+    return null;
+  }
+
+  return {
+    x: debugNumber(point.x),
+    y: debugNumber(point.y)
+  };
+}
+
+function debugVector(x, y) {
+  return {
+    x: debugNumber(x),
+    y: debugNumber(y),
+    speed: debugNumber(Math.hypot(Number(x) || 0, Number(y) || 0))
+  };
+}
+
+function debugTarget(target) {
+  if (!target) {
+    return null;
+  }
+
+  return {
+    index: Number.isInteger(target.index) ? target.index : null,
+    x: debugNumber(target.x),
+    y: debugNumber(target.y),
+    cellKey: target.cellKey || null,
+    tick: Number.isFinite(target.tick) ? target.tick : null
+  };
+}
+
+function debugTileAtPoint(x, y) {
+  if (!state.asteroid) {
+    return null;
+  }
+
+  const tileX = Math.floor(x / state.asteroid.tileSize);
+  const tileY = Math.floor(y / state.asteroid.tileSize);
+  const index = tileY * state.asteroid.widthTiles + tileX;
+  if (index < 0 || index >= state.asteroid.tiles.length) {
+    return { index: null, tileX, tileY, tile: "out" };
+  }
+
+  return {
+    index,
+    tileX,
+    tileY,
+    tile: state.asteroid.tiles[index],
+    amount: state.asteroid.amounts?.[index] ?? 0,
+    playable: state.asteroid.playable?.[index] === true || state.asteroid.playable?.[index] === "1"
+  };
+}
+
+function debugNumber(value) {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+}
+
+function debugExploreHeat(entry) {
+  if (Number.isFinite(entry)) {
+    return debugNumber(Math.max(0, Number(entry)));
+  }
+
+  if (!entry || typeof entry !== "object") {
+    return 0;
+  }
+
+  return debugNumber(Math.max(0, Number(entry.heat ?? entry.value ?? 0)));
+}
+
+function debugChunkFromKey(key) {
+  const match = /^(\d+):(\d+)$/.exec(String(key || ""));
+  if (!match) {
+    return null;
+  }
+
+  return {
+    x: Number(match[1]),
+    y: Number(match[2])
+  };
+}
+
+function debugChunkFromTarget(target) {
+  if (!target || typeof target !== "object") {
+    return null;
+  }
+  if (Number.isFinite(target.index)) {
+    return debugChunkFromTileIndex(target.index);
+  }
+  if (Number.isFinite(target.x) && Number.isFinite(target.y)) {
+    return pointChunkForDebugMap(target);
+  }
+  return null;
+}
+
+function debugChunkFromSector(sector) {
+  if (!sector || !Number.isFinite(sector.x) || !Number.isFinite(sector.y)) {
+    return null;
+  }
+
+  return {
+    x: Math.floor(sector.x),
+    y: Math.floor(sector.y)
+  };
+}
+
+function pointChunkForDebugMap(point) {
+  if (!state.asteroid || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+    return null;
+  }
+
+  return {
+    x: Math.floor(point.x / state.asteroid.tileSize / BOT_DEBUG_CHUNK_TILES),
+    y: Math.floor(point.y / state.asteroid.tileSize / BOT_DEBUG_CHUNK_TILES)
+  };
+}
+
+function debugChunkFromTileIndex(index) {
+  if (!state.asteroid || !Number.isInteger(index) || index < 0 || index >= state.asteroid.tiles.length) {
+    return null;
+  }
+
+  const tileX = index % state.asteroid.widthTiles;
+  const tileY = Math.floor(index / state.asteroid.widthTiles);
+  return {
+    x: Math.floor(tileX / BOT_DEBUG_CHUNK_TILES),
+    y: Math.floor(tileY / BOT_DEBUG_CHUNK_TILES)
+  };
 }
 
 function upgradeIndexAtPoint(x, y) {

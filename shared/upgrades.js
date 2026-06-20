@@ -145,10 +145,10 @@ export const UPGRADE_DEFINITIONS = Object.freeze([
     baseStatText: "NO REPAIR",
     visual: "Health returns slowly after a quiet window.",
     levels: Object.freeze([
-      { cost: CORE_UPGRADE_COSTS[1], effectText: "1 HP BAR PER 60S AFTER 5S", effects: { healthRechargePerSecond: 100 / 60 } },
-      { cost: CORE_UPGRADE_COSTS[2], effectText: "1 HP BAR PER 30S AFTER 5S", effects: { healthRechargePerSecond: 100 / 30 } },
-      { cost: CORE_UPGRADE_COSTS[3], effectText: "1 HP BAR PER 20S AFTER 5S", effects: { healthRechargePerSecond: 5 } },
-      { cost: CORE_UPGRADE_COSTS[4], effectText: "1 HP BAR PER 15S AFTER 5S", effects: { healthRechargePerSecond: 100 / 15 } }
+      { cost: CORE_UPGRADE_COSTS[1], effectText: "1 HP BAR PER 24S AFTER 5S", effects: { healthRechargePerSecond: 100 / 24 } },
+      { cost: CORE_UPGRADE_COSTS[2], effectText: "1 HP BAR PER 18S AFTER 5S", effects: { healthRechargePerSecond: 100 / 18 } },
+      { cost: CORE_UPGRADE_COSTS[3], effectText: "1 HP BAR PER 12S AFTER 5S", effects: { healthRechargePerSecond: 100 / 12 } },
+      { cost: CORE_UPGRADE_COSTS[4], effectText: "1 HP BAR PER 6S AFTER 5S", effects: { healthRechargePerSecond: 100 / 6 } }
     ])
   },
   {
