@@ -1582,9 +1582,13 @@ function addPlayerResource(player, resource, amount) {
 
 function createStormState(asteroid, seed) {
   let playableCount = 0;
+  let radiusSum = 0;
+  const centerX = asteroid.widthTiles / 2;
+  const centerY = asteroid.heightTiles / 2;
   for (let index = 0; index < asteroid.playable.length; index += 1) {
     if (isPlayableCell(asteroid, index)) {
       playableCount += 1;
+      radiusSum += stormCellCenterRadiusFromCenter(asteroid, index, centerX, centerY);
     }
   }
 
@@ -1594,6 +1598,12 @@ function createStormState(asteroid, seed) {
     warningUntilTick: new Int32Array(asteroid.tiles.length),
     playableCount,
     claimedCount: 0,
+    centerX,
+    centerY,
+    radiusSum,
+    claimedRadiusSum: 0,
+    radiusStatsClaimedCount: 0,
+    initialAverageRadius: playableCount > 0 ? radiusSum / playableCount : 0,
     random: createSeededRandom(`${seed}:storm`)
   };
 }
@@ -1667,25 +1677,116 @@ function addStormWarnings(arena) {
 
   const totalSelectionTicks = Math.max(1, selectionEndTick - safeTicks);
   const elapsedSelectionTicks = clamp(arena.tick - safeTicks, 0, totalSelectionTicks);
-  const remainingTargetCount = Math.floor(
-    (storm.playableCount * (totalSelectionTicks - elapsedSelectionTicks)) / totalSelectionTicks
-  );
-  const targetClaimedCount = storm.playableCount - remainingTargetCount;
-  let needed = Math.max(0, targetClaimedCount - storm.claimedCount);
+  const targetAverageRadius = stormTargetAverageSafeRadius(arena, elapsedSelectionTicks / totalSelectionTicks);
 
-  while (needed > 0) {
+  while (stormAverageSafeRadius(arena) > targetAverageRadius && storm.claimedCount < storm.playableCount) {
     const candidates = stormBoundaryCandidates(arena);
-    if (candidates.length === 0) {
+    if (candidates.length <= 0) {
       break;
     }
 
-    const index = candidates[Math.floor(storm.random() * candidates.length)];
-    setStormState(arena, index, STORM_STATE.warning, {
-      warningStartedTick: arena.tick,
-      warningUntilTick: arena.tick + warningTicks
-    });
-    needed -= 1;
+    const currentAverageRadius = stormAverageSafeRadius(arena);
+    const outerCandidates = candidates.filter((index) => stormCellCenterRadius(arena, index) >= currentAverageRadius);
+    const activeCandidates = outerCandidates.length > 0 ? outerCandidates : candidates;
+    shuffleStormCandidates(activeCandidates, storm.random);
+    for (const index of activeCandidates) {
+      if (storm.state[index] !== STORM_STATE.safe) {
+        continue;
+      }
+
+      setStormState(arena, index, STORM_STATE.warning, {
+        warningStartedTick: arena.tick,
+        warningUntilTick: arena.tick + warningTicks
+      });
+
+      if (stormAverageSafeRadius(arena) <= targetAverageRadius) {
+        return;
+      }
+    }
   }
+}
+
+function shuffleStormCandidates(candidates, random) {
+  for (let index = candidates.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const value = candidates[index];
+    candidates[index] = candidates[swapIndex];
+    candidates[swapIndex] = value;
+  }
+}
+
+function stormTargetAverageSafeRadius(arena, progress) {
+  ensureStormRadiusStats(arena);
+  const storm = arena.storm;
+  return storm.initialAverageRadius * (1 - clamp(progress, 0, 1));
+}
+
+function stormAverageSafeRadius(arena) {
+  ensureStormRadiusStats(arena);
+  const storm = arena.storm;
+  const safeCount = Math.max(0, storm.playableCount - storm.claimedCount);
+  if (safeCount <= 0) {
+    return 0;
+  }
+
+  return Math.max(0, storm.radiusSum - storm.claimedRadiusSum) / safeCount;
+}
+
+function ensureStormRadiusStats(arena) {
+  const storm = arena.storm;
+  if (
+    Number.isFinite(storm.radiusSum) &&
+    Number.isFinite(storm.claimedRadiusSum) &&
+    Number.isFinite(storm.initialAverageRadius) &&
+    storm.radiusStatsClaimedCount === storm.claimedCount
+  ) {
+    return;
+  }
+
+  const asteroid = arena.asteroid;
+  const centerX = Number.isFinite(storm.centerX) ? storm.centerX : asteroid.widthTiles / 2;
+  const centerY = Number.isFinite(storm.centerY) ? storm.centerY : asteroid.heightTiles / 2;
+  let radiusSum = 0;
+  let claimedRadiusSum = 0;
+  let playableCount = 0;
+  let claimedCount = 0;
+
+  for (let index = 0; index < asteroid.playable.length; index += 1) {
+    if (!isPlayableCell(asteroid, index)) {
+      continue;
+    }
+
+    const radius = stormCellCenterRadiusFromCenter(asteroid, index, centerX, centerY);
+    playableCount += 1;
+    radiusSum += radius;
+    if (storm.state[index] !== STORM_STATE.safe) {
+      claimedCount += 1;
+      claimedRadiusSum += radius;
+    }
+  }
+
+  storm.centerX = centerX;
+  storm.centerY = centerY;
+  storm.playableCount = playableCount;
+  storm.claimedCount = claimedCount;
+  storm.radiusSum = radiusSum;
+  storm.claimedRadiusSum = claimedRadiusSum;
+  storm.radiusStatsClaimedCount = claimedCount;
+  storm.initialAverageRadius = playableCount > 0 ? radiusSum / playableCount : 0;
+}
+
+function stormCellCenterRadiusFromCenter(asteroid, index, centerX, centerY) {
+  const x = index % asteroid.widthTiles;
+  const y = Math.floor(index / asteroid.widthTiles);
+  return Math.hypot(x + 0.5 - centerX, y + 0.5 - centerY);
+}
+
+function stormCellCenterRadius(arena, index) {
+  const asteroid = arena.asteroid;
+  const storm = arena.storm;
+  const centerX = Number.isFinite(storm.centerX) ? storm.centerX : asteroid.widthTiles / 2;
+  const centerY = Number.isFinite(storm.centerY) ? storm.centerY : asteroid.heightTiles / 2;
+  return stormCellCenterRadiusFromCenter(asteroid, index, centerX, centerY);
 }
 
 function stormBoundaryCandidates(arena) {
@@ -1831,6 +1932,12 @@ function setStormState(arena, index, state, options = {}) {
 
   if (previous === STORM_STATE.safe && state !== STORM_STATE.safe) {
     storm.claimedCount += 1;
+    storm.claimedRadiusSum = (storm.claimedRadiusSum || 0) + stormCellCenterRadius(arena, index);
+    storm.radiusStatsClaimedCount = storm.claimedCount;
+  } else if (previous !== STORM_STATE.safe && state === STORM_STATE.safe) {
+    storm.claimedCount = Math.max(0, storm.claimedCount - 1);
+    storm.claimedRadiusSum = Math.max(0, (storm.claimedRadiusSum || 0) - stormCellCenterRadius(arena, index));
+    storm.radiusStatsClaimedCount = storm.claimedCount;
   }
   if (state === STORM_STATE.warning) {
     storm.warningStartedTick[index] = options.warningStartedTick ?? arena.tick;

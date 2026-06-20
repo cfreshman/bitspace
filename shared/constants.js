@@ -36,8 +36,8 @@ export const ENGINE = Object.freeze({
     countdownSeconds: 10
   },
   storm: {
-    safeSeconds: 300,
-    closeSeconds: 600,
+    safeSeconds: 120,
+    closeSeconds: 480,
     warningSeconds: 15,
     damageTiers: [
       { afterSeconds: 0, damagePerSecond: 6, warning: "!" },

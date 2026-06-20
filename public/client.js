@@ -65,6 +65,7 @@ const THEME_STORAGE_KEY = "bitspace.theme";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
 const PLAYER_MAP_STORAGE_KEY = "bitspace.playerMap";
+const PLAYER_MAP_STORAGE_VERSION = 2;
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
 const ROOM_ID_PATTERN = /^room-\d+$/;
@@ -93,6 +94,9 @@ const LEAVE_CONFIRM_SECONDS = 2.2;
 const BUILD_REPEAT_SECONDS = 0.08;
 const PLAYER_MAP_CHUNK_TILES = 1;
 const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
+const PLAYER_MAP_MINIPLAYER_RADIUS = 64;
+const PLAYER_MAP_MINIPLAYER_RESOLUTION_SCALE = 2;
+const PLAYER_MAP_FULL_STORM_BAND_TILES = 4;
 const PLAYER_MAP_UNKNOWN = 255;
 const PLAYER_MAP_BACKGROUND = 0;
 const PLAYER_MAP_FOREGROUND = 2;
@@ -138,7 +142,7 @@ const THEME_PRESETS = Object.freeze([
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
-  y: 60,
+  y: 72,
   padding: 8,
   rowTopOffset: 20,
   rowHeight: 16,
@@ -223,6 +227,7 @@ const state = {
     large: false,
     circle: null,
     baseCells: null,
+    fullMapStormMask: null,
     cells: null,
     dirty: false,
     lastSaveAtMs: 0
@@ -241,6 +246,9 @@ const state = {
   mouse: {
     x: 0,
     y: 0,
+    miniX: 0,
+    miniY: 0,
+    miniInFrame: false,
     inFrame: true,
     hasPointer: false,
     down: false,
@@ -399,6 +407,9 @@ function applyServerRoom(room) {
     resetControlStateForNewMatch();
   }
   state.lastActiveMatchKey = activeMatchKey || (room.state === "ended" ? state.lastActiveMatchKey : null);
+  if (!playerMapAllowed()) {
+    state.playerMap.large = false;
+  }
   if (previousState !== room.state || previousRoomId !== nextRoomId) {
     releaseSpaceUntilKeyup();
     state.upgrades.active = false;
@@ -585,7 +596,7 @@ window.addEventListener("keydown", (event) => {
 
   if (event.code === "KeyM" && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
-    if (!event.repeat) {
+    if (!event.repeat && playerMapAllowed()) {
       state.playerMap.large = !state.playerMap.large;
     }
     return;
@@ -895,7 +906,12 @@ function draw(now = 0) {
   const buildTarget = buildTargetFromMouse();
   updateHeldBuild(buildTarget, timeSeconds);
   const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
-  const playerMap = playerMapRenderState(snapshot, cameraPlayerId);
+  const mapAllowed = playerMapAllowed();
+  if (!mapAllowed && state.playerMap.large) {
+    state.playerMap.large = false;
+  }
+  const playerMap = mapAllowed ? playerMapRenderState(snapshot, cameraPlayerId) : null;
+  const playerMapVisible = mapAllowed && Boolean(playerMap);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
@@ -928,8 +944,9 @@ function draw(now = 0) {
 	    controllerAimCursor: controllerAimCursorRenderState(),
 	    hudFlash: hudFlashRenderState(timeSeconds),
 	    leaveConfirm: leaveConfirmRenderState(timeSeconds),
-	    playerMap,
-	    playerMapLarge: state.playerMap.large,
+	    playerMap: playerMapVisible ? playerMap : null,
+	    playerMapLarge: playerMapVisible && state.playerMap.large,
+	    playerMapVisible,
 	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
 	    botDebugOverlay,
 	    theme: state.theme,
@@ -1031,7 +1048,7 @@ function handleControllerActions(input) {
     toggleUpgrades({ controller: true });
   }
 
-  if (input.pressed.map && !state.upgrades.active) {
+  if (input.pressed.map && !state.upgrades.active && playerMapAllowed()) {
     state.playerMap.large = !state.playerMap.large;
   }
 
@@ -4609,7 +4626,8 @@ function huckRockTargetForPlayer(player) {
     return controllerAimTargetForPlayer(player);
   }
 
-  return lensScreenPointToWorld(player, state.mouse.x, state.mouse.y);
+  const aim = activeAimFramePoint();
+  return lensScreenPointToWorld(player, aim.x, aim.y, aim);
 }
 
 function physicalMiningInputActive() {
@@ -5808,8 +5826,12 @@ function randomClientSecret() {
 
 function updateMouse(event) {
   const point = eventToFramebufferPoint(event);
+  const miniPoint = eventToMiniPlayerPoint(event);
   state.mouse.x = point.x;
   state.mouse.y = point.y;
+  state.mouse.miniX = miniPoint.x;
+  state.mouse.miniY = miniPoint.y;
+  state.mouse.miniInFrame = miniPoint.inFrame;
   state.mouse.inFrame = point.inFrame;
   state.mouse.hasPointer = true;
   updateAimFromSnapshot();
@@ -6325,9 +6347,9 @@ function buildAngleForPlayer(player) {
     return controllerAimAngleForPlayer(player);
   }
 
-  const frame = framebufferSize();
-  const dx = state.mouse.x - frame.width / 2;
-  const dy = state.mouse.y - frame.height / 2;
+  const aim = activeAimFramePoint();
+  const dx = aim.x - aim.width / 2;
+  const dy = aim.y - aim.height / 2;
   return dx !== 0 || dy !== 0 ? Math.atan2(dy, dx) : null;
 }
 
@@ -6467,6 +6489,7 @@ function resetPlayerMap(asteroid = null, roomId = null) {
       large: state.playerMap.large,
       circle: null,
       baseCells: null,
+      fullMapStormMask: null,
       cells: null,
       dirty: false,
       lastSaveAtMs: 0
@@ -6486,6 +6509,7 @@ function resetPlayerMap(asteroid = null, roomId = null) {
     large: state.playerMap.large,
     circle: buildPlayerMapCircle(asteroid),
     baseCells: cachedMap?.baseCells || buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks),
+    fullMapStormMask: buildPlayerMapFullStormMask(asteroid, widthChunks, heightChunks),
     cells: cachedMap?.cells || new Uint8Array(widthChunks * heightChunks).fill(PLAYER_MAP_UNKNOWN),
     dirty: true,
     lastSaveAtMs: 0
@@ -6497,7 +6521,7 @@ function loadPlayerMap(roomId, asteroidSeed, widthChunks, heightChunks) {
     const parsed = JSON.parse(window.localStorage.getItem(PLAYER_MAP_STORAGE_KEY) || "null");
     if (
       !parsed ||
-      parsed.version !== 1 ||
+      parsed.version !== PLAYER_MAP_STORAGE_VERSION ||
       parsed.roomId !== (roomId || null) ||
       parsed.asteroidSeed !== (asteroidSeed || null) ||
       parsed.widthChunks !== widthChunks ||
@@ -6536,7 +6560,7 @@ function savePlayerMap(options = {}) {
 
   try {
     window.localStorage.setItem(PLAYER_MAP_STORAGE_KEY, JSON.stringify({
-      version: 1,
+      version: PLAYER_MAP_STORAGE_VERSION,
       roomId: map.roomId,
       asteroidSeed: map.asteroidSeed || null,
       widthChunks: map.widthChunks,
@@ -6661,6 +6685,78 @@ function buildPlayerMapBaseCells(asteroid, widthChunks, heightChunks) {
   return cells;
 }
 
+function buildPlayerMapFullStormMask(asteroid, widthChunks, heightChunks) {
+  const count = widthChunks * heightChunks;
+  const playableChunks = new Uint8Array(count);
+  const mask = new Uint8Array(count);
+  const radiusChunks = Math.max(1, Math.ceil(PLAYER_MAP_FULL_STORM_BAND_TILES / PLAYER_MAP_CHUNK_TILES));
+  const radiusSq = radiusChunks * radiusChunks;
+
+  for (let chunkY = 0; chunkY < heightChunks; chunkY += 1) {
+    for (let chunkX = 0; chunkX < widthChunks; chunkX += 1) {
+      const index = chunkY * widthChunks + chunkX;
+      if (playerMapChunkHasPlayableTile(asteroid, chunkX, chunkY)) {
+        playableChunks[index] = 1;
+      }
+    }
+  }
+
+  for (let chunkY = 0; chunkY < heightChunks; chunkY += 1) {
+    for (let chunkX = 0; chunkX < widthChunks; chunkX += 1) {
+      const index = chunkY * widthChunks + chunkX;
+      if (!playableChunks[index]) {
+        continue;
+      }
+
+      for (let offsetY = -radiusChunks; offsetY <= radiusChunks; offsetY += 1) {
+        for (let offsetX = -radiusChunks; offsetX <= radiusChunks; offsetX += 1) {
+          if (offsetX * offsetX + offsetY * offsetY > radiusSq) {
+            continue;
+          }
+
+          const targetX = chunkX + offsetX;
+          const targetY = chunkY + offsetY;
+          if (targetX < 0 || targetY < 0 || targetX >= widthChunks || targetY >= heightChunks) {
+            continue;
+          }
+
+          const targetIndex = targetY * widthChunks + targetX;
+          if (!playableChunks[targetIndex]) {
+            mask[targetIndex] = 1;
+          }
+        }
+      }
+    }
+  }
+
+  return mask;
+}
+
+function playerMapChunkHasPlayableTile(asteroid, chunkX, chunkY) {
+  const startX = chunkX * PLAYER_MAP_CHUNK_TILES;
+  const startY = chunkY * PLAYER_MAP_CHUNK_TILES;
+  const endX = Math.min(asteroid.widthTiles, startX + PLAYER_MAP_CHUNK_TILES);
+  const endY = Math.min(asteroid.heightTiles, startY + PLAYER_MAP_CHUNK_TILES);
+  for (let tileY = startY; tileY < endY; tileY += 1) {
+    for (let tileX = startX; tileX < endX; tileX += 1) {
+      const index = tileY * asteroid.widthTiles + tileX;
+      const playable = asteroid.playable?.[index] === true || asteroid.playable?.[index] === "1";
+      if (playable) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function playerMapAllowed() {
+  return state.room?.state === "active" &&
+    !isReadyMenu() &&
+    Boolean(state.asteroid) &&
+    Boolean(state.playerMap.cells);
+}
+
 function playerMapRenderState(snapshot, cameraPlayerId = state.playerId) {
   if (!snapshot || state.room?.state !== "active" || !state.asteroid || !state.playerMap.cells || !state.playerMap.baseCells) {
     return null;
@@ -6681,7 +6777,7 @@ function playerMapRenderState(snapshot, cameraPlayerId = state.playerId) {
 
   const tileSize = state.asteroid.tileSize || RENDER.tileSize;
   const chunkWorldSize = PLAYER_MAP_CHUNK_TILES * tileSize;
-  const visibleRadius = (Math.min(RENDER.width, RENDER.height) / 2) * (RENDER.lensEdgeScale || 1);
+  const visibleRadius = playerMapVisibleRadiusPixels();
 
   return {
     widthChunks: state.playerMap.widthChunks,
@@ -6693,6 +6789,7 @@ function playerMapRenderState(snapshot, cameraPlayerId = state.playerId) {
     foreground: PLAYER_MAP_FOREGROUND,
     storm: PLAYER_MAP_STORM,
     baseCells: state.playerMap.baseCells,
+    fullMapStormMask: state.playerMap.fullMapStormMask,
     cells: state.playerMap.cells,
     players: playerMapVisiblePlayers(snapshot, player, chunkWorldSize, visibleRadius),
     viewCircle: {
@@ -6731,13 +6828,13 @@ function observePlayerMap(player) {
 
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const chunkWorldSize = PLAYER_MAP_CHUNK_TILES * tileSize;
-  const visibleRadius = (Math.min(RENDER.width, RENDER.height) / 2) * (RENDER.lensEdgeScale || 1);
+  const visibleRadius = playerMapVisibleRadiusPixels();
   const chunkReach = visibleRadius + chunkWorldSize * Math.SQRT2 * 0.5;
   const minChunkX = clamp(Math.floor((player.x - chunkReach) / chunkWorldSize), 0, map.widthChunks - 1);
   const maxChunkX = clamp(Math.floor((player.x + chunkReach) / chunkWorldSize), 0, map.widthChunks - 1);
   const minChunkY = clamp(Math.floor((player.y - chunkReach) / chunkWorldSize), 0, map.heightChunks - 1);
   const maxChunkY = clamp(Math.floor((player.y + chunkReach) / chunkWorldSize), 0, map.heightChunks - 1);
-  const chunkReachSq = chunkReach * chunkReach;
+  const visibleRadiusSq = visibleRadius * visibleRadius;
   let changed = false;
 
   for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY += 1) {
@@ -6746,7 +6843,7 @@ function observePlayerMap(player) {
     for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
       const centerX = (chunkX + 0.5) * chunkWorldSize;
       const dx = centerX - player.x;
-      if (dx * dx + dy * dy > chunkReachSq) {
+      if (dx * dx + dy * dy > visibleRadiusSq) {
         continue;
       }
 
@@ -6762,6 +6859,25 @@ function observePlayerMap(player) {
   if (changed) {
     map.dirty = true;
   }
+}
+
+function playerMapVisibleRadiusPixels() {
+  if (playerMapMiniPlayerActive()) {
+    const canvasRadius = Math.min(
+      Number(minimapCanvas?.width) || 0,
+      Number(minimapCanvas?.height) || 0
+    ) / 2;
+    const targetRadius = PLAYER_MAP_MINIPLAYER_RADIUS * PLAYER_MAP_MINIPLAYER_RESOLUTION_SCALE;
+    return Math.max(targetRadius, canvasRadius) * WORLD_LENS_EDGE_SCALE;
+  }
+
+  return (Math.min(RENDER.width, RENDER.height) / 2) * WORLD_LENS_EDGE_SCALE;
+}
+
+function playerMapMiniPlayerActive() {
+  return state.playerMap.large === true &&
+    state.room?.state === "active" &&
+    Boolean(state.playerMap.cells);
 }
 
 function playerMapChunkValue(asteroid, chunkX, chunkY) {
@@ -7439,11 +7555,9 @@ function updateAimFromSnapshot() {
     return;
   }
 
-  const camera = cameraForPlayer(snapshot, player);
-  const playerX = player.x - camera.x;
-  const playerY = player.y - camera.y;
-  const dx = state.mouse.x - playerX;
-  const dy = state.mouse.y - playerY;
+  const aim = activeAimFramePoint();
+  const dx = aim.x - aim.width / 2;
+  const dy = aim.y - aim.height / 2;
   if (dx !== 0 || dy !== 0) {
     state.mouse.aimAngle = Math.atan2(dy, dx);
   }
@@ -7474,16 +7588,26 @@ function controllerAimAngleForPlayer(player) {
 }
 
 function eventToFramebufferPoint(event) {
-  const rect = canvas.getBoundingClientRect();
-  const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
-  const width = canvas.width * scale;
-  const height = canvas.height * scale;
+  return eventToCanvasFramePoint(event, canvas);
+}
+
+function eventToMiniPlayerPoint(event) {
+  return eventToCanvasFramePoint(event, minimapCanvas);
+}
+
+function eventToCanvasFramePoint(event, targetCanvas) {
+  const rect = targetCanvas.getBoundingClientRect();
+  const canvasWidth = targetCanvas.width || RENDER.width;
+  const canvasHeight = targetCanvas.height || RENDER.height;
+  const scale = Math.min(rect.width / canvasWidth, rect.height / canvasHeight);
+  const width = canvasWidth * scale;
+  const height = canvasHeight * scale;
   const x = event.clientX - rect.left - (rect.width - width) / 2;
   const y = event.clientY - rect.top - (rect.height - height) / 2;
 
   return {
-    x: clamp(x / scale, 0, canvas.width),
-    y: clamp(y / scale, 0, canvas.height),
+    x: clamp(x / scale, 0, canvasWidth),
+    y: clamp(y / scale, 0, canvasHeight),
     inFrame: x >= 0 && x <= width && y >= 0 && y <= height
   };
 }
@@ -7496,8 +7620,31 @@ function hasMousePointer() {
   return state.mouse.hasPointer;
 }
 
-function lensScreenPointToWorld(player, screenX, screenY) {
+function activeAimFramePoint() {
+  if (miniPlayerAimActive()) {
+    return {
+      x: state.mouse.miniX,
+      y: state.mouse.miniY,
+      width: minimapCanvas.width || RENDER.width,
+      height: minimapCanvas.height || RENDER.height
+    };
+  }
+
   const frame = framebufferSize();
+  return {
+    x: state.mouse.x,
+    y: state.mouse.y,
+    width: frame.width,
+    height: frame.height
+  };
+}
+
+function miniPlayerAimActive() {
+  return playerMapMiniPlayerActive() &&
+    Boolean(minimapCanvas);
+}
+
+function lensScreenPointToWorld(player, screenX, screenY, frame = framebufferSize()) {
   const centerX = frame.width / 2;
   const centerY = frame.height / 2;
   const dx = screenX - centerX;

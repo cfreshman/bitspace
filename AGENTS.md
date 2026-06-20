@@ -35,6 +35,7 @@ LLM instructions
 - stop going down absolute bullshit paths, i see you doing this all the time, you need actual root cause analysis with a SINGLE finding in order to move forward. a SINGLE idea that makes sense for an implementation or fix
 - YOU ARE NOT LISTENING TO ME. I AM A FUCKING ACTUAL SOFTWARE ENGINEER WITH A COMPUTER SCIENCE DEGREE. SHUT THE FUCK UP. LITERALLY DO NOT TALK UNLESS YOU ARE PROVIDING INFORMATION
 - stop double checking with me when i clearly want you to do something
+- PAY ATTENTION TO WHAT I ACTUALLY SAY IS WRONG. YOU CONSTANTLY MISINTERPRET ME AND UNDO SHIT **I WANTED**
 
 ## LLM ERRATA
 
