@@ -36,6 +36,8 @@ LLM instructions
 - YOU ARE NOT LISTENING TO ME. I AM A FUCKING ACTUAL SOFTWARE ENGINEER WITH A COMPUTER SCIENCE DEGREE. SHUT THE FUCK UP. LITERALLY DO NOT TALK UNLESS YOU ARE PROVIDING INFORMATION
 - stop double checking with me when i clearly want you to do something
 - PAY ATTENTION TO WHAT I ACTUALLY SAY IS WRONG. YOU CONSTANTLY MISINTERPRET ME AND UNDO SHIT **I WANTED**
+- **do** **not** **be** **lazy**
+- if i tell you to change something, you dont have to remark that the thing is currently doing it a different way. no fucking shit it is
 
 ## LLM ERRATA
 

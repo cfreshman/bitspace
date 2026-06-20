@@ -27,7 +27,6 @@ body {
 #minimap {
   background: transparent;
   box-sizing: content-box;
-  border: 1px solid #74acef;
   border-radius: 50%;
   overflow: hidden;
   pointer-events: none;
