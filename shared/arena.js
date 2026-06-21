@@ -309,13 +309,13 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
   };
 }
 
-export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate) {
+export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) {
   arena.tick += 1;
   stepStorm(arena);
 
   for (const player of arena.players.values()) {
     if (player.alive) {
-      stepPlayer(arena, player, dtSeconds);
+      stepPlayer(arena, player, dtSeconds, options);
     }
   }
 
@@ -394,7 +394,7 @@ export function sanitizeTalkText(text) {
     .slice(0, 36);
 }
 
-function stepPlayer(arena, player, dtSeconds) {
+function stepPlayer(arena, player, dtSeconds, options = {}) {
   player.shake = Math.max(0, player.shake - ENGINE.collision.shakeDecay * dtSeconds);
   player.huckRockEngineCutoutSeconds = 0;
   syncPlayerDerivedStats(player);
@@ -427,13 +427,18 @@ function stepPlayer(arena, player, dtSeconds) {
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
 
-  resolveStaticCollisions(arena, player);
+  resolveStaticCollisions(arena, player, options);
   applyStormDamage(arena, player, dtSeconds);
 }
 
-function resolveStaticCollisions(arena, player) {
+function resolveStaticCollisions(arena, player, options = {}) {
   return arena.asteroid
-    ? resolveAsteroidCollisions(arena.asteroid, player, { blockNonPlayable: !arena.storm })
+    ? resolveAsteroidCollisions(arena.asteroid, player, {
+      blockNonPlayable: !arena.storm,
+      onImpact: options.onAsteroidImpact
+        ? (speed, blocker, hit) => options.onAsteroidImpact(arena, player, speed, blocker, hit)
+        : null
+    })
     : 0;
 }
 
@@ -456,6 +461,9 @@ function resolveAsteroidCollisions(asteroid, player, options = {}) {
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       impact = Math.max(impact, Math.abs(normalSpeed));
       if (normalSpeed < 0) {
+        if (typeof options.onImpact === "function") {
+          options.onImpact(-normalSpeed, blocker, hit);
+        }
         player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
         player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
       }
@@ -1345,7 +1353,7 @@ function processPlayerMining(arena, player, dtSeconds) {
       }
     }
 
-    if (playerHit || entityHit || !hit.mineable) {
+    if (!arena.rules.playerDamage || playerHit || entityHit || !hit.mineable) {
       continue;
     }
 

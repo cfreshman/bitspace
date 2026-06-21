@@ -101,15 +101,25 @@ const BOT_CHUNK_MAP_DOT_GAP = 1;
 const BOT_CHUNK_MAP_ACTIVE_SIZE = 3;
 const BOT_CHUNK_MAP_HEAT_SIZE = 2;
 const PLAYER_MAP_CELL_SIZE = 1;
+const PLAYER_MAP_COMPACT_SAMPLE_TILES = 2;
+const PLAYER_MAP_COMPACT_OUTER_STORM_BORDER = 2;
 const PLAYER_MAP_FALLBACK_SIZE = 128;
-const PLAYER_MAP_CSS_SCALE = 2;
-const PLAYER_MAP_MINI_SHIP_BOUNDARY = 2;
+const PLAYER_MAP_RENDER_SCALE = 3;
+const PLAYER_MAP_CSS_SCALE = 1;
+const PLAYER_MAP_MINI_SHIP_SCALE = 0.6;
+const PLAYER_MAP_MINI_SHIP_OUTLINE = 3;
 const PLAYER_MAP_MARGIN = 8;
 const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
 const PLAYER_MAP_STORM_NONE = 0;
 const PLAYER_MAP_STORM_BAND = 1;
 const playerMapArenaCircleCache = new WeakMap();
 const playerMapStormMaskCache = new WeakMap();
+const PLAYER_MAP_CARDINAL_OFFSETS = Object.freeze([
+  Object.freeze({ x: -1, y: 0 }),
+  Object.freeze({ x: 1, y: 0 }),
+  Object.freeze({ x: 0, y: -1 }),
+  Object.freeze({ x: 0, y: 1 })
+]);
 const BOT_DEBUG_PANEL = Object.freeze({
   x: 8,
   y: 8,
@@ -137,6 +147,21 @@ const stormPatternCache = new Map();
 let stormPatternCacheFrame = null;
 const huckRockShapeCache = new Map();
 const asteroidBoundaryContourCache = new WeakMap();
+let playerMapScratchCanvas = null;
+let playerMapScratchContext = null;
+
+function playerMapCompactCellSize() {
+  return PLAYER_MAP_CELL_SIZE / Math.max(1, PLAYER_MAP_COMPACT_SAMPLE_TILES);
+}
+
+function playerMapCompactRadius(mapCircle) {
+  return mapCircle.radius * playerMapCompactCellSize() + PLAYER_MAP_COMPACT_OUTER_STORM_BORDER;
+}
+
+function playerMapCompactDiameter(mapCircle) {
+  return Math.max(1, Math.ceil(playerMapCompactRadius(mapCircle)) * 2);
+}
+
 class PixelDivider {
   constructor({ sidePadding = 0, thickness = 1 } = {}) {
     this.sidePadding = sidePadding;
@@ -331,7 +356,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
 
   function fullPlayerMapSurfaceSize(mapState, asteroid) {
     const mapCircle = playerMapArenaCircle(mapState, asteroid);
-    const diameter = Math.max(1, Math.ceil(mapCircle.radius) * 2);
+    const diameter = playerMapCompactDiameter(mapCircle) * PLAYER_MAP_RENDER_SCALE;
     return { width: diameter, height: diameter };
   }
 
@@ -345,9 +370,12 @@ export function createRenderer(canvas, minimapCanvas = null) {
       mapState.widthChunks,
       mapState.heightChunks,
       mapState.chunkTiles,
+      PLAYER_MAP_COMPACT_SAMPLE_TILES,
+      PLAYER_MAP_CELL_SIZE,
+      PLAYER_MAP_RENDER_SCALE,
       asteroid.widthTiles,
       asteroid.heightTiles,
-      Math.ceil(mapCircle.radius)
+      playerMapCompactDiameter(mapCircle)
     ].join(":");
   }
 
@@ -1082,17 +1110,74 @@ function drawMinimapOverlay(ctx, width, height, mapState, asteroid, colors, time
   }
 
   const mapCircle = playerMapArenaCircle(mapState, asteroid);
-  drawPlayerMap(ctx, mapState, asteroid, colors, {
-    centerX: width / 2,
-    centerY: height / 2,
-    radius: mapCircle.radius,
-    cellSize: PLAYER_MAP_CELL_SIZE,
+  const logicalSize = playerMapCompactDiameter(mapCircle);
+  const logicalRadius = playerMapCompactRadius(mapCircle);
+  const compactCellSize = playerMapCompactCellSize();
+  const scratch = playerMapScratch(logicalSize, logicalSize);
+  const scratchCtx = scratch?.context;
+  if (!scratchCtx) {
+    return;
+  }
+
+  scratchCtx.clearRect(0, 0, logicalSize, logicalSize);
+  drawPlayerMap(scratchCtx, mapState, asteroid, colors, {
+    centerX: logicalSize / 2,
+    centerY: logicalSize / 2,
+    radius: logicalRadius,
+    cellSize: compactCellSize,
     timeSeconds,
     stormMode: "full",
     stormBoundaryMode: "live",
     compactMap: true,
+    compactSampleTiles: PLAYER_MAP_COMPACT_SAMPLE_TILES,
+    drawMiniShip: false,
     border: false
   });
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(scratch.canvas, 0, 0, logicalSize, logicalSize, 0, 0, width, height);
+
+  const viewCircle = playerMapViewCirclePixels(
+    mapState.viewCircle,
+    logicalSize / 2 - mapCircle.x * compactCellSize,
+    logicalSize / 2 - mapCircle.y * compactCellSize,
+    compactCellSize
+  );
+  if (viewCircle) {
+    const scaleX = width / logicalSize;
+    const scaleY = height / logicalSize;
+    const miniCircle = {
+      ...viewCircle,
+      x: viewCircle.x * scaleX,
+      y: viewCircle.y * scaleY,
+      radius: viewCircle.radius * Math.min(scaleX, scaleY)
+    };
+    fillPlayerMapMiniShipViewInterior(ctx, miniCircle, colors);
+    drawPlayerMapMiniShipViewRing(ctx, miniCircle, colors);
+    drawPlayerMapMiniShip(ctx, miniCircle, colors);
+  }
+}
+
+function playerMapScratch(width, height) {
+  if (!playerMapScratchCanvas) {
+    playerMapScratchCanvas = document.createElement("canvas");
+    playerMapScratchContext = playerMapScratchCanvas.getContext("2d");
+  }
+
+  if (!playerMapScratchContext) {
+    return null;
+  }
+
+  if (playerMapScratchCanvas.width !== width || playerMapScratchCanvas.height !== height) {
+    playerMapScratchCanvas.width = width;
+    playerMapScratchCanvas.height = height;
+  }
+
+  playerMapScratchContext.imageSmoothingEnabled = false;
+  return {
+    canvas: playerMapScratchCanvas,
+    context: playerMapScratchContext
+  };
 }
 
 function drawGameLensOverlay(ctx, snapshot, options, colors, textRenderer, particleState) {
@@ -1174,6 +1259,29 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
 
 function drawMenuOverlay(ctx, options, colors, textRenderer) {
   drawRoomButtons(ctx, options, colors, textRenderer);
+  if (options.menuRoom === "theme") {
+    drawThemeTerminalHud(ctx, options, colors, textRenderer);
+  }
+}
+
+function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
+  const panel = { x: 8, y: 8, width: 132, height: 26 };
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawCenteredText(ctx, textRenderer, "THEME", panel.x + panel.width / 2, panel.y + 8, {
+    fontSize: 8,
+    color: colors.foreground
+  });
+
+  const warningPosition = drawWaitingTerminalActions(
+    ctx,
+    panel.x + 2,
+    panel.y + panel.height + 7,
+    false,
+    options,
+    colors,
+    textRenderer
+  );
+  drawWaitingDisabledFlash(ctx, warningPosition.x, warningPosition.y, options, colors, textRenderer);
 }
 
 function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
@@ -1272,10 +1380,10 @@ function drawWaitingDisabledFlash(ctx, x, y, options, colors, textRenderer) {
     return;
   }
 
-  textRenderer.draw(ctx, "MINING RAY DISABLED", x, y, {
+  textRenderer.draw(ctx, "MINING DISABLED", x, y, {
     fontSize: 8,
     color: colors.foreground,
-    width: 132
+    width: 112
   });
 }
 
@@ -1395,6 +1503,9 @@ function drawPlayerMap(ctx, mapState, asteroid, colors, layout = null) {
   const stormMode = layout?.stormMode || "live";
   const stormBoundaryMode = layout?.stormBoundaryMode || "live";
   const compactMap = layout?.compactMap === true;
+  const compactSampleTiles = compactMap
+    ? Math.max(1, Math.floor(Number(layout?.compactSampleTiles) || 1))
+    : 1;
   const mapOriginX = hasFixedCircle
     ? desiredMapCenterX - mapAnchor.x * cellSize
     : Math.round(desiredMapCenterX - mapCircle.x * cellSize);
@@ -1422,7 +1533,7 @@ function drawPlayerMap(ctx, mapState, asteroid, colors, layout = null) {
       mapRadius,
       viewCircle,
       colors,
-      { timeSeconds, stormMode, compactMap }
+      { timeSeconds, stormMode, compactMap, compactSampleTiles }
     );
   } else {
     for (let chunkY = 0; chunkY < mapState.heightChunks; chunkY += 1) {
@@ -1450,21 +1561,23 @@ function drawPlayerMap(ctx, mapState, asteroid, colors, layout = null) {
       }
     }
   }
-  drawPlayerMapStormBoundary(
-    ctx,
-    mapState,
-    asteroid,
-    mapOriginX,
-    mapOriginY,
-    cellSize,
-    mapCenterX,
-    mapCenterY,
-    mapRadius,
-    colors,
-    timeSeconds,
-    stormBoundaryMode
-  );
-  if (compactMap) {
+  if (!compactMap) {
+    drawPlayerMapStormBoundary(
+      ctx,
+      mapState,
+      asteroid,
+      mapOriginX,
+      mapOriginY,
+      cellSize,
+      mapCenterX,
+      mapCenterY,
+      mapRadius,
+      colors,
+      timeSeconds,
+      stormBoundaryMode
+    );
+  }
+  if (compactMap && layout?.drawMiniShip !== false) {
     drawPlayerMapViewCircle(ctx, viewCircle, mapCenterX, mapCenterY, mapRadius, colors);
   }
   drawPlayerMapOtherPlayers(ctx, mapState.players, mapOriginX, mapOriginY, cellSize, mapCenterX, mapCenterY, mapRadius, colors, compactMap);
@@ -1806,13 +1919,59 @@ function playerMapSampledPixelColor(
   colors,
   options = {}
 ) {
-  const stormState = playerMapChunkStormState(mapState, asteroid, chunkX, chunkY, options.stormMode || "live");
+  const stormMode = options.stormMode || "live";
+  const compactSampleTiles = options.compactMap === true
+    ? Math.max(1, Math.floor(Number(options.compactSampleTiles) || 1))
+    : 1;
+  const sampleChunkX = compactSampleTiles > 1
+    ? Math.floor(chunkX / compactSampleTiles) * compactSampleTiles
+    : chunkX;
+  const sampleChunkY = compactSampleTiles > 1
+    ? Math.floor(chunkY / compactSampleTiles) * compactSampleTiles
+    : chunkY;
+  const stormState = compactSampleTiles > 1
+    ? playerMapCompactStormState(mapState, asteroid, sampleChunkX, sampleChunkY, stormMode, compactSampleTiles)
+    : playerMapChunkStormState(mapState, asteroid, sampleChunkX, sampleChunkY, stormMode);
   if (stormState === "hidden") {
+    if (
+      options.compactMap === true &&
+      playerMapCompactOuterStormBorderCell(
+        mapState,
+        asteroid,
+        sampleChunkX,
+        sampleChunkY,
+        stormMode,
+        compactSampleTiles,
+        PLAYER_MAP_COMPACT_OUTER_STORM_BORDER
+      )
+    ) {
+      return colors.backing || "#000000";
+    }
     return null;
+  }
+
+  if (
+    options.compactMap === true &&
+    stormState !== "band" &&
+    playerMapCompactMapSideStormBorderCell(mapState, asteroid, sampleChunkX, sampleChunkY, stormMode, compactSampleTiles)
+  ) {
+    return colors.background;
   }
 
   const dimmed = options.dimOutsideView === false ? false : !playerMapPixelInsideView(x, y, viewCircle);
   if (stormState === "band") {
+    if (options.compactMap === true) {
+      const stormSample = playerMapStormSamplePoint(mapState, x, y, mapOriginX, mapOriginY, cellSize);
+      return playerMapStormPixelColor(
+        asteroid,
+        stormSample.x,
+        stormSample.y,
+        colors,
+        options.timeSeconds || 0,
+        colors.foreground,
+        colors.background
+      );
+    }
     return playerMapStormPixelColor(
       asteroid,
       x,
@@ -1822,8 +1981,116 @@ function playerMapSampledPixelColor(
     );
   }
 
-  const sample = playerMapChunkVisibleSample(mapState, chunkY * mapState.widthChunks + chunkX);
+  const sample = compactSampleTiles > 1
+    ? playerMapCompactVisibleSample(mapState, sampleChunkX, sampleChunkY, compactSampleTiles)
+    : playerMapChunkVisibleSample(mapState, sampleChunkY * mapState.widthChunks + sampleChunkX);
   return playerMapValueColor(sample.value, mapState, colors, dimmed, x, y, sample.seen, options.compactMap === true);
+}
+
+function playerMapStormSamplePoint(mapState, x, y, mapOriginX, mapOriginY, cellSize) {
+  const scale = Math.max(1, Number(mapState?.chunkTiles) || 1);
+  const divisor = Number.isFinite(cellSize) && cellSize > 0 ? cellSize : 1;
+  return {
+    x: ((x + 0.5 - mapOriginX) / divisor) * scale,
+    y: ((y + 0.5 - mapOriginY) / divisor) * scale
+  };
+}
+
+function playerMapCompactVisibleSample(mapState, chunkX, chunkY, sampleTiles) {
+  const tiles = Math.max(1, sampleTiles | 0);
+  for (let offsetY = 0; offsetY < tiles; offsetY += 1) {
+    const sampleY = chunkY + offsetY;
+    if (sampleY < 0 || sampleY >= mapState.heightChunks) {
+      continue;
+    }
+
+    for (let offsetX = 0; offsetX < tiles; offsetX += 1) {
+      const sampleX = chunkX + offsetX;
+      if (sampleX < 0 || sampleX >= mapState.widthChunks) {
+        continue;
+      }
+
+      const value = mapState.cells[sampleY * mapState.widthChunks + sampleX];
+      if (value !== mapState.unknown && value !== mapState.storm) {
+        return { value: mapState.foreground, seen: true };
+      }
+    }
+  }
+
+  return { value: mapState.background, seen: false };
+}
+
+function playerMapCompactStormState(mapState, asteroid, chunkX, chunkY, stormMode, sampleTiles) {
+  const tiles = Math.max(1, sampleTiles | 0);
+  let sawVisible = false;
+  for (let offsetY = 0; offsetY < tiles; offsetY += 1) {
+    const sampleY = chunkY + offsetY;
+    if (sampleY < 0 || sampleY >= mapState.heightChunks) {
+      continue;
+    }
+
+    for (let offsetX = 0; offsetX < tiles; offsetX += 1) {
+      const sampleX = chunkX + offsetX;
+      if (sampleX < 0 || sampleX >= mapState.widthChunks) {
+        continue;
+      }
+
+      const state = playerMapChunkStormState(mapState, asteroid, sampleX, sampleY, stormMode);
+      if (state === "band") {
+        return "band";
+      }
+      if (state !== "hidden") {
+        sawVisible = true;
+      }
+    }
+  }
+
+  return sawVisible ? "none" : "hidden";
+}
+
+function playerMapCompactMapSideStormBorderCell(mapState, asteroid, chunkX, chunkY, stormMode, sampleTiles = 1) {
+  const step = Math.max(1, sampleTiles | 0);
+  for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      if (offsetX === 0 && offsetY === 0) {
+        continue;
+      }
+
+      if (playerMapCompactStormState(mapState, asteroid, chunkX + offsetX * step, chunkY + offsetY * step, stormMode, step) === "band") {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function playerMapCompactOuterStormBorderCell(mapState, asteroid, chunkX, chunkY, stormMode, sampleTiles = 1, borderPixels = 2) {
+  const step = Math.max(1, sampleTiles | 0);
+  const radius = Math.max(1, borderPixels | 0);
+
+  for (const firstDirection of PLAYER_MAP_CARDINAL_OFFSETS) {
+    const firstX = chunkX + firstDirection.x * step;
+    const firstY = chunkY + firstDirection.y * step;
+    const firstState = playerMapCompactStormState(mapState, asteroid, firstX, firstY, stormMode, step);
+    if (firstState === "band") {
+      return true;
+    }
+
+    if (radius < 2 || firstState !== "hidden") {
+      continue;
+    }
+
+    for (const secondDirection of PLAYER_MAP_CARDINAL_OFFSETS) {
+      const secondX = firstX + secondDirection.x * step;
+      const secondY = firstY + secondDirection.y * step;
+      if (playerMapCompactStormState(mapState, asteroid, secondX, secondY, stormMode, step) === "band") {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function playerMapPixelInsideView(x, y, circle) {
@@ -1853,22 +2120,19 @@ function playerMapChunkVisibleSample(mapState, cellIndex) {
 }
 
 function playerMapValueColor(value, mapState, colors, dimmed = false, x = 0, y = 0, seen = true, compactMap = false) {
+  if (compactMap) {
+    return seen && value !== mapState.unknown ? colors.foreground : colors.background;
+  }
+
   if (value === mapState.unknown) {
     return colors.backing || "#000000";
   }
 
   if (value === mapState.foreground) {
-    if (compactMap) {
-      return colors.foreground;
-    }
     if (!dimmed) {
       return colors.foreground;
     }
     return seen ? playerMapCheckerColor(x, y, colors) : colors.background;
-  }
-
-  if (compactMap && value === mapState.background) {
-    return colors.background;
   }
 
   if (dimmed) {
@@ -1900,14 +2164,22 @@ function playerMapStormPixelColor(
   x,
   y,
   colors,
-  timeSeconds
+  timeSeconds,
+  onColor = colors.background,
+  offColor = colors.backing || "#000000"
 ) {
   return stormNoiseAt(asteroid, x + 0.5, y + 0.5, timeSeconds) >= STORM_NOISE_THRESHOLD
-    ? colors.background
-    : colors.backing || "#000000";
+    ? onColor
+    : offColor;
 }
 
 function drawPlayerMapCell(ctx, x, y, size, value, mapState, colors, dimmed = false, seen = true, compactMap = false) {
+  if (compactMap && value !== mapState.storm) {
+    ctx.fillStyle = seen && value !== mapState.unknown ? colors.foreground : colors.background;
+    ctx.fillRect(x, y, size, size);
+    return;
+  }
+
   if (value === mapState.unknown) {
     ctx.fillStyle = colors.backing || "#000000";
     ctx.fillRect(x, y, size, size);
@@ -2001,51 +2273,79 @@ function drawPlayerMapMiniShip(ctx, circle, colors) {
     : Number.isFinite(circle.aimAngle)
       ? circle.aimAngle
       : -Math.PI / 2;
-  const radius = Math.max(1, Math.round(circle.shipRadius || ENGINE.ship.radius || 7));
-  const healthBars = Math.round(circle.healthBars || ENGINE.player.startingHealthBars);
-  const maxHealth = Math.max(1, circle.maxHealth || healthBars * ENGINE.player.healthPerBar);
+  const sourceRadius = Math.max(1, Number(circle.shipRadius || ENGINE.ship.radius || 7));
+  const radius = Math.max(1, sourceRadius * PLAYER_MAP_MINI_SHIP_SCALE);
   const ship = {
     id: "minimap-player",
     x: circle.x,
     y: circle.y,
     radius,
-    renderScale: 2 / 3,
     angle,
     aimAngle: Number.isFinite(circle.aimAngle) ? circle.aimAngle : angle,
     alive: true,
     health: 0,
-    maxHealth,
-    healthBars,
+    maxHealth: circle.maxHealth || ENGINE.player.maxHealth,
+    healthBars: circle.healthBars || ENGINE.player.startingHealthBars,
     miningRayCount: circle.miningRayCount || 1,
-    stormWarning: null
+    upgrades: {}
   };
-  drawPlayerMapMiniShipBoundary(ctx, ship, colors);
+  drawPlayerMapMiniShipOutline(ctx, ship, colors);
   drawShip(ctx, ship, { x: 0, y: 0 }, null, colors, 0, null, true);
 }
 
-function drawPlayerMapMiniShipBoundary(ctx, ship, colors) {
-  const x = Math.round(ship.x);
-  const y = Math.round(ship.y);
-  const renderScale = Number.isFinite(ship.renderScale) && ship.renderScale > 0 ? ship.renderScale : 1;
-  const mainRadius = Math.max(1, Math.round((ship.radius || ENGINE.ship.radius || 1) * renderScale));
-  const smallOrbRadius = Math.max(1, Math.round(SMALL_ORB_RADIUS * renderScale));
-  const rearAngle = ship.angle + Math.PI;
-  const rear = {
-    x: Math.cos(rearAngle),
-    y: Math.sin(rearAngle)
-  };
-  const side = {
-    x: Math.cos(ship.angle + Math.PI / 2),
-    y: Math.sin(ship.angle + Math.PI / 2)
+function fillPlayerMapMiniShipViewInterior(ctx, circle, colors) {
+  const radius = Math.max(1, Number(circle.radius) || 1);
+  drawPlayerMapFilledCircle(ctx, circle.x, circle.y, radius, colors.background);
+}
+
+function drawPlayerMapMiniShipViewRing(ctx, circle, colors) {
+  const radius = Math.max(1, Number(circle.radius) || 1);
+  drawPlayerMapCircleBand(ctx, circle.x, circle.y, radius, radius + 1, colors.background);
+  drawPlayerMapCircleBand(ctx, circle.x, circle.y, radius + 1, radius + 2, colors.foreground);
+  drawPlayerMapCircleBand(ctx, circle.x, circle.y, radius + 2, radius + 3, colors.background);
+}
+
+function drawPlayerMapCircleBand(ctx, cx, cy, innerRadius, outerRadius, color) {
+  const innerRadiusSq = innerRadius * innerRadius;
+  const outerRadiusSq = outerRadius * outerRadius;
+  const minX = Math.floor(cx - outerRadius - 1);
+  const maxX = Math.ceil(cx + outerRadius + 1);
+  const minY = Math.floor(cy - outerRadius - 1);
+  const maxY = Math.ceil(cy + outerRadius + 1);
+
+  ctx.fillStyle = color;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      const distanceSq = dx * dx + dy * dy;
+      if (distanceSq > innerRadiusSq && distanceSq <= outerRadiusSq) {
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+}
+
+function drawPlayerMapMiniShipOutline(ctx, ship, colors) {
+  const outlineColors = {
+    ...colors,
+    foreground: colors.background,
+    background: colors.background
   };
 
-  ctx.fillStyle = colors.background;
-  for (const orb of REAR_ORBS) {
-    const orbX = Math.round(x + rear.x * orb.rear * renderScale + side.x * orb.side * renderScale);
-    const orbY = Math.round(y + rear.y * orb.rear * renderScale + side.y * orb.side * renderScale);
-    fillSolidDisk(ctx, orbX, orbY, smallOrbRadius + PLAYER_MAP_MINI_SHIP_BOUNDARY);
+  for (let y = -PLAYER_MAP_MINI_SHIP_OUTLINE; y <= PLAYER_MAP_MINI_SHIP_OUTLINE; y += 1) {
+    for (let x = -PLAYER_MAP_MINI_SHIP_OUTLINE; x <= PLAYER_MAP_MINI_SHIP_OUTLINE; x += 1) {
+      if (x === 0 && y === 0) {
+        continue;
+      }
+
+      drawShip(ctx, {
+        ...ship,
+        x: ship.x + x,
+        y: ship.y + y
+      }, { x: 0, y: 0 }, null, outlineColors, 0, null, true);
+    }
   }
-  fillSolidDisk(ctx, x, y, mainRadius + PLAYER_MAP_MINI_SHIP_BOUNDARY);
 }
 
 function playerMapCirclePixelInside(x, y, cx, cy, radiusSq) {
@@ -4573,13 +4873,26 @@ function drawRectOutline(ctx, x, y, width, height) {
   ctx.fillRect(x + width - 1, y, 1, height);
 }
 
+function shipMainRadius(player) {
+  return Math.max(1, Number(player?.radius || ENGINE.ship.radius || 1));
+}
+
+function shipGeometryScaleForRadius(radius) {
+  const baseRadius = Math.max(1, Number(ENGINE.ship.radius) || 1);
+  return Math.max(0.1, radius / baseRadius);
+}
+
+function shipSmallOrbRadius(geometryScale) {
+  return Math.max(1, SMALL_ORB_RADIUS * geometryScale);
+}
+
 function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
-  const renderScale = Number.isFinite(player.renderScale) && player.renderScale > 0 ? player.renderScale : 1;
-  const mainRadius = Math.max(1, Math.round((player.radius || ENGINE.ship.radius || 1) * renderScale));
-  const smallOrbRadius = Math.max(1, Math.round(SMALL_ORB_RADIUS * renderScale));
+  const mainRadius = shipMainRadius(player);
+  const geometryScale = shipGeometryScaleForRadius(mainRadius);
+  const smallOrbRadius = shipSmallOrbRadius(geometryScale);
   const rearAngle = player.angle + Math.PI;
   const rear = {
     x: Math.cos(rearAngle),
@@ -4596,16 +4909,16 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   };
 
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
-    const orbX = Math.round(x + rear.x * orb.rear * renderScale + side.x * orb.side * renderScale);
-    const orbY = Math.round(y + rear.y * orb.rear * renderScale + side.y * orb.side * renderScale);
+    const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
+    const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
     drawSphere(ctx, orbX, orbY, smallOrbRadius, player.angle, colors, [mainOccluder]);
   }
 
   drawSphere(ctx, x, y, mainRadius, player.angle, colors);
 
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "front")) {
-    const orbX = Math.round(x + rear.x * orb.rear * renderScale + side.x * orb.side * renderScale);
-    const orbY = Math.round(y + rear.y * orb.rear * renderScale + side.y * orb.side * renderScale);
+    const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
+    const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
     drawSphere(ctx, orbX, orbY, smallOrbRadius, player.angle, colors);
   }
 
@@ -4634,6 +4947,9 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
   };
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const geometryScale = shipGeometryScaleForRadius(shipMainRadius(player));
+  const emitterLength = MINING_RAY_EMITTER_LENGTH * geometryScale;
+  const emitterRadius = Math.max(0.5, MINING_RAY_EMITTER_RADIUS * geometryScale);
   const lanes = miningRayLanesForPlayer(player, angle, rayLength)
     .map((lane) => clipRenderMiningRayLaneStart(player, asteroid, lane, angle))
     .filter((lane) => lane.offset !== 0);
@@ -4646,8 +4962,8 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
     };
     const front = worldToScreen({ x: lane.startX, y: lane.startY }, camera);
     const rear = {
-      x: front.x - direction.x * MINING_RAY_EMITTER_LENGTH,
-      y: front.y - direction.y * MINING_RAY_EMITTER_LENGTH
+      x: front.x - direction.x * emitterLength,
+      y: front.y - direction.y * emitterLength
     };
     drawSideMiningRayEmitter(
       ctx,
@@ -4655,7 +4971,7 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
       front,
       normal,
       lane.offset,
-      MINING_RAY_EMITTER_RADIUS,
+      emitterRadius,
       colors
     );
   }

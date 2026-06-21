@@ -81,9 +81,11 @@ const ELIMINATION_NOTICE_MAX = 3;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
 const WORLD_LENS_POWER = RENDER.lensPower || 2;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
-const MINING_AUDIO_MAX_GAIN = 0.0055;
+const MINING_AUDIO_MAX_GAIN = 0.0066;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
 const AUDIO_COLLISION_CLUNK_SPEED = 18;
+const AUDIO_ROCK_THUMP_COOLDOWN_SECONDS = 0.14;
+const AUDIO_ROCK_THUMP_SPEED = 10;
 const CONTROLLER_CURSOR_SPEED = 160;
 const CONTROLLER_HUCK_TARGET_RAY_MULTIPLIER = 2.5;
 const CONTROLLER_UPGRADE_NAV_INITIAL_DELAY_SECONDS = 0.28;
@@ -95,7 +97,6 @@ const BUILD_REPEAT_SECONDS = 0.08;
 const PLAYER_MAP_CHUNK_TILES = 1;
 const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
 const PLAYER_MAP_MINIPLAYER_RADIUS = 64;
-const PLAYER_MAP_MINIPLAYER_RESOLUTION_SCALE = 2;
 const PLAYER_MAP_FULL_STORM_BAND_TILES = 4;
 const PLAYER_MAP_UNKNOWN = 255;
 const PLAYER_MAP_BACKGROUND = 0;
@@ -186,8 +187,10 @@ const audio = {
   lastHealth: null,
   lastShake: 0,
   lastClunkAtSeconds: 0,
+  lastRockThumpAtSeconds: 0,
   pendingDamage: 0,
-  huckRockBuffer: null
+  huckRockBuffer: null,
+  rockThumpBuffer: null
 };
 const state = {
   clientId: storedClientId,
@@ -568,6 +571,10 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (handleMenuRoomShortcutKey(event)) {
+    return;
+  }
+
   if (
     event.code === "Escape" &&
     !event.repeat &&
@@ -929,6 +936,7 @@ function draw(now = 0) {
       target: buildTarget
     },
     room: state.room,
+    menuRoom: readyMenu ? state.menu.room : null,
     clientId: state.clientId,
     roomButtons: activeRoomButtons(),
     uiRayActive: activeRoomMiningInputAllowed(),
@@ -1014,6 +1022,10 @@ function handleControllerActions(input) {
   }
 
   if (handleWaitingRoomControllerActions(input)) {
+    return;
+  }
+
+  if (handleMenuRoomControllerActions(input)) {
     return;
   }
 
@@ -1167,7 +1179,7 @@ function controllerAimCursorRenderState() {
 function hudFlashRenderState(timeSeconds) {
   return {
     rock: timeSeconds < state.hudFlash.rockUntilSeconds,
-    miningRayDisabled: lobbyMiningRayAttemptActive()
+    miningRayDisabled: miningDisabledFlashActive()
   };
 }
 
@@ -1195,12 +1207,33 @@ function flashRockHud() {
   state.hudFlash.rockUntilSeconds = performance.now() / 1000 + HUD_RESOURCE_FLASH_SECONDS;
 }
 
-function lobbyMiningRayAttemptActive() {
-  return state.room?.state === "waiting" &&
-    !state.chat.active &&
-    !state.upgrades.active &&
-    !state.build.active &&
-    physicalMiningInputActive();
+function miningDisabledFlashActive() {
+  if (
+    state.chat.active ||
+    state.upgrades.active ||
+    state.build.active ||
+    !physicalMiningInputActive()
+  ) {
+    return false;
+  }
+
+  if (state.room?.state === "waiting") {
+    const player = predictedLocalPlayer() || localPlayerFromSnapshot();
+    return miningRayHitsAsteroid(player?.miningRay);
+  }
+
+  if (state.room?.state === "menu" && state.menu.room === MENU_ROOMS.theme) {
+    return miningRayHitsAsteroid(state.menu.player?.miningRay);
+  }
+
+  return false;
+}
+
+function miningRayHitsAsteroid(miningRay) {
+  const lanes = Array.isArray(miningRay?.lanes) && miningRay.lanes.length > 0
+    ? miningRay.lanes
+    : miningRay ? [miningRay] : [];
+  return lanes.some((lane) => lane?.hitType === "asteroid");
 }
 
 function createTalkInput() {
@@ -2447,7 +2480,7 @@ function resolveMenuAsteroidCollisions(player) {
 
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       if (normalSpeed < 0) {
-        requestCollisionClunk(-normalSpeed);
+        requestRockThump(-normalSpeed);
         player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
         player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
       }
@@ -2745,10 +2778,18 @@ function stepLocalBotArena(stepSeconds) {
     }
   }
 
+  const stepOptions = {
+    onAsteroidImpact: (_arena, player, speed) => {
+      if (player?.id === LOCAL_BOT_PLAYER_ID) {
+        requestRockThump(speed);
+      }
+    }
+  };
+
   if (botProfileActive()) {
-    botProfileMeasure("stepArena", () => stepArena(arena, stepSeconds));
+    botProfileMeasure("stepArena", () => stepArena(arena, stepSeconds, stepOptions));
   } else {
-    stepArena(arena, stepSeconds);
+    stepArena(arena, stepSeconds, stepOptions);
   }
   applyClientAsteroidUpdates(takeAsteroidUpdates(arena));
   updateLocalRoomEndState(arena);
@@ -4322,14 +4363,27 @@ function updateLocalShipAudio(player, timeSeconds) {
 
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
-  const speed = alive ? Math.hypot(player.vx || 0, player.vy || 0) : 0;
-  const speedLevel = clamp(speed / Math.max(1, ENGINE.ship.audioSpeedReference), 0, 1);
-  const engineLevel = alive && player.thrusting ? Math.max(0.28, speedLevel) : 0;
+  const inputLevel = alive ? playerThrustInputLevel(player) : 0;
   const miningActive = state.room?.state !== "ended" && alive && player.mining === true;
 
-  updateEngineAudio(context, engineLevel, speedLevel, timeSeconds);
+  updateEngineAudio(context, inputLevel, timeSeconds);
   updateMiningAudio(context, miningActive, timeSeconds);
   flushPendingDamageClunk(timeSeconds);
+}
+
+function playerThrustInputLevel(player) {
+  const moveX = Number.isFinite(player?.moveX)
+    ? player.moveX
+    : Number.isFinite(player?.input?.moveX) ? player.input.moveX : 0;
+  const moveY = Number.isFinite(player?.moveY)
+    ? player.moveY
+    : Number.isFinite(player?.input?.moveY) ? player.input.moveY : 0;
+  const inputLevel = clamp(Math.hypot(moveX, moveY), 0, 1);
+  if (inputLevel > 0) {
+    return inputLevel;
+  }
+
+  return player?.thrusting ? 1 : 0;
 }
 
 function updateLocalDamageAudio(snapshot, timeSeconds) {
@@ -4430,19 +4484,19 @@ function ensureShipAudio(context) {
   };
 }
 
-function updateEngineAudio(context, engineLevel, speedLevel, timeSeconds) {
+function updateEngineAudio(context, inputLevel, timeSeconds) {
   const shipAudio = audio.ship;
   const now = context.currentTime;
-  const targetGain = engineLevel > 0
-    ? ENGINE_AUDIO_MAX_GAIN * (0.45 + engineLevel * 0.55)
+  const targetGain = inputLevel > 0
+    ? ENGINE_AUDIO_MAX_GAIN * (0.45 + inputLevel * 0.55)
     : 0.0001;
-  const filterFrequency = 80 + speedLevel * 210 + Math.sin(timeSeconds * 18) * 7;
-  const oscillatorFrequency = 38 + speedLevel * 27 + Math.sin(timeSeconds * 9) * 2;
+  const filterFrequency = 85 + inputLevel * 205 + Math.sin(timeSeconds * 18) * 7 * inputLevel;
+  const oscillatorFrequency = 40 + inputLevel * 25 + Math.sin(timeSeconds * 9) * 2 * inputLevel;
 
   setAudioTarget(shipAudio.engineGain.gain, targetGain, now, 0.045);
   setAudioTarget(shipAudio.engineFilter.frequency, filterFrequency, now, 0.055);
   setAudioTarget(shipAudio.engineOscillator.frequency, oscillatorFrequency, now, 0.06);
-  setAudioTarget(shipAudio.engineOscillatorGain.gain, engineLevel > 0 ? 0.006 : 0.0001, now, 0.05);
+  setAudioTarget(shipAudio.engineOscillatorGain.gain, inputLevel > 0 ? 0.006 : 0.0001, now, 0.05);
 }
 
 function updateMiningAudio(context, active, timeSeconds) {
@@ -4464,6 +4518,25 @@ function requestCollisionClunk(speed) {
   }
 
   requestLocalClunk(0.45 + (speed - AUDIO_COLLISION_CLUNK_SPEED) / 55);
+}
+
+function requestRockThump(speed, timeSeconds = performance.now() / 1000) {
+  if (speed < AUDIO_ROCK_THUMP_SPEED) {
+    return false;
+  }
+
+  const context = audio.context;
+  if (!audio.unlocked || !context || context.state !== "running") {
+    return false;
+  }
+
+  if (timeSeconds - audio.lastRockThumpAtSeconds < AUDIO_ROCK_THUMP_COOLDOWN_SECONDS) {
+    return false;
+  }
+
+  audio.lastRockThumpAtSeconds = timeSeconds;
+  playRockThump(context, clamp(0.35 + (speed - AUDIO_ROCK_THUMP_SPEED) / 70, 0.25, 1.1));
+  return true;
 }
 
 function requestLocalClunk(intensity = 1, timeSeconds = performance.now() / 1000) {
@@ -4515,6 +4588,42 @@ function playLocalClunk(context, intensity) {
   noise.stop(start + 0.15);
   oscillator.start(start);
   oscillator.stop(start + 0.16);
+}
+
+function playRockThump(context, intensity) {
+  const start = context.currentTime + 0.004;
+  const body = context.createOscillator();
+  const bodyGain = context.createGain();
+  const brush = context.createBufferSource();
+  const brushFilter = context.createBiquadFilter();
+  const brushGain = context.createGain();
+
+  body.type = "sine";
+  body.frequency.setValueAtTime(74 + intensity * 8, start);
+  body.frequency.exponentialRampToValueAtTime(42, start + 0.2);
+  bodyGain.gain.setValueAtTime(0.0001, start);
+  bodyGain.gain.exponentialRampToValueAtTime(0.105 * intensity, start + 0.018);
+  bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.26);
+
+  brush.buffer = audio.rockThumpBuffer || createNoiseBuffer(context, 0.1);
+  audio.rockThumpBuffer = brush.buffer;
+  brushFilter.type = "lowpass";
+  brushFilter.frequency.setValueAtTime(180, start);
+  brushFilter.frequency.exponentialRampToValueAtTime(65, start + 0.12);
+  brushFilter.Q.value = 0.35;
+  brushGain.gain.setValueAtTime(0.0001, start);
+  brushGain.gain.exponentialRampToValueAtTime(0.042 * intensity, start + 0.012);
+  brushGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+
+  body.connect(bodyGain);
+  bodyGain.connect(context.destination);
+  brush.connect(brushFilter);
+  brushFilter.connect(brushGain);
+  brushGain.connect(context.destination);
+  body.start(start);
+  body.stop(start + 0.28);
+  brush.start(start);
+  brush.stop(start + 0.18);
 }
 
 function createNoiseBuffer(context, seconds) {
@@ -4635,13 +4744,21 @@ function physicalMiningInputActive() {
 }
 
 function activeRoomMiningInputAllowed() {
-  return state.room?.state === "active" &&
-    localPlayerCanUseCombat() &&
-    physicalMiningInputActive() &&
-    !state.chat.active &&
-    !state.upgrades.active &&
-    !state.build.active &&
-    !isInputBlocked();
+  if (
+    !physicalMiningInputActive() ||
+    state.chat.active ||
+    state.upgrades.active ||
+    state.build.active ||
+    isInputBlocked()
+  ) {
+    return false;
+  }
+
+  if (state.room?.state === "waiting") {
+    return true;
+  }
+
+  return localPlayerCanUseCombat();
 }
 
 function localPlayerCanUseCombat() {
@@ -4914,6 +5031,8 @@ function updatePrediction(timeSeconds) {
   if (!isInputBlocked()) {
     predicted.aimAngle = inputAimAngleForPlayer(predicted);
   }
+  predicted.moveX = move.x;
+  predicted.moveY = move.y;
   predicted.mining = activeRoomMiningInputAllowed();
   if (predicted.mining) {
     predicted.miningHoldSeconds = (predicted.miningHoldSeconds || 0) + dtSeconds;
@@ -4944,6 +5063,8 @@ function predictedLocalPlayer() {
     vy: predicted.vy,
     angle: predicted.angle,
     aimAngle: predicted.aimAngle,
+    moveX: predicted.moveX,
+    moveY: predicted.moveY,
     mining: predicted.mining,
     miningRay: predicted.mining ? predictedMiningRayForPlayer(predicted, authoritative.miningRay) : null,
     miningHoldSeconds: predicted.miningHoldSeconds,
@@ -5525,7 +5646,7 @@ function resolvePredictionAsteroidCollisions(player) {
 
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       if (normalSpeed < 0) {
-        requestCollisionClunk(-normalSpeed);
+        requestRockThump(-normalSpeed);
         player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
         player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
       }
@@ -5954,6 +6075,27 @@ function handleWaitingRoomShortcutKey(event) {
   return false;
 }
 
+function handleMenuRoomShortcutKey(event) {
+  if (
+    state.room?.state !== "menu" ||
+    state.menu.room !== MENU_ROOMS.theme ||
+    event.repeat ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.altKey
+  ) {
+    return false;
+  }
+
+  if (event.code === "Escape") {
+    event.preventDefault();
+    leaveThemeMenuRoom();
+    return true;
+  }
+
+  return false;
+}
+
 function handleWaitingRoomControllerActions(input) {
   if (state.room?.state !== "waiting") {
     return false;
@@ -5970,6 +6112,24 @@ function handleWaitingRoomControllerActions(input) {
   }
 
   return false;
+}
+
+function handleMenuRoomControllerActions(input) {
+  if (state.room?.state !== "menu" || state.menu.room !== MENU_ROOMS.theme) {
+    return false;
+  }
+
+  if (input.pressed.reset) {
+    leaveThemeMenuRoom();
+    return true;
+  }
+
+  return false;
+}
+
+function leaveThemeMenuRoom() {
+  requestMechanicalBeep();
+  enterMenuRoom(MENU_ROOMS.ready);
 }
 
 function requestWaitingRoomStart() {
@@ -6287,13 +6447,17 @@ function buySelectedUpgrade() {
   const cost = nextUpgradeCost(player.upgrades, definition.id);
   if (isLocalBotGame()) {
     if (canAffordUpgrade(player.resources, cost)) {
-      purchasePlayerUpgrade(state.localGame.arena, LOCAL_BOT_PLAYER_ID, definition.id);
-      syncLocalArenaSnapshot(performance.now() / 1000);
+      const result = purchasePlayerUpgrade(state.localGame.arena, LOCAL_BOT_PLAYER_ID, definition.id);
+      if (result.ok) {
+        requestMechanicalBeep();
+        syncLocalArenaSnapshot(performance.now() / 1000);
+      }
     }
     return;
   }
 
   if (socket.connected && canAffordUpgrade(player.resources, cost)) {
+    requestMechanicalBeep();
     socket.emit(CLIENT_EVENTS.upgrade, definition.id);
   }
 }
@@ -6941,15 +7105,20 @@ function observePlayerMap(player) {
 
 function playerMapVisibleRadiusPixels() {
   if (playerMapMiniPlayerActive()) {
-    const canvasRadius = Math.min(
-      Number(minimapCanvas?.width) || 0,
-      Number(minimapCanvas?.height) || 0
-    ) / 2;
-    const targetRadius = PLAYER_MAP_MINIPLAYER_RADIUS * PLAYER_MAP_MINIPLAYER_RESOLUTION_SCALE;
-    return Math.max(targetRadius, canvasRadius) * WORLD_LENS_EDGE_SCALE;
+    return miniPlayerRenderRadiusPixels() * WORLD_LENS_EDGE_SCALE;
   }
 
   return (Math.min(RENDER.width, RENDER.height) / 2) * WORLD_LENS_EDGE_SCALE;
+}
+
+function miniPlayerRenderRadiusPixels() {
+  return Math.max(
+    1,
+    Math.min(
+      Number(minimapCanvas?.width) || PLAYER_MAP_MINIPLAYER_RADIUS * 2,
+      Number(minimapCanvas?.height) || PLAYER_MAP_MINIPLAYER_RADIUS * 2
+    ) / 2
+  );
 }
 
 function playerMapMiniPlayerActive() {
