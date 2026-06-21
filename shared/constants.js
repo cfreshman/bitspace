@@ -33,7 +33,8 @@ export const ENGINE = Object.freeze({
   lobby: {
     minPlayers: 2,
     autoStartSeconds: 300,
-    countdownSeconds: 10
+    countdownSeconds: 10,
+    startingRock: 15
   },
   storm: {
     safeSeconds: 120,

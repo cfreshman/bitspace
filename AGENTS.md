@@ -41,6 +41,7 @@ LLM instructions
 - you keep simply misinterpreting me. stop. i want it done the way the makes sense, not ur fucking retarded misguess
 - if you truly think there are multiple ways to interpret something and ur not sure, ASK. DO NOT BLINDLY START IN UR 'BEST GUESS', BECAUSE YOU ARE LITERALLY ALWAYS WRONG
 - do not overcorrect
+- if an edit/patch fails, dont tell me why. i dont care. its your fault and i dont care why it happened from ur end. just fix it
 
 ## LLM ERRATA
 

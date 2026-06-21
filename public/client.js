@@ -254,6 +254,7 @@ const state = {
   lastActiveMatchKey: null,
   inputSeq: 0,
   nextHuckRockThunkAtSeconds: 0,
+  huckRockNeedRockFlashArmed: true,
   hudFlash: {
     rockUntilSeconds: 0
   },
@@ -465,6 +466,7 @@ function resetControlStateForNewMatch() {
   state.leaveConfirmUntilSeconds = 0;
   state.uiHoverId = null;
   state.hudFlash.rockUntilSeconds = 0;
+  state.huckRockNeedRockFlashArmed = true;
   state.controller.cursor.visible = false;
   resetControllerCursorPosition();
   resetControllerUpgradeNav();
@@ -609,6 +611,10 @@ window.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     confirmLeaveShortcut();
+    return;
+  }
+
+  if (handleSpectatorCycleKey(event)) {
     return;
   }
 
@@ -1083,6 +1089,10 @@ function handleControllerActions(input) {
     return;
   }
 
+  if (handleControllerSpectatorCycle(input)) {
+    return;
+  }
+
   if (input.pressed.reset) {
     if (canLeaveWithControllerReset()) {
       handleLeaveShortcut();
@@ -1139,6 +1149,54 @@ function handleControllerActions(input) {
   if (buttonId) {
     handleRoomUiClick(buttonId);
   }
+}
+
+function handleSpectatorCycleKey(event) {
+  if (
+    event.repeat ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.altKey ||
+    !canCycleSpectatorTargets()
+  ) {
+    return false;
+  }
+
+  let direction = 0;
+  if (event.code === "ArrowRight" || event.code === "KeyD") {
+    direction = 1;
+  } else if (event.code === "ArrowLeft" || event.code === "KeyA") {
+    direction = -1;
+  }
+
+  if (direction === 0) {
+    return false;
+  }
+
+  event.preventDefault();
+  return cycleSpectatorTarget(direction);
+}
+
+function handleControllerSpectatorCycle(input) {
+  if (!canCycleSpectatorTargets()) {
+    state.controller.spectatorCycleDirection = 0;
+    return false;
+  }
+
+  const direction = Math.abs(input.dpad.x) >= CONTROLLER_DPAD_NAV_THRESHOLD
+    ? Math.sign(input.dpad.x)
+    : 0;
+  if (direction === 0) {
+    state.controller.spectatorCycleDirection = 0;
+    return false;
+  }
+
+  if (direction === state.controller.spectatorCycleDirection) {
+    return false;
+  }
+
+  state.controller.spectatorCycleDirection = direction;
+  return cycleSpectatorTarget(direction);
 }
 
 function controllerCursorShouldShow() {
@@ -1633,6 +1691,7 @@ function createControllerState() {
     buildPressed: false,
     upgradesPressed: false,
     mapPressed: false,
+    spectatorCycleDirection: 0,
     mousePointerHidden: false,
     lastTimeSeconds: 0,
     upgradeNavDirection: 0,
@@ -4938,11 +4997,27 @@ function readInput() {
 }
 
 function readHuckRockInput() {
-  if (!huckRockInputAllowed()) {
+  const huckRockActive = huckRockPhysicalInputActive();
+  if (!huckRockActive) {
+    state.huckRockNeedRockFlashArmed = true;
     return false;
   }
 
   const now = performance.now() / 1000;
+  if (!huckRockInputAllowed()) {
+    if (
+      huckRockBlockedForRockCost() &&
+      state.huckRockNeedRockFlashArmed &&
+      now >= state.nextHuckRockThunkAtSeconds
+    ) {
+      flashRockHud();
+      state.huckRockNeedRockFlashArmed = false;
+      state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
+    }
+    return false;
+  }
+
+  state.huckRockNeedRockFlashArmed = false;
   if (now >= state.nextHuckRockThunkAtSeconds) {
     requestHuckRockThunk();
     state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
@@ -4951,12 +5026,15 @@ function readHuckRockInput() {
   return true;
 }
 
+function huckRockPhysicalInputActive() {
+  return keys.has("Space") || (state.controller.connected && state.controller.huckRock);
+}
+
 function huckRockInputAllowed() {
   const roomState = state.room?.state;
   const controllerHuck = state.controller.connected && state.controller.huckRock;
-  const keyboardHuck = keys.has("Space");
   if (
-    (!keyboardHuck && !controllerHuck) ||
+    !huckRockPhysicalInputActive() ||
     (!controllerHuck && !hasMousePointer()) ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
@@ -4969,15 +5047,26 @@ function huckRockInputAllowed() {
     if (!localPlayerCanUseCombat()) {
       return false;
     }
+  }
 
-    const player = localPlayerFromSnapshot();
-    if ((player?.resources?.rock || 0) < (ENGINE.huckRock.costRock || 0)) {
-      flashRockHud();
-      return false;
-    }
+  if (huckRockBlockedForRockCost()) {
+    return false;
   }
 
   return true;
+}
+
+function huckRockBlockedForRockCost() {
+  if (!huckRockCostsRockInCurrentRoom()) {
+    return false;
+  }
+
+  const player = localPlayerFromSnapshot();
+  return (player?.resources?.rock || 0) < (ENGINE.huckRock.costRock || 0);
+}
+
+function huckRockCostsRockInCurrentRoom() {
+  return state.room?.state === "waiting" || state.room?.state === "active";
 }
 
 function huckRockTargetForPlayer(player) {
@@ -7112,6 +7201,10 @@ function cameraPlayerIdForRoom() {
     return state.playerId;
   }
 
+  if (aliveSpectatorPlayers().some((candidate) => candidate.id === state.spectatorTargetId)) {
+    return state.spectatorTargetId;
+  }
+
   if (player.killedById) {
     const killer = state.snapshot?.players.find((candidate) => (
       candidate.id === player.killedById && candidate.alive === true
@@ -7125,8 +7218,42 @@ function cameraPlayerIdForRoom() {
   return randomAliveSpectatorTargetId(player) || state.playerId;
 }
 
+function canCycleSpectatorTargets() {
+  if (leaveConfirmIsActive() || state.room?.state !== "active") {
+    return false;
+  }
+
+  const player = localPlayerFromSnapshot();
+  return Boolean(state.snapshot && (!player || player.alive === false) && aliveSpectatorPlayers().length > 1);
+}
+
+function cycleSpectatorTarget(direction) {
+  const players = aliveSpectatorPlayers();
+  if (players.length <= 1) {
+    return false;
+  }
+
+  const currentId = state.spectatorTargetId || cameraPlayerIdForRoom();
+  const currentIndex = players.findIndex((candidate) => candidate.id === currentId);
+  const startIndex = currentIndex >= 0 ? currentIndex : 0;
+  const offset = direction >= 0 ? 1 : -1;
+  const nextIndex = (startIndex + offset + players.length) % players.length;
+  state.spectatorTargetId = players[nextIndex].id;
+  return true;
+}
+
+function aliveSpectatorPlayers() {
+  return (state.snapshot?.players || [])
+    .filter((candidate) => candidate.alive === true)
+    .slice()
+    .sort((a, b) => (
+      (Number(a.number) || 0) - (Number(b.number) || 0) ||
+      String(a.id || "").localeCompare(String(b.id || ""))
+    ));
+}
+
 function randomAliveSpectatorTargetId(eliminatedPlayer) {
-  const alivePlayers = (state.snapshot?.players || []).filter((candidate) => candidate.alive === true);
+  const alivePlayers = aliveSpectatorPlayers();
   if (alivePlayers.length <= 0) {
     state.spectatorTargetId = null;
     return null;

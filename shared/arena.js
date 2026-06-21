@@ -81,6 +81,7 @@ export function addPlayer(arena, playerOptions) {
   const number = nextPlayerNumber(arena);
   const spawnNumber = playerOptions.spawnNumber ?? number;
   const spawn = spawnForPlayerNumber(spawnNumber, arena.asteroid);
+  const startingResources = playerOptions.resources || {};
   const player = {
     id: playerOptions.id,
     number,
@@ -125,9 +126,9 @@ export function addPlayer(arena, playerOptions) {
     killedById: null,
     eliminatedAtTick: null,
     resources: {
-      rock: 0,
-      ore: 0,
-      diamond: 0
+      rock: clampResourceAmount(startingResources.rock),
+      ore: clampResourceAmount(startingResources.ore),
+      diamond: clampResourceAmount(startingResources.diamond)
     },
     stormWarning: "",
     stormDamagePerSecond: 0,
@@ -140,6 +141,10 @@ export function addPlayer(arena, playerOptions) {
 
   arena.players.set(player.id, player);
   return { ok: true, player };
+}
+
+function clampResourceAmount(value) {
+  return clamp(Math.floor(Number(value) || 0), 0, ENGINE.player.maxResourceAmount);
 }
 
 export function removePlayer(arena, playerId) {
@@ -505,7 +510,7 @@ function processHuckRockInput(arena, player, dtSeconds) {
   }
 
   const config = ENGINE.huckRock;
-  if (arena.rules.playerDamage) {
+  if (arena.rules.asteroidMining) {
     const cost = config.costRock || 0;
     if ((player.resources.rock || 0) < cost) {
       return;

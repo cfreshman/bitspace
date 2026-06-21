@@ -187,7 +187,8 @@ export function createRoomManager(options = {}) {
     addPlayer(room.arena, {
       id: clientId,
       name: client.name,
-      spawnNumber: nextLobbySpawnNumber(room)
+      spawnNumber: nextLobbySpawnNumber(room),
+      resources: lobbyStartingResources()
     });
 
     if (!room.hostClientId) {
@@ -966,7 +967,8 @@ export function createRoomManager(options = {}) {
       addPlayer(room.arena, {
         id: participant.clientId,
         name: participant.name,
-        spawnNumber: nextLobbySpawnNumber(room)
+        spawnNumber: nextLobbySpawnNumber(room),
+        resources: lobbyStartingResources()
       });
     }
 
@@ -1068,9 +1070,16 @@ function ensureWaitingPlayer(room, client) {
   addPlayer(room.arena, {
     id: client.clientId,
     name: client.name,
-    spawnNumber: nextLobbySpawnNumber(room)
+    spawnNumber: nextLobbySpawnNumber(room),
+    resources: lobbyStartingResources()
   });
   syncLobbyControls(room);
+}
+
+function lobbyStartingResources() {
+  return {
+    rock: ENGINE.lobby.startingRock
+  };
 }
 
 function clearParticipantInput(room, clientId) {

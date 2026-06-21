@@ -96,17 +96,22 @@ const HUD_FLASH_RATE = Object.freeze({
   slow: 4,
   fast: 14
 });
+const HUD_PANEL_MIN_WIDTH = 112;
+const HUD_PANEL_PADDING = 4;
+const HUD_PANEL_TEXT_HEIGHT = 7;
+const HUD_PANEL_ROW_STEP = 10;
+const HUD_PANEL_ACTION_GAP = 7;
 const ENDED_HUD_LAYOUT = Object.freeze({
   x: 8,
   y: 8,
-  width: 116,
-  titleY: 5,
-  headerY: 18,
-  rowStartY: 29,
-  rowStep: 10,
+  width: HUD_PANEL_MIN_WIDTH,
+  titleY: HUD_PANEL_PADDING,
+  headerY: HUD_PANEL_PADDING + 14,
+  rowStartY: HUD_PANEL_PADDING + 24,
+  rowStep: HUD_PANEL_ROW_STEP,
   rowHighlightHeight: 9,
-  countdownGap: 4,
-  bottomPadding: 4
+  countdownGap: HUD_PANEL_PADDING,
+  bottomPadding: HUD_PANEL_PADDING
 });
 const REMOTE_PLAYER_LOOKAHEAD_SECONDS = 0.08;
 const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
@@ -1180,7 +1185,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   const leaveConfirmActive = options.leaveConfirm?.active === true;
   if (options.room?.state === "active" && !leaveConfirmActive) {
     if (!localPlayer || !localPlayer.alive) {
-      drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer);
+      drawSpectatorHud(ctx, options, localPlayer, cameraPlayer, colors, textRenderer, snapshot);
     } else {
       const playersLeft = (snapshot.players || []).filter((player) => player.alive === true).length;
       drawPlayerHud(
@@ -1364,7 +1369,7 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
   }
 
   if (state === "waiting") {
-    drawWaitingOverlay(ctx, room, options, colors, textRenderer);
+    drawWaitingOverlay(ctx, room, options, colors, textRenderer, localPlayer);
     return;
   }
 
@@ -1404,7 +1409,7 @@ function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
   drawWaitingDisabledFlash(ctx, warningPosition.x, warningPosition.y, options, colors, textRenderer);
 }
 
-function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
+function drawWaitingOverlay(ctx, room, options, colors, textRenderer, localPlayer) {
   const count = Number.isFinite(room.playerSlots) ? room.playerSlots : room.players?.length || 0;
   const maxPlayers = room.maxPlayers || ENGINE.maxPlayers;
   const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
@@ -1422,29 +1427,48 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
     return;
   }
 
-  drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer);
+  const playerHudPanel = localPlayer
+    ? drawPlayerHud(ctx, localPlayer, colors, textRenderer, options.hudFlash, options.timeSeconds, count)
+    : null;
+  drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer, playerHudPanel);
 }
 
-function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer) {
-  const panel = mainHudPanelRect(ctx, 132, 34);
+function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer, playerHudPanel) {
   const canStart = waitingRoomCanStart(room);
   const lobbyLabel = room.roomName
     ? `${String(room.roomName).toUpperCase()} ${count}/${maxPlayers}`
     : `LOBBY ${count}/${maxPlayers}`;
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+  const padding = HUD_PANEL_PADDING;
+  const minWidth = playerHudPanel?.width || HUD_PANEL_MIN_WIDTH;
+  const labelWidth = textRenderer.measure(lobbyLabel, textOptions);
+  const statusWidth = textRenderer.measure(status, textOptions);
+  const panel = mainHudPanelRect(
+    ctx,
+    Math.max(minWidth, labelWidth + padding * 2, statusWidth + padding * 2),
+    hudPanelHeightForRows(2)
+  );
+  if (playerHudPanel) {
+    panel.x = playerHudPanel.x;
+    panel.y = playerHudPanel.y + playerHudPanel.height + 6;
+  }
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, lobbyLabel, panel.x + panel.width / 2, panel.y + 8, {
-    fontSize: 8,
-    color: colors.foreground
+  textRenderer.draw(ctx, lobbyLabel, panel.x + padding, panel.y + padding, {
+    ...textOptions,
+    width: panel.width - padding * 2
   });
-  drawCenteredText(ctx, textRenderer, status, panel.x + panel.width / 2, panel.y + 21, {
-    fontSize: 8,
-    color: colors.foreground
+  textRenderer.draw(ctx, status, panel.x + padding, panel.y + padding + HUD_PANEL_ROW_STEP, {
+    ...textOptions,
+    width: panel.width - padding * 2
   });
   const warningPosition = drawWaitingTerminalActions(
     ctx,
     panel.x + 2,
-    panel.y + panel.height + 7,
+    panel.y + panel.height + HUD_PANEL_ACTION_GAP,
     canStart,
     options,
     colors,
@@ -1493,14 +1517,16 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRe
 }
 
 function drawWaitingDisabledFlash(ctx, x, y, options, colors, textRenderer) {
-  if (!hudFlashVisible(options.hudFlash?.miningRayDisabled, options.timeSeconds, {
+  const text = options.hudFlash?.miningRayDisabled ? "MINING DISABLED" : "";
+
+  if (!text || !hudFlashVisible(true, options.timeSeconds, {
     mode: HUD_FLASH_MODE.additive,
     rate: HUD_FLASH_RATE.slow
   })) {
     return;
   }
 
-  textRenderer.draw(ctx, "MINING DISABLED", x, y, {
+  textRenderer.draw(ctx, text, x, y, {
     fontSize: 8,
     color: colors.foreground,
     width: 112
@@ -1537,16 +1563,91 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
   drawCenteredText(ctx, textRenderer, label, ctx.width / 2, panel.y + 9, textOptions);
 }
 
-function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
-  const panel = mainHudPanelRect(ctx, 132, 26);
-  const title = localPlayer ? "ELIMINATED" : "SPECTATING";
+function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, textRenderer, snapshot) {
+  let stackPanel = null;
+  const playersLeft = (snapshot?.players || []).filter((player) => player.alive === true).length;
 
-  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + 9, {
+  if (localPlayer) {
+    stackPanel = drawEliminatedPanel(ctx, options, localPlayer, snapshot, colors, textRenderer);
+  }
+
+  if (spectatedPlayer && spectatedPlayer.id !== localPlayer?.id) {
+    stackPanel = drawPlayerHud(
+      ctx,
+      spectatedPlayer,
+      colors,
+      textRenderer,
+      {},
+      options.timeSeconds,
+      playersLeft,
+      {
+        header: spectatorHeaderForPlayer(spectatedPlayer),
+        y: stackPanel ? stackPanel.y + stackPanel.height + 6 : undefined
+      }
+    );
+  } else if (!stackPanel) {
+    stackPanel = drawSpectatingFallbackPanel(ctx, colors, textRenderer);
+  }
+
+  drawTerminalLeaveAction(
+    ctx,
+    (stackPanel?.x ?? 8) + 2,
+    (stackPanel?.y ?? 8) + (stackPanel?.height ?? 0) + HUD_PANEL_ACTION_GAP,
+    options,
+    colors,
+    textRenderer
+  );
+}
+
+function spectatorHeaderForPlayer(player) {
+  const number = Number(player?.number);
+  if (!Number.isFinite(number)) {
+    return "SPECTATING SHIP";
+  }
+  return `SPECTATING SHIP ${Math.max(1, Math.floor(number))}`;
+}
+
+function drawEliminatedPanel(ctx, options, player, snapshot, colors, textRenderer) {
+  const place = playerPlaceInSnapshot(options.room, snapshot, player.id);
+  const kills = Math.max(0, Math.floor(Number(player.kills || 0)));
+  const rows = [
+    "ELIMINATED",
+    place ? `FINISHED ${placeLabel(place)}` : "FINISHED",
+    killCountLabel(kills)
+  ];
+  return drawHudTextPanel(ctx, rows, colors, textRenderer);
+}
+
+function killCountLabel(kills) {
+  const count = Math.max(0, Math.floor(Number(kills) || 0));
+  return `${count} KILL${count === 1 ? "" : "S"}`;
+}
+
+function drawSpectatingFallbackPanel(ctx, colors, textRenderer) {
+  return drawHudTextPanel(ctx, ["SPECTATING"], colors, textRenderer);
+}
+
+function drawHudTextPanel(ctx, rows, colors, textRenderer) {
+  const padding = HUD_PANEL_PADDING;
+  const textOptions = {
     fontSize: 8,
     color: colors.foreground
+  };
+  const width = Math.max(
+    HUD_PANEL_MIN_WIDTH,
+    ...rows.map((row) => textRenderer.measure(row, textOptions) + padding * 2)
+  );
+  const panel = mainHudPanelRect(ctx, width, hudPanelHeightForRows(rows.length));
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  rows.forEach((row, index) => {
+    textRenderer.draw(ctx, row, panel.x + padding, panel.y + padding + HUD_PANEL_ROW_STEP * index, {
+      ...textOptions,
+      width: panel.width - padding * 2
+    });
   });
-  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+
+  return panel;
 }
 
 function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
@@ -1554,14 +1655,23 @@ function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
     return;
   }
 
-  const panel = mainHudPanelRect(ctx, 132, 26);
+  const panel = mainHudPanelRect(ctx, HUD_PANEL_MIN_WIDTH, hudPanelHeightForRows(2));
+  const padding = HUD_PANEL_PADDING;
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, "CONFIRM LEAVE?", panel.x + panel.width / 2, panel.y + 5, {
+  textRenderer.draw(ctx, "CONFIRM LEAVE?", panel.x + padding, panel.y + padding, {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    width: panel.width - padding * 2
   });
-  drawLeaveConfirmFuse(ctx, panel.x + 9, panel.y + 19, panel.width - 18, leaveConfirm.progress, colors);
-  drawTerminalConfirmLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+  drawLeaveConfirmFuse(
+    ctx,
+    panel.x + padding,
+    panel.y + padding + HUD_PANEL_ROW_STEP + 2,
+    panel.width - padding * 2,
+    leaveConfirm.progress,
+    colors
+  );
+  drawTerminalConfirmLeaveAction(ctx, panel.x + 2, panel.y + panel.height + HUD_PANEL_ACTION_GAP, options, colors, textRenderer);
 }
 
 function drawLeaveConfirmFuse(ctx, x, y, width, progress, colors) {
@@ -2593,7 +2703,7 @@ function drawBotChunkMap(ctx, map, colors, textRenderer) {
   const activeInset = Math.floor(BOT_CHUNK_MAP_ACTIVE_SIZE / 2);
   const mapWidth = (cellsX - 1) * dotPitch + BOT_CHUNK_MAP_DOT_SIZE;
   const mapHeight = (cellsY - 1) * dotPitch + BOT_CHUNK_MAP_DOT_SIZE;
-  const padding = 4;
+  const padding = HUD_PANEL_PADDING;
   const titleHeight = 10;
   const title = "AI CHUNKS";
   const titleWidth = textRenderer.measure(title, { fontSize: 8 });
@@ -2896,14 +3006,24 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
     fontSize: 8,
     color: colors.foreground
   };
-  const placeX = panel.x + 8;
-  const killsRight = panel.x + 68;
-  const timeRight = panel.x + panel.width - 8;
+  const padding = HUD_PANEL_PADDING;
+  const placeX = panel.x + padding;
+  const killsX = panel.x + 45;
+  const timeX = panel.x + 78;
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, title, panel.x + panel.width / 2, panel.y + ENDED_HUD_LAYOUT.titleY, textOptions);
-  drawRightAlignedText(ctx, textRenderer, "KILLS", killsRight, panel.y + ENDED_HUD_LAYOUT.headerY, textOptions);
-  drawRightAlignedText(ctx, textRenderer, "TIME", timeRight, panel.y + ENDED_HUD_LAYOUT.headerY, textOptions);
+  textRenderer.draw(ctx, title, placeX, panel.y + ENDED_HUD_LAYOUT.titleY, {
+    ...textOptions,
+    width: panel.width - padding * 2
+  });
+  textRenderer.draw(ctx, "KILLS", killsX, panel.y + ENDED_HUD_LAYOUT.headerY, {
+    ...textOptions,
+    width: timeX - killsX - 2
+  });
+  textRenderer.draw(ctx, "TIME", timeX, panel.y + ENDED_HUD_LAYOUT.headerY, {
+    ...textOptions,
+    width: panel.x + panel.width - padding - timeX
+  });
 
   results.forEach((result, index) => {
     const rowY = panel.y + ENDED_HUD_LAYOUT.rowStartY + index * ENDED_HUD_LAYOUT.rowStep;
@@ -2926,15 +3046,24 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
       ...rowTextOptions,
       width: 30
     });
-    drawRightAlignedText(ctx, textRenderer, result.killsLabel, killsRight, rowY, rowTextOptions);
-    drawRightAlignedText(ctx, textRenderer, result.timeLabel, timeRight, rowY, rowTextOptions);
+    textRenderer.draw(ctx, result.killsLabel, killsX, rowY, {
+      ...rowTextOptions,
+      width: timeX - killsX - 2
+    });
+    textRenderer.draw(ctx, result.timeLabel, timeX, rowY, {
+      ...rowTextOptions,
+      width: panel.x + panel.width - padding - timeX
+    });
   });
 
   if (resetSeconds !== null) {
     const countdownY = panel.y + endedHudCountdownY(rowCount);
-    drawCenteredText(ctx, textRenderer, `LOBBY ${formatClock(resetSeconds)}`, panel.x + panel.width / 2, countdownY, textOptions);
+    textRenderer.draw(ctx, `LOBBY ${formatClock(resetSeconds)}`, placeX, countdownY, {
+      ...textOptions,
+      width: panel.width - padding * 2
+    });
   }
-  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + HUD_PANEL_ACTION_GAP, options, colors, textRenderer);
 }
 
 function endedHudPanelHeight(rowCount, hasCountdown) {
@@ -2949,6 +3078,15 @@ function endedHudCountdownY(rowCount) {
   return ENDED_HUD_LAYOUT.rowStartY +
     rowCount * ENDED_HUD_LAYOUT.rowStep +
     ENDED_HUD_LAYOUT.countdownGap;
+}
+
+function playerPlaceInSnapshot(room, snapshot, playerId) {
+  if (!playerId) {
+    return null;
+  }
+
+  const index = endGameResults(room, snapshot).findIndex((result) => result.id === playerId);
+  return index >= 0 ? index + 1 : null;
 }
 
 function endGameResults(room, snapshot) {
@@ -6734,22 +6872,30 @@ function drawControllerAimCursor(ctx, player, camera, cursor, colors) {
   fillSolidDisk(ctx, x, y, 1);
 }
 
-function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSeconds = 0, playersLeft = 0) {
+function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSeconds = 0, playersLeft = 0, layout = {}) {
   if (!player) {
-    return;
+    return null;
   }
 
-  const width = 112;
-  const height = 58;
+  const header = String(layout.header || "").trim().toUpperCase();
+  const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
+  const width = HUD_PANEL_MIN_WIDTH;
+  const height = 58 + headerOffset;
   const panel = mainHudPanelRect(ctx, width, height);
+  if (Number.isFinite(layout.x)) {
+    panel.x = Math.round(layout.x);
+  }
+  if (Number.isFinite(layout.y)) {
+    panel.y = Math.round(layout.y);
+  }
   const x = panel.x;
   const y = panel.y;
-  const padding = 4;
+  const padding = HUD_PANEL_PADDING;
   const contentX = x + padding;
   const contentRight = x + width - padding;
-  const hpY = y + padding;
-  const rowY = y + 18;
-  const rowStep = 10;
+  const hpY = y + padding + headerOffset;
+  const rowY = y + 18 + headerOffset;
+  const rowStep = HUD_PANEL_ROW_STEP;
   const hp = clamp(player.health ?? 0, 0, player.maxHealth || 1);
   const maxHp = Math.max(1, player.maxHealth || 1);
   const healthBars = clamp(
@@ -6764,6 +6910,14 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   ctx.fillRect(x, y, width, height);
   ctx.fillStyle = colors.background;
   ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+
+  if (header) {
+    textRenderer.draw(ctx, header, contentX, y + padding, {
+      fontSize: 8,
+      color: colors.foreground,
+      width: contentRight - contentX
+    });
+  }
 
   textRenderer.draw(ctx, "HP", contentX, hpY, {
     fontSize: 8,
@@ -6784,10 +6938,11 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     })) {
       drawHudMessage(ctx, `${killDropAmount} DIAMOND${killDropAmount === 1 ? "" : "S"}`, contentX, rowY + rowStep * 3, textRenderer, colors);
     }
-    return;
+    return panel;
   }
 
   drawHudKillRow(ctx, player.kills || 0, playersLeft, contentX, contentRight, rowY + rowStep * 3, textRenderer, colors);
+  return panel;
 }
 
 function mainHudPanelRect(ctx, width, height) {
@@ -6797,6 +6952,12 @@ function mainHudPanelRect(ctx, width, height) {
     width,
     height
   };
+}
+
+function hudPanelHeightForRows(rowCount) {
+  return HUD_PANEL_PADDING * 2 +
+    HUD_PANEL_TEXT_HEIGHT +
+    Math.max(0, Math.floor(rowCount) - 1) * HUD_PANEL_ROW_STEP;
 }
 
 function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
@@ -7243,7 +7404,7 @@ function drawHudKillRow(ctx, kills, playersLeft, labelX, countRight, y, textRend
   const textOptions = { fontSize: 8 };
   const killCount = Math.min(999, Math.max(0, Math.floor(Number(kills) || 0)));
   const leftCount = Math.min(999, Math.max(0, Math.floor(Number(playersLeft) || 0)));
-  const text = `${killCount} KILLS / ${leftCount} LEFT`;
+  const text = `${killCountLabel(killCount)} / ${leftCount} ALIVE`;
   const width = textRenderer.measure(text, textOptions);
 
   textRenderer.draw(ctx, text, labelX, y, {
