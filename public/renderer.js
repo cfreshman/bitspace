@@ -142,8 +142,6 @@ const PLAYER_MAP_CSS_SCALE = 1;
 const PLAYER_MAP_MINI_SHIP_SCALE = 0.6;
 const PLAYER_MAP_MINI_SHIP_OUTLINE = 3;
 const PLAYER_MAP_MARGIN = 8;
-const SCENE_CIRCLE_BORDER_PIXELS = 1;
-const SCENE_CIRCLE_VOID_RING_PIXELS = 2;
 const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
 const PLAYER_MAP_STORM_NONE = 0;
 const PLAYER_MAP_STORM_BAND = 1;
@@ -2989,9 +2987,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       beginWorldViewport(ctx, colors);
       endWorldViewport(ctx);
     }
-    if (shouldDrawHud) {
-      drawSceneCircleBorder(ctx, colors);
-    }
     if (shouldDrawHud && (options.room || Object.keys(options.roomButtons || {}).length > 0)) {
       drawRoomOverlay(ctx, options, null, colors, textRenderer);
     }
@@ -3210,10 +3205,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawBotDebugWorldOverlay(ctx, options.botDebugOverlay, camera);
     endWorldViewport(ctx);
   }
-  if (shouldDrawHud) {
-    drawSceneCircleBorder(ctx, colors);
-  }
-
   if (shouldDrawHud) measureBucket("hudMs", () => {
     const leaveConfirmActive = options.leaveConfirm?.active === true;
     if (options.room?.state === "active" && !leaveConfirmActive) {
@@ -3412,19 +3403,6 @@ function drawVisibleBackground(ctx, asteroid, camera, visibility, colors) {
       }
     }
   }
-}
-
-function drawSceneCircleBorder(ctx, colors) {
-  if (typeof ctx.drawCircleBorder !== "function") {
-    return;
-  }
-
-  ctx.drawCircleBorder(colors.background, SCENE_CIRCLE_BORDER_PIXELS);
-  ctx.drawCircleBorder(
-    colors.backing || "#000000",
-    SCENE_CIRCLE_VOID_RING_PIXELS,
-    SCENE_CIRCLE_BORDER_PIXELS
-  );
 }
 
 function endWorldViewport(ctx) {
