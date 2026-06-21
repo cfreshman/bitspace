@@ -1,5 +1,5 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
-import { BUILD_DIRECTION_STEPS, buildDirectionAngle, firstTileAlongBuildRay } from "/shared/build.js";
+import { buildClosestTileRing, buildTileVisibleFromOrigin } from "/shared/build.js";
 import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
 import {
@@ -1058,6 +1058,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   const worldRenderPlayers = visibility
     ? renderPlayers.filter((player) => playerTouchesAsteroidVisibility(visibility, player))
     : renderPlayers;
+  const localShipDrawsAfterVisibility = Boolean(visibility && localPlayer?.alive);
 
   if (options.playerMapLarge && options.playerMap?.cells && options.asteroid) {
     drawFullPlayerMapFrame(ctx, options, colors);
@@ -1099,10 +1100,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       drawEntity(ctx, entity, camera, options, colors, textRenderer);
     }
 
-    if (options.build?.active && localPlayer?.alive && options.asteroid) {
-      drawBuildPreview(ctx, options.asteroid, localPlayer, renderPlayers, camera, options.build, colors);
-    }
-
     for (const renderPlayer of worldRenderPlayers) {
       if (renderPlayer.thrusting) {
         emitThrusterParticles(particleState, renderPlayer, options.dtSeconds);
@@ -1122,6 +1119,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         drawWithoutWorldMask(ctx, () => {
           drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
         });
+      }
+      if (localShipDrawsAfterVisibility && renderPlayer.id === localPlayer.id) {
+        continue;
       }
       drawShip(
         ctx,
@@ -1147,6 +1147,27 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
         });
       }
+    }
+
+    if (localShipDrawsAfterVisibility) {
+      drawWithoutWorldMask(ctx, () => {
+        drawShip(
+          ctx,
+          localPlayer,
+          camera,
+          options.asteroid,
+          colors,
+          options.timeSeconds ?? snapshot.tick / 60,
+          textRenderer,
+          options.room?.state === "ended"
+        );
+      });
+    }
+
+    if (options.build?.active && localPlayer?.alive && options.asteroid) {
+      drawWithoutWorldMask(ctx, () => {
+        drawBuildPreview(ctx, options.asteroid, localPlayer, renderPlayers, camera, options.build, colors);
+      });
     }
 
     for (const renderPlayer of worldRenderPlayers) {
@@ -4834,7 +4855,11 @@ function isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize) {
   }
 
   const index = tileY * asteroid.widthTiles + tileX;
-  if (!isPlayableTile(asteroid, tileX, tileY) || asteroid.tiles[index] !== ASTEROID_TILE.empty) {
+  if (
+    !isPlayableTile(asteroid, tileX, tileY) ||
+    asteroid.tiles[index] !== ASTEROID_TILE.empty ||
+    Number(asteroid.storm?.[index] || STORM_STATE.safe) !== STORM_STATE.safe
+  ) {
     return false;
   }
 
@@ -4846,30 +4871,31 @@ function isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize) {
 
 function drawBuildAreaOutline(ctx, asteroid, player, players, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY) {
   const validTiles = new Set();
-
-  for (let step = 0; step < BUILD_DIRECTION_STEPS; step += 1) {
-    const tile = firstTileAlongBuildRay({
-      widthTiles: asteroid.widthTiles,
-      heightTiles: asteroid.heightTiles,
-      tileSize,
-      startX: player.x,
-      startY: player.y,
-      angle: buildDirectionAngle(step),
-      isCandidate(tileX, tileY) {
-        return tileX >= minTileX &&
-          tileX <= maxTileX &&
-          tileY >= minTileY &&
-          tileY <= maxTileY &&
-          isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize);
-      },
-      isBlocked(tileX, tileY) {
-        return isBuildRayBlockedTile(asteroid, tileX, tileY);
-      }
-    });
-
-    if (tile) {
-      validTiles.add(tileKey(tile.tileX, tile.tileY));
+  const tiles = buildClosestTileRing({
+    widthTiles: asteroid.widthTiles,
+    heightTiles: asteroid.heightTiles,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    originRadius: player.radius || ENGINE.ship.radius || 0,
+    maxDistance: ENGINE.build.radiusTiles * tileSize,
+    isCandidate(tileX, tileY) {
+      return tileX >= minTileX &&
+        tileX <= maxTileX &&
+        tileY >= minTileY &&
+        tileY <= maxTileY &&
+        isBuildPreviewTile(asteroid, player, players, tileX, tileY, tileSize);
+    },
+    isNormallyVisible(tileX, tileY) {
+      return isBuildPreviewTileNormallyVisible(asteroid, player, tileX, tileY, tileSize);
+    },
+    isCornerVisible(tileX, tileY) {
+      return isBuildPreviewTileCornerVisible(asteroid, player, tileX, tileY, tileSize);
     }
+  });
+
+  for (const tile of tiles) {
+    validTiles.add(tileKey(tile.tileX, tile.tileY));
   }
 
   const filledPixels = buildInsetPixelMask(validTiles, tileSize);
@@ -4891,10 +4917,31 @@ function drawBuildAreaOutline(ctx, asteroid, player, players, camera, tileSize, 
   }
 }
 
-function isBuildRayBlockedTile(asteroid, tileX, tileY) {
-  const index = tileY * asteroid.widthTiles + tileX;
-  return isAsteroidRockTile(asteroid.tiles[index]) ||
-    !isPlayableTile(asteroid, tileX, tileY);
+function isBuildPreviewTileNormallyVisible(asteroid, player, tileX, tileY, tileSize) {
+  return buildTileVisibleFromOrigin({
+    tileX,
+    tileY,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    raycast(angle, distance) {
+      return raycastAsteroid(asteroid, player.x, player.y, angle, distance);
+    }
+  });
+}
+
+function isBuildPreviewTileCornerVisible(asteroid, player, tileX, tileY, tileSize) {
+  return buildTileVisibleFromOrigin({
+    tileX,
+    tileY,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    includeCorners: true,
+    raycast(angle, distance) {
+      return raycastAsteroid(asteroid, player.x, player.y, angle, distance);
+    }
+  });
 }
 
 function buildInsetPixelMask(validTiles, tileSize) {

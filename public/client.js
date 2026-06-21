@@ -1,5 +1,5 @@
 import { ENGINE, RENDER } from "/shared/constants.js";
-import { firstTileAlongBuildRay } from "/shared/build.js";
+import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
   blockingTilesAlongSegment,
@@ -6862,7 +6862,8 @@ function buildWallAtMouse(options = {}) {
   if (isLocalBotGame()) {
     buildPlayerWall(state.localGame.arena, LOCAL_BOT_PLAYER_ID, {
       tileX: target.tileX,
-      tileY: target.tileY
+      tileY: target.tileY,
+      angle: target.angle
     });
     applyClientAsteroidUpdates(takeAsteroidUpdates(state.localGame.arena));
     syncLocalArenaSnapshot(timeSeconds);
@@ -6875,7 +6876,8 @@ function buildWallAtMouse(options = {}) {
 
   socket.emit(CLIENT_EVENTS.buildWall, {
     tileX: target.tileX,
-    tileY: target.tileY
+    tileY: target.tileY,
+    angle: target.angle
   });
 }
 
@@ -6922,6 +6924,7 @@ function buildTargetFromMouse() {
     playable: true,
     clear: true,
     affordable,
+    angle,
     valid: affordable
   };
 }
@@ -6938,35 +6941,76 @@ function buildAngleForPlayer(player) {
 }
 
 function closestClientBuildTile(player, angle, tileSize) {
-  return firstTileAlongBuildRay({
+  const tiles = clientBuildTargetTiles(player, tileSize);
+  return closestBuildTileByCenterAngle({
+    tiles,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    angle
+  });
+}
+
+function clientBuildTargetTiles(player, tileSize) {
+  const maxDistance = ENGINE.build.radiusTiles * tileSize;
+  return buildClosestTileRing({
     widthTiles: state.asteroid.widthTiles,
     heightTiles: state.asteroid.heightTiles,
     tileSize,
     startX: player.x,
     startY: player.y,
-    angle,
+    originRadius: player.radius || ENGINE.ship.radius || 0,
+    maxDistance,
     isCandidate(tileX, tileY) {
       return isClientBuildCandidate(player, tileX, tileY, tileSize);
     },
-    isBlocked(tileX, tileY) {
-      return isClientBuildRayBlocked(tileX, tileY);
+    isNormallyVisible(tileX, tileY) {
+      return isClientBuildTileNormallyVisible(player, tileX, tileY, tileSize);
+    },
+    isCornerVisible(tileX, tileY) {
+      return isClientBuildTileCornerVisible(player, tileX, tileY, tileSize);
+    }
+  });
+}
+
+function isClientBuildTileNormallyVisible(player, tileX, tileY, tileSize) {
+  return buildTileVisibleFromOrigin({
+    tileX,
+    tileY,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    raycast(angle, distance) {
+      return raycastAsteroid(state.asteroid, player.x, player.y, angle, distance);
+    }
+  });
+}
+
+function isClientBuildTileCornerVisible(player, tileX, tileY, tileSize) {
+  return buildTileVisibleFromOrigin({
+    tileX,
+    tileY,
+    tileSize,
+    startX: player.x,
+    startY: player.y,
+    includeCorners: true,
+    raycast(angle, distance) {
+      return raycastAsteroid(state.asteroid, player.x, player.y, angle, distance);
     }
   });
 }
 
 function isClientBuildCandidate(player, tileX, tileY, tileSize) {
+  if (tileX < 0 || tileY < 0 || tileX >= state.asteroid.widthTiles || tileY >= state.asteroid.heightTiles) {
+    return false;
+  }
+
   const index = tileY * state.asteroid.widthTiles + tileX;
   return tileWithinBuildRadius(player, tileX, tileY, tileSize) &&
     state.asteroid.tiles[index] === ASTEROID_TILE.empty &&
     isPlayableBuildIndex(index) &&
     !isStormBuildIndex(index) &&
     !tileOverlapsVisiblePlayer(tileX, tileY, tileSize);
-}
-
-function isClientBuildRayBlocked(tileX, tileY) {
-  const index = tileY * state.asteroid.widthTiles + tileX;
-  return isAsteroidRockTile(state.asteroid.tiles[index]) ||
-    !isPlayableBuildIndex(index);
 }
 
 function tileWithinBuildRadius(player, tileX, tileY, tileSize) {
