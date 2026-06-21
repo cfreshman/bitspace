@@ -1913,6 +1913,8 @@ function updateMenuSimulation(timeSeconds) {
   const canThrust = hasMoveIntent;
 
   updateShipFacing(player, move, dtSeconds);
+  player.moveX = move.x;
+  player.moveY = move.y;
 
   if (canThrust) {
     applyThrusterAcceleration(player, move, effects, dtSeconds);

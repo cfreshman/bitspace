@@ -89,7 +89,7 @@ const REAR_ORBS = Object.freeze([
   { rear: 7, side: 5, layer: "back" },
   { rear: 9, side: 0, layer: "front" }
 ]);
-const THRUSTER_PARTICLE_RATE = 70;
+const THRUSTER_PARTICLE_RATE = 140;
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
 const MINING_RAY_SIDE_WAVE_AMPLITUDE = 0.5;
@@ -9871,49 +9871,77 @@ function breakPixelWord(word, maxWidth, textRenderer, options) {
 }
 
 function emitThrusterParticles(state, player, dtSeconds) {
+  const basis = thrusterParticleBasis(player);
+  if (!basis) {
+    return;
+  }
+
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const rearAngle = player.angle + Math.PI;
-  const rear = {
-    x: Math.cos(rearAngle),
-    y: Math.sin(rearAngle)
-  };
-  const side = {
-    x: Math.cos(player.angle + Math.PI / 2),
-    y: Math.sin(player.angle + Math.PI / 2)
-  };
-  const center = boosterClusterCenter(player, rear, side);
-  const origin = {
-    x: center.x + rear.x * (SMALL_ORB_RADIUS + 1),
-    y: center.y + rear.y * (SMALL_ORB_RADIUS + 1)
-  };
+  const { rear, side } = basis;
+  const origins = rearEnginePlumeOrigins(player, rear, side);
   const key = player.id || String(player.number);
   const particleMultiplier = effects.thrusterParticleMultiplier;
-  const carry = (state.emitCarry.get(key) || 0) + THRUSTER_PARTICLE_RATE * particleMultiplier * dtSeconds;
-  const count = Math.floor(carry);
-  state.emitCarry.set(key, carry - count);
 
-  for (let index = 0; index < count; index += 1) {
-    const seed = state.nextSeed();
-    const sideJitter = (randomUnit(seed, 1) - 0.5) * 4;
-    const rearJitter = (randomUnit(seed, 2) - 0.5) * 2;
-    const speed = (38 + randomUnit(seed, 3) * 72) * Math.sqrt(particleMultiplier);
-    const spread = (randomUnit(seed, 4) - 0.5) * 42 * Math.sqrt(particleMultiplier);
-    const life = 0.22 + randomUnit(seed, 5) * 0.34;
+  for (let originIndex = 0; originIndex < origins.length; originIndex += 1) {
+    const origin = origins[originIndex];
+    const originKey = `${key}:thruster:${originIndex}`;
+    const carry =
+      (state.emitCarry.get(originKey) || 0) +
+      (THRUSTER_PARTICLE_RATE * particleMultiplier * dtSeconds) / origins.length;
+    const count = Math.floor(carry);
+    state.emitCarry.set(originKey, carry - count);
 
-    state.particles.push({
-      x: origin.x + side.x * sideJitter + rear.x * rearJitter,
-      y: origin.y + side.y * sideJitter + rear.y * rearJitter,
-      vx: (player.vx || 0) + rear.x * speed + side.x * spread,
-      vy: (player.vy || 0) + rear.y * speed + side.y * spread,
-      age: randomUnit(seed, 6) * 0.025,
-      life,
-      seed
-    });
+    for (let index = 0; index < count; index += 1) {
+      const seed = state.nextSeed();
+      const sideJitter = (randomUnit(seed, 1) - 0.5) * 2;
+      const rearJitter = (randomUnit(seed, 2) - 0.5) * 2;
+      const speed = (72 + randomUnit(seed, 3) * 110) * Math.sqrt(particleMultiplier);
+      const spread = (randomUnit(seed, 4) - 0.5) * 52 * Math.sqrt(particleMultiplier);
+      const life = 0.22 + randomUnit(seed, 5) * 0.34;
+
+      state.particles.push({
+        x: origin.x + side.x * sideJitter + rear.x * rearJitter,
+        y: origin.y + side.y * sideJitter + rear.y * rearJitter,
+        vx: (player.vx || 0) + rear.x * speed + side.x * spread,
+        vy: (player.vy || 0) + rear.y * speed + side.y * spread,
+        age: randomUnit(seed, 6) * 0.025,
+        life,
+        heat: 1,
+        heatDecay: 3.8 + randomUnit(seed, 7) * 2.2,
+        seed
+      });
+    }
   }
 
   if (state.particles.length > MAX_PARTICLES) {
     state.particles.splice(0, state.particles.length - MAX_PARTICLES);
   }
+}
+
+function thrusterParticleBasis(player) {
+  const rawMoveX = Number(player?.moveX ?? player?.input?.moveX);
+  const rawMoveY = Number(player?.moveY ?? player?.input?.moveY);
+  const moveX = Number.isFinite(rawMoveX) ? rawMoveX : 0;
+  const moveY = Number.isFinite(rawMoveY) ? rawMoveY : 0;
+  const moveMagnitude = Math.hypot(moveX, moveY);
+  if (moveMagnitude <= 0.0001) {
+    return null;
+  }
+
+  const forward = {
+    x: moveX / moveMagnitude,
+    y: moveY / moveMagnitude
+  };
+  return {
+    rear: {
+      x: -forward.x,
+      y: -forward.y
+    },
+    side: {
+      x: -forward.y,
+      y: forward.x
+    }
+  };
 }
 
 function emitMiningParticles(state, player, dtSeconds) {
@@ -9966,19 +9994,15 @@ function emitMiningParticles(state, player, dtSeconds) {
   }
 }
 
-function boosterClusterCenter(player, rear, side) {
-  const sum = REAR_ORBS.reduce(
-    (total, orb) => ({
-      rear: total.rear + orb.rear,
-      side: total.side + orb.side
-    }),
-    { rear: 0, side: 0 }
-  );
+function rearEnginePlumeOrigins(player, rear, side) {
+  const mainRadius = shipMainRadius(player);
+  const geometryScale = shipGeometryScaleForRadius(mainRadius);
+  const smallOrbRadius = shipSmallOrbRadius(geometryScale);
 
-  return {
-    x: player.x + rear.x * (sum.rear / REAR_ORBS.length) + side.x * (sum.side / REAR_ORBS.length),
-    y: player.y + rear.y * (sum.rear / REAR_ORBS.length) + side.y * (sum.side / REAR_ORBS.length)
-  };
+  return REAR_ORBS.map((orb) => ({
+    x: player.x + rear.x * (orb.rear * geometryScale + smallOrbRadius + 1) + side.x * orb.side * geometryScale,
+    y: player.y + rear.y * (orb.rear * geometryScale + smallOrbRadius + 1) + side.y * orb.side * geometryScale
+  }));
 }
 
 function updateParticles(particles, dtSeconds) {
@@ -9993,6 +10017,9 @@ function updateParticles(particles, dtSeconds) {
 
     particle.x += particle.vx * dtSeconds;
     particle.y += particle.vy * dtSeconds;
+    if (particle.heat > 0) {
+      particle.heat = Math.max(0, particle.heat - (particle.heatDecay || 4) * dtSeconds);
+    }
 
     const drag = Math.pow(0.55, dtSeconds);
     particle.vx *= drag;
@@ -10010,9 +10037,32 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
     }
 
     const screen = worldToScreen(particle, camera);
+    if ((particle.heat || 0) > 0.05) {
+      drawHotParticle(ctx, screen, particle);
+      continue;
+    }
+
     const size = particle.size || (progress < 0.18 && particle.seed % 7 === 0 ? 2 : 1);
     ctx.fillRect(screen.x, screen.y, size, size);
   }
+}
+
+function drawHotParticle(ctx, screen, particle) {
+  const speed = Math.hypot(particle.vx || 0, particle.vy || 0);
+  if (speed > 0.0001) {
+    const axisX = Math.round((particle.vx || 0) / speed);
+    const axisY = Math.round((particle.vy || 0) / speed);
+    ctx.fillRect(screen.x - axisX, screen.y - axisY, 1, 1);
+    ctx.fillRect(screen.x, screen.y, 1, 1);
+    ctx.fillRect(screen.x + axisX, screen.y + axisY, 1, 1);
+    return;
+  }
+
+  ctx.fillRect(screen.x, screen.y, 1, 1);
+  ctx.fillRect(screen.x - 1, screen.y, 1, 1);
+  ctx.fillRect(screen.x + 1, screen.y, 1, 1);
+  ctx.fillRect(screen.x, screen.y - 1, 1, 1);
+  ctx.fillRect(screen.x, screen.y + 1, 1, 1);
 }
 
 function drawSphere(ctx, cx, cy, radius, angle, colors, occluders = []) {

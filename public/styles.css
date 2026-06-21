@@ -50,6 +50,10 @@ body {
   color: #74acef;
 }
 
+.perf-debug[hidden] {
+  display: none;
+}
+
 .perf-debug-copy {
   box-sizing: border-box;
   height: 22px;
