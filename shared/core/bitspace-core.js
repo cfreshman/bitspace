@@ -1,5 +1,6 @@
 import { ASTEROID_TILE } from "../asteroid.js";
 import { ENGINE, RENDER } from "../constants.js";
+import { createSeededRandom } from "../math.js";
 
 const BLOCKER_STRIDE = 6;
 const VISIBILITY_SEGMENT_STRIDE = 4;
@@ -7,6 +8,7 @@ const TRAJECTORY_OUT_DOUBLES = 4 + 24 * 2;
 const PATH_MAX_INDEXES = 4096;
 const PATH_META_DOUBLES = 4;
 const VISIBILITY_META_DOUBLES = 6;
+const HUCK_ROCK_MAX_HULL_POINTS = 14;
 
 let modulePromise = null;
 let coreModule = null;
@@ -37,6 +39,21 @@ let visibilitySyncedAsteroid = null;
 let visibilitySyncedKey = "";
 let stormRowPtr = 0;
 let stormRowCapacity = 0;
+let stormPermPtr = 0;
+let stormPermKey = "";
+let stormStatePtr = 0;
+let stormStateCapacity = 0;
+let stormStateSyncedAsteroid = null;
+let stormStateSyncedKey = "";
+let huckRockHullPtr = 0;
+let renderLayerPtr = 0;
+let renderLayerCapacity = 0;
+let stormRunPtr = 0;
+let stormRunCapacity = 0;
+let layerMaskRowPtr = 0;
+let layerMaskRowCapacity = 0;
+let layerMaskSpanPtr = 0;
+let layerMaskSpanCapacity = 0;
 let loadStartedAt = nowMs();
 let loadFinishedAt = 0;
 let loadError = null;
@@ -77,7 +94,36 @@ const renderStats = {
   stormNativeCalls: 0,
   stormNotReady: 0,
   stormFailed: 0,
-  stormTotalMs: 0
+  stormTotalMs: 0,
+  stormLayerCalls: 0,
+  stormLayerNativeCalls: 0,
+  stormLayerNotReady: 0,
+  stormLayerFailed: 0,
+  stormLayerTotalMs: 0,
+  huckRockCalls: 0,
+  huckRockNativeCalls: 0,
+  huckRockNotReady: 0,
+  huckRockFailed: 0,
+  huckRockTotalMs: 0,
+  renderLayerCalls: 0,
+  renderLayerNativeCalls: 0,
+  renderLayerNotReady: 0,
+  renderLayerFailed: 0,
+  renderLayerTotalMs: 0,
+  stormRunCalls: 0,
+  stormRunNativeCalls: 0,
+  stormRunNotReady: 0,
+  stormRunFailed: 0,
+  stormRunOverflow: 0,
+  stormRunTotalMs: 0,
+  stormRunMaxRuns: 0,
+  stormBoundaryRunCalls: 0,
+  stormBoundaryRunNativeCalls: 0,
+  stormBoundaryRunNotReady: 0,
+  stormBoundaryRunFailed: 0,
+  stormBoundaryRunOverflow: 0,
+  stormBoundaryRunTotalMs: 0,
+  stormBoundaryRunMaxRuns: 0
 };
 
 export function bitspaceCoreReady() {
@@ -136,7 +182,51 @@ export function bitspaceCoreStats() {
     stormAvgMs: renderStats.stormNativeCalls > 0
       ? Math.round((renderStats.stormTotalMs / renderStats.stormNativeCalls) * 1000) / 1000
       : 0,
-    stormTotalMs: Math.round(renderStats.stormTotalMs * 1000) / 1000
+    stormTotalMs: Math.round(renderStats.stormTotalMs * 1000) / 1000,
+    stormLayerCalls: renderStats.stormLayerCalls,
+    stormLayerNativeCalls: renderStats.stormLayerNativeCalls,
+    stormLayerNotReady: renderStats.stormLayerNotReady,
+    stormLayerFailed: renderStats.stormLayerFailed,
+    stormLayerAvgMs: renderStats.stormLayerNativeCalls > 0
+      ? Math.round((renderStats.stormLayerTotalMs / renderStats.stormLayerNativeCalls) * 1000) / 1000
+      : 0,
+    stormLayerTotalMs: Math.round(renderStats.stormLayerTotalMs * 1000) / 1000,
+    huckRockCalls: renderStats.huckRockCalls,
+    huckRockNativeCalls: renderStats.huckRockNativeCalls,
+    huckRockNotReady: renderStats.huckRockNotReady,
+    huckRockFailed: renderStats.huckRockFailed,
+    huckRockAvgMs: renderStats.huckRockNativeCalls > 0
+      ? Math.round((renderStats.huckRockTotalMs / renderStats.huckRockNativeCalls) * 1000) / 1000
+      : 0,
+    huckRockTotalMs: Math.round(renderStats.huckRockTotalMs * 1000) / 1000,
+    renderLayerCalls: renderStats.renderLayerCalls,
+    renderLayerNativeCalls: renderStats.renderLayerNativeCalls,
+    renderLayerNotReady: renderStats.renderLayerNotReady,
+    renderLayerFailed: renderStats.renderLayerFailed,
+    renderLayerAvgMs: renderStats.renderLayerNativeCalls > 0
+      ? Math.round((renderStats.renderLayerTotalMs / renderStats.renderLayerNativeCalls) * 1000) / 1000
+      : 0,
+    renderLayerTotalMs: Math.round(renderStats.renderLayerTotalMs * 1000) / 1000,
+    stormRunCalls: renderStats.stormRunCalls,
+    stormRunNativeCalls: renderStats.stormRunNativeCalls,
+    stormRunNotReady: renderStats.stormRunNotReady,
+    stormRunFailed: renderStats.stormRunFailed,
+    stormRunOverflow: renderStats.stormRunOverflow,
+    stormRunAvgMs: renderStats.stormRunNativeCalls > 0
+      ? Math.round((renderStats.stormRunTotalMs / renderStats.stormRunNativeCalls) * 1000) / 1000
+      : 0,
+    stormRunTotalMs: Math.round(renderStats.stormRunTotalMs * 1000) / 1000,
+    stormRunMaxRuns: renderStats.stormRunMaxRuns,
+    stormBoundaryRunCalls: renderStats.stormBoundaryRunCalls,
+    stormBoundaryRunNativeCalls: renderStats.stormBoundaryRunNativeCalls,
+    stormBoundaryRunNotReady: renderStats.stormBoundaryRunNotReady,
+    stormBoundaryRunFailed: renderStats.stormBoundaryRunFailed,
+    stormBoundaryRunOverflow: renderStats.stormBoundaryRunOverflow,
+    stormBoundaryRunAvgMs: renderStats.stormBoundaryRunNativeCalls > 0
+      ? Math.round((renderStats.stormBoundaryRunTotalMs / renderStats.stormBoundaryRunNativeCalls) * 1000) / 1000
+      : 0,
+    stormBoundaryRunTotalMs: Math.round(renderStats.stormBoundaryRunTotalMs * 1000) / 1000,
+    stormBoundaryRunMaxRuns: renderStats.stormBoundaryRunMaxRuns
   };
 }
 
@@ -174,6 +264,35 @@ export function resetBitspaceCoreStats() {
   renderStats.stormNotReady = 0;
   renderStats.stormFailed = 0;
   renderStats.stormTotalMs = 0;
+  renderStats.stormLayerCalls = 0;
+  renderStats.stormLayerNativeCalls = 0;
+  renderStats.stormLayerNotReady = 0;
+  renderStats.stormLayerFailed = 0;
+  renderStats.stormLayerTotalMs = 0;
+  renderStats.huckRockCalls = 0;
+  renderStats.huckRockNativeCalls = 0;
+  renderStats.huckRockNotReady = 0;
+  renderStats.huckRockFailed = 0;
+  renderStats.huckRockTotalMs = 0;
+  renderStats.renderLayerCalls = 0;
+  renderStats.renderLayerNativeCalls = 0;
+  renderStats.renderLayerNotReady = 0;
+  renderStats.renderLayerFailed = 0;
+  renderStats.renderLayerTotalMs = 0;
+  renderStats.stormRunCalls = 0;
+  renderStats.stormRunNativeCalls = 0;
+  renderStats.stormRunNotReady = 0;
+  renderStats.stormRunFailed = 0;
+  renderStats.stormRunOverflow = 0;
+  renderStats.stormRunTotalMs = 0;
+  renderStats.stormRunMaxRuns = 0;
+  renderStats.stormBoundaryRunCalls = 0;
+  renderStats.stormBoundaryRunNativeCalls = 0;
+  renderStats.stormBoundaryRunNotReady = 0;
+  renderStats.stormBoundaryRunFailed = 0;
+  renderStats.stormBoundaryRunOverflow = 0;
+  renderStats.stormBoundaryRunTotalMs = 0;
+  renderStats.stormBoundaryRunMaxRuns = 0;
   return bitspaceCoreStats();
 }
 
@@ -556,11 +675,11 @@ export function stormPatternRowsNative(asteroid, tileX, tileY, size, timeSeconds
 
   const module = coreModule;
   ensureStormRowBuffer(module, size);
+  syncStormPermutation(module, `${asteroid.seed || "default"}:storm-visual`);
   const frame = Math.floor(Number(timeSeconds || 0) * Number(constants.fps || 20));
-  const seedHash = hashString32(`${asteroid.seed || "default"}:storm-visual`);
   const start = nowMs();
   const ok = module._bs_storm_pattern_rows(
-    seedHash,
+    stormPermPtr,
     Math.floor(Number(tileX || 0)),
     Math.floor(Number(tileY || 0)),
     Math.floor(Number(size || 0)),
@@ -582,6 +701,330 @@ export function stormPatternRowsNative(asteroid, tileX, tileY, size, timeSeconds
 
   const rows = module.HEAPU32.subarray(stormRowPtr >> 2, (stormRowPtr >> 2) + size);
   return Uint32Array.from(rows);
+}
+
+export function stormLayerNative(asteroid, camera, width, height, timeSeconds, threshold, options = {}) {
+  renderStats.stormLayerCalls += 1;
+  if (!coreModule) {
+    renderStats.stormLayerNotReady += 1;
+    return null;
+  }
+  if (!asteroid?.storm || !camera || width <= 0 || height <= 0) {
+    renderStats.stormLayerFailed += 1;
+    return null;
+  }
+
+  const tileCount = (asteroid.widthTiles || 0) * (asteroid.heightTiles || 0);
+  if (!tileCount || !Array.isArray(asteroid.storm)) {
+    renderStats.stormLayerFailed += 1;
+    return null;
+  }
+
+  const module = coreModule;
+  syncStormGrid(module, asteroid);
+  const hasPlayableGrid = gridLikeLength(asteroid.tiles) === tileCount &&
+    gridLikeLength(asteroid.playable) === tileCount;
+  if (hasPlayableGrid) {
+    syncVisibilityGrid(module, asteroid);
+  }
+  syncStormPermutation(module, `${asteroid.seed || "default"}:storm-visual`);
+  ensureRenderLayerBuffer(module, width * height);
+  const mask = syncLayerMask(module, options.visibility);
+  const constants = options.constants || {};
+  const frame = Math.floor(Number(timeSeconds || 0) * Number(constants.fps || 20));
+  const start = nowMs();
+  const ok = module._bs_render_storm_layer(
+    stormStatePtr,
+    hasPlayableGrid ? visibilityPlayablePtr : 0,
+    stormPermPtr,
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    Number(asteroid.tileSize || RENDER.tileSize),
+    Number(camera.x || 0),
+    Number(camera.y || 0),
+    Math.floor(width),
+    Math.floor(height),
+    Math.floor(Number(options.sourcePadding || 0)),
+    options.noLens ? 0 : Number(options.lensEdgeScale || 1),
+    Number(options.lensPower || 2),
+    Number(options.lensNoiseRadial || 0),
+    Number(options.lensNoiseTangential || 0),
+    Number(options.lensDefectDensity || 0),
+    mask.rowPtr,
+    mask.rowCount,
+    mask.spanPtr,
+    mask.spanCount,
+    mask.offsetY,
+    frame,
+    Number(constants.fps || 20),
+    Number(threshold ?? 0.34),
+    Number(constants.scale || 0.15),
+    Number(constants.speedX ?? -2),
+    Number(constants.speedY ?? 5),
+    Number(constants.speedZ ?? 0.1),
+    renderLayerPtr,
+    renderLayerCapacity
+  );
+  renderStats.stormLayerNativeCalls += 1;
+  renderStats.stormLayerTotalMs += nowMs() - start;
+  if (!ok || ok <= 0) {
+    renderStats.stormLayerFailed += 1;
+    return null;
+  }
+
+  return Uint8Array.from(module.HEAPU8.subarray(renderLayerPtr, renderLayerPtr + width * height));
+}
+
+export function stormRunsNative(asteroid, camera, width, height, timeSeconds, threshold, options = {}) {
+  renderStats.stormRunCalls += 1;
+  if (!coreModule) {
+    renderStats.stormRunNotReady += 1;
+    return null;
+  }
+  if (!asteroid?.storm || !camera || width <= 0 || height <= 0) {
+    renderStats.stormRunFailed += 1;
+    return null;
+  }
+
+  const tileCount = (asteroid.widthTiles || 0) * (asteroid.heightTiles || 0);
+  if (!tileCount || !Array.isArray(asteroid.storm)) {
+    renderStats.stormRunFailed += 1;
+    return null;
+  }
+
+  const module = coreModule;
+  syncStormGrid(module, asteroid);
+  const hasPlayableGrid = gridLikeLength(asteroid.tiles) === tileCount &&
+    gridLikeLength(asteroid.playable) === tileCount;
+  if (hasPlayableGrid) {
+    syncVisibilityGrid(module, asteroid);
+  }
+  syncStormPermutation(module, `${asteroid.seed || "default"}:storm-visual`);
+  const pixelCount = Math.floor(width) * Math.floor(height);
+  ensureRenderLayerBuffer(module, pixelCount);
+  ensureStormRunBuffer(module, Math.max(1024, Math.ceil(pixelCount / 2)));
+  const constants = options.constants || {};
+  const frame = Math.floor(Number(timeSeconds || 0) * Number(constants.fps || 20));
+  const start = nowMs();
+  const count = module._bs_render_storm_runs(
+    stormStatePtr,
+    hasPlayableGrid ? visibilityPlayablePtr : 0,
+    stormPermPtr,
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    Number(asteroid.tileSize || RENDER.tileSize),
+    Number(camera.x || 0),
+    Number(camera.y || 0),
+    Math.floor(width),
+    Math.floor(height),
+    Math.floor(Number(options.sourcePadding || 0)),
+    options.noLens ? 0 : Number(options.lensEdgeScale || 1),
+    Number(options.lensPower || 2),
+    Number(options.lensNoiseRadial || 0),
+    Number(options.lensNoiseTangential || 0),
+    Number(options.lensDefectDensity || 0),
+    frame,
+    Number(constants.fps || 20),
+    Number(threshold ?? 0.34),
+    Number(constants.scale || 0.15),
+    Number(constants.speedX ?? -2),
+    Number(constants.speedY ?? 5),
+    Number(constants.speedZ ?? 0.1),
+    renderLayerPtr,
+    renderLayerCapacity,
+    stormRunPtr,
+    stormRunCapacity * 4
+  );
+  renderStats.stormRunNativeCalls += 1;
+  renderStats.stormRunTotalMs += nowMs() - start;
+  if (!Number.isFinite(count) || count === 0) {
+    renderStats.stormRunFailed += 1;
+    return null;
+  }
+  if (count < 0) {
+    renderStats.stormRunOverflow += 1;
+    renderStats.stormRunFailed += 1;
+    return null;
+  }
+
+  renderStats.stormRunMaxRuns = Math.max(renderStats.stormRunMaxRuns, count);
+  const values = module.HEAP32.subarray(stormRunPtr >> 2, (stormRunPtr >> 2) + count * 4);
+  return Int32Array.from(values);
+}
+
+export function stormBoundaryRunsNative(asteroid, camera, width, height, timeSeconds, threshold, options = {}) {
+  renderStats.stormBoundaryRunCalls += 1;
+  if (!coreModule) {
+    renderStats.stormBoundaryRunNotReady += 1;
+    return null;
+  }
+  if (!asteroid?.storm || !camera || width <= 0 || height <= 0) {
+    renderStats.stormBoundaryRunFailed += 1;
+    return null;
+  }
+
+  const tileCount = (asteroid.widthTiles || 0) * (asteroid.heightTiles || 0);
+  if (
+    !tileCount ||
+    !Array.isArray(asteroid.storm) ||
+    gridLikeLength(asteroid.tiles) !== tileCount ||
+    gridLikeLength(asteroid.playable) !== tileCount
+  ) {
+    renderStats.stormBoundaryRunFailed += 1;
+    return null;
+  }
+
+  const module = coreModule;
+  syncStormGrid(module, asteroid);
+  syncVisibilityGrid(module, asteroid);
+  syncStormPermutation(module, `${asteroid.seed || "default"}:storm-visual`);
+  const pixelCount = Math.floor(width) * Math.floor(height);
+  ensureStormRunBuffer(module, Math.max(1024, Math.ceil(pixelCount / 2)));
+  const constants = options.constants || {};
+  const frame = Math.floor(Number(timeSeconds || 0) * Number(constants.fps || 20));
+  const start = nowMs();
+  const count = module._bs_render_storm_boundary_runs(
+    stormStatePtr,
+    visibilityPlayablePtr,
+    stormPermPtr,
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    Number(asteroid.tileSize || RENDER.tileSize),
+    Number(camera.x || 0),
+    Number(camera.y || 0),
+    Math.floor(width),
+    Math.floor(height),
+    Math.floor(Number(options.sourcePadding || 0)),
+    options.noLens ? 0 : Number(options.lensEdgeScale || 1),
+    Number(options.lensPower || 2),
+    Number(options.lensNoiseRadial || 0),
+    Number(options.lensNoiseTangential || 0),
+    Number(options.lensDefectDensity || 0),
+    frame,
+    Number(constants.fps || 20),
+    Number(threshold ?? 0),
+    Number(constants.scale || 0.15),
+    Number(constants.speedX ?? -2),
+    Number(constants.speedY ?? 5),
+    Number(constants.speedZ ?? 0.1),
+    stormRunPtr,
+    stormRunCapacity * 4
+  );
+  renderStats.stormBoundaryRunNativeCalls += 1;
+  renderStats.stormBoundaryRunTotalMs += nowMs() - start;
+  if (!Number.isFinite(count) || count === 0) {
+    renderStats.stormBoundaryRunFailed += 1;
+    return null;
+  }
+  if (count < 0) {
+    renderStats.stormBoundaryRunOverflow += 1;
+    renderStats.stormBoundaryRunFailed += 1;
+    return null;
+  }
+
+  renderStats.stormBoundaryRunMaxRuns = Math.max(renderStats.stormBoundaryRunMaxRuns, count);
+  const values = module.HEAP32.subarray(stormRunPtr >> 2, (stormRunPtr >> 2) + count * 4);
+  return Int32Array.from(values);
+}
+
+export function huckRockHullNative(seed, centerX, centerY, radius, yaw, pitch, roll) {
+  renderStats.huckRockCalls += 1;
+  if (!coreModule) {
+    renderStats.huckRockNotReady += 1;
+    return null;
+  }
+  if (![centerX, centerY, radius, yaw, pitch, roll].every(Number.isFinite) || radius <= 0) {
+    renderStats.huckRockFailed += 1;
+    return null;
+  }
+
+  const module = coreModule;
+  ensureHuckRockHullBuffer(module);
+  const start = nowMs();
+  const count = module._bs_huck_rock_hull(
+    hashString32(String(seed)),
+    Number(centerX),
+    Number(centerY),
+    Number(radius),
+    Number(yaw),
+    Number(pitch),
+    Number(roll),
+    huckRockHullPtr,
+    HUCK_ROCK_MAX_HULL_POINTS * 2
+  );
+  renderStats.huckRockNativeCalls += 1;
+  renderStats.huckRockTotalMs += nowMs() - start;
+  if (!Number.isInteger(count) || count < 2 || count > HUCK_ROCK_MAX_HULL_POINTS) {
+    renderStats.huckRockFailed += 1;
+    return null;
+  }
+
+  const values = module.HEAPF64.subarray(
+    huckRockHullPtr >> 3,
+    (huckRockHullPtr >> 3) + count * 2
+  );
+  const hull = [];
+  for (let index = 0; index < count; index += 1) {
+    hull.push({
+      x: values[index * 2],
+      y: values[index * 2 + 1]
+    });
+  }
+  return hull;
+}
+
+export function visibilityCheckerLayerNative(asteroid, camera, width, height, options = {}) {
+  renderStats.renderLayerCalls += 1;
+  if (!coreModule) {
+    renderStats.renderLayerNotReady += 1;
+    return null;
+  }
+  if (!asteroid || !camera || width <= 0 || height <= 0) {
+    renderStats.renderLayerFailed += 1;
+    return null;
+  }
+
+  const tileCount = (asteroid.widthTiles || 0) * (asteroid.heightTiles || 0);
+  if (
+    !tileCount ||
+    gridLikeLength(asteroid.tiles) !== tileCount ||
+    gridLikeLength(asteroid.playable) !== tileCount
+  ) {
+    renderStats.renderLayerFailed += 1;
+    return null;
+  }
+
+  const module = coreModule;
+  syncVisibilityGrid(module, asteroid);
+  ensureRenderLayerBuffer(module, width * height);
+  const start = nowMs();
+  const ok = module._bs_render_visibility_checker_layer(
+    visibilityTilePtr,
+    visibilityPlayablePtr,
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    Number(asteroid.tileSize || RENDER.tileSize),
+    Number(camera.x || 0),
+    Number(camera.y || 0),
+    Math.floor(width),
+    Math.floor(height),
+    Math.floor(Number(options.sourcePadding || 0)),
+    Number(options.lensEdgeScale || 1),
+    Number(options.lensPower || 2),
+    Number(options.lensNoiseRadial || 0),
+    Number(options.lensNoiseTangential || 0),
+    Number(options.lensDefectDensity || 0),
+    renderLayerPtr,
+    renderLayerCapacity
+  );
+  renderStats.renderLayerNativeCalls += 1;
+  renderStats.renderLayerTotalMs += nowMs() - start;
+  if (!ok) {
+    renderStats.renderLayerFailed += 1;
+    return null;
+  }
+
+  return Uint8Array.from(module.HEAPU8.subarray(renderLayerPtr, renderLayerPtr + width * height));
 }
 
 function ensureBlockerBuffer(module, requiredDoubles) {
@@ -676,6 +1119,166 @@ function ensureStormRowBuffer(module, requiredRows) {
   }
   stormRowCapacity = Math.max(requiredRows, stormRowCapacity * 2, 32);
   stormRowPtr = module._malloc(stormRowCapacity * Uint32Array.BYTES_PER_ELEMENT);
+}
+
+function syncStormGrid(module, asteroid) {
+  const length = asteroid.storm.length;
+  ensureStormGridBuffer(module, length);
+  const key = [
+    asteroid.seed || "",
+    asteroid.revision || asteroid._revision || 0,
+    asteroid.storm.length,
+    asteroid.widthTiles,
+    asteroid.heightTiles
+  ].join(":");
+  if (stormStateSyncedAsteroid === asteroid && stormStateSyncedKey === key) {
+    return;
+  }
+
+  const heap = module.HEAPU8;
+  for (let index = 0; index < length; index += 1) {
+    heap[stormStatePtr + index] = Number(asteroid.storm[index] || 0);
+  }
+  stormStateSyncedAsteroid = asteroid;
+  stormStateSyncedKey = key;
+}
+
+function ensureStormGridBuffer(module, length) {
+  if (stormStatePtr && stormStateCapacity >= length) {
+    return;
+  }
+  if (stormStatePtr) {
+    module._free(stormStatePtr);
+  }
+  stormStateCapacity = Math.max(length, stormStateCapacity * 2, 1024);
+  stormStatePtr = module._malloc(stormStateCapacity);
+  stormStateSyncedAsteroid = null;
+  stormStateSyncedKey = "";
+}
+
+function syncStormPermutation(module, key) {
+  if (!stormPermPtr) {
+    stormPermPtr = module._malloc(512);
+    stormPermKey = "";
+  }
+  if (stormPermKey === key) {
+    return;
+  }
+
+  const random = createSeededRandom(key);
+  const permutation = Array.from({ length: 256 }, (_value, index) => index);
+  for (let index = permutation.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const value = permutation[index];
+    permutation[index] = permutation[swapIndex];
+    permutation[swapIndex] = value;
+  }
+
+  const heap = module.HEAPU8;
+  for (let index = 0; index < 512; index += 1) {
+    heap[stormPermPtr + index] = permutation[index & 255];
+  }
+  stormPermKey = key;
+}
+
+function syncLayerMask(module, visibility) {
+  const rows = visibility?.spans?.rows;
+  if (!Array.isArray(rows) || rows.length <= 0) {
+    return {
+      rowPtr: 0,
+      rowCount: 0,
+      spanPtr: 0,
+      spanCount: 0,
+      offsetY: 0
+    };
+  }
+
+  let spanCount = 0;
+  for (const spans of rows) {
+    spanCount += Array.isArray(spans) ? spans.length : 0;
+  }
+  if (spanCount <= 0) {
+    return {
+      rowPtr: 0,
+      rowCount: 0,
+      spanPtr: 0,
+      spanCount: 0,
+      offsetY: 0
+    };
+  }
+
+  ensureLayerMaskBuffers(module, rows.length, spanCount);
+  const rowHeap = module.HEAP32;
+  const spanHeap = module.HEAP32;
+  const rowOffset = layerMaskRowPtr >> 2;
+  const spanOffset = layerMaskSpanPtr >> 2;
+  let write = 0;
+  for (let row = 0; row < rows.length; row += 1) {
+    const spans = Array.isArray(rows[row]) ? rows[row] : null;
+    rowHeap[rowOffset + row * 2] = write;
+    rowHeap[rowOffset + row * 2 + 1] = spans ? spans.length : 0;
+    if (!spans) {
+      continue;
+    }
+    for (let index = 0; index < spans.length; index += 1) {
+      spanHeap[spanOffset + write] = Math.floor(Number(spans[index] || 0));
+      write += 1;
+    }
+  }
+
+  return {
+    rowPtr: layerMaskRowPtr,
+    rowCount: rows.length,
+    spanPtr: layerMaskSpanPtr,
+    spanCount: write,
+    offsetY: Math.floor(Number(visibility.spans.offsetY || 0))
+  };
+}
+
+function ensureLayerMaskBuffers(module, rowCount, spanCount) {
+  if (!layerMaskRowPtr || layerMaskRowCapacity < rowCount) {
+    if (layerMaskRowPtr) {
+      module._free(layerMaskRowPtr);
+    }
+    layerMaskRowCapacity = Math.max(rowCount, layerMaskRowCapacity * 2, 128);
+    layerMaskRowPtr = module._malloc(layerMaskRowCapacity * 2 * Int32Array.BYTES_PER_ELEMENT);
+  }
+  if (!layerMaskSpanPtr || layerMaskSpanCapacity < spanCount) {
+    if (layerMaskSpanPtr) {
+      module._free(layerMaskSpanPtr);
+    }
+    layerMaskSpanCapacity = Math.max(spanCount, layerMaskSpanCapacity * 2, 4096);
+    layerMaskSpanPtr = module._malloc(layerMaskSpanCapacity * Int32Array.BYTES_PER_ELEMENT);
+  }
+}
+
+function ensureHuckRockHullBuffer(module) {
+  if (huckRockHullPtr) {
+    return;
+  }
+  huckRockHullPtr = module._malloc(HUCK_ROCK_MAX_HULL_POINTS * 2 * Float64Array.BYTES_PER_ELEMENT);
+}
+
+function ensureRenderLayerBuffer(module, requiredBytes) {
+  if (renderLayerPtr && renderLayerCapacity >= requiredBytes) {
+    return;
+  }
+  if (renderLayerPtr) {
+    module._free(renderLayerPtr);
+  }
+  renderLayerCapacity = Math.max(requiredBytes, renderLayerCapacity * 2, 1024);
+  renderLayerPtr = module._malloc(renderLayerCapacity);
+}
+
+function ensureStormRunBuffer(module, requiredRuns) {
+  if (stormRunPtr && stormRunCapacity >= requiredRuns) {
+    return;
+  }
+  if (stormRunPtr) {
+    module._free(stormRunPtr);
+  }
+  stormRunCapacity = Math.max(requiredRuns, stormRunCapacity * 2, 4096);
+  stormRunPtr = module._malloc(stormRunCapacity * 4 * Int32Array.BYTES_PER_ELEMENT);
 }
 
 function nativePathSearchSupported(arena, options = {}) {
@@ -774,6 +1377,12 @@ function tileCode(tile) {
     return 4;
   }
   return 0;
+}
+
+function gridLikeLength(value) {
+  return (Array.isArray(value) || typeof value === "string" || ArrayBuffer.isView(value))
+    ? value.length
+    : -1;
 }
 
 function hashString32(value) {

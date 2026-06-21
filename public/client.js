@@ -240,7 +240,16 @@ const state = {
     lastNowMs: 0,
     fps: 0,
     frameMs: 0,
+    updateMs: 0,
     renderMs: 0,
+    drawMs: 0,
+    presentMs: 0,
+    minimapMs: 0,
+    stormGpuMs: 0,
+    stormGpuReadMs: 0,
+    stormGpuCalls: 0,
+    stormGpuRequests: 0,
+    stormGpuReady: false,
     panelLastUpdateMs: 0,
     panelLastText: "",
     panelLastColor: ""
@@ -959,6 +968,7 @@ function draw(now = 0) {
   if (state.perfDebug.enabled) {
     updatePerfFrameMetrics(now);
   }
+  const updateStart = state.perfDebug.enabled ? performance.now() : 0;
   const timeSeconds = now / 1000;
   const loadingRoom = isLoadingRoom();
   const readyMenu = isReadyMenu();
@@ -997,8 +1007,11 @@ function draw(now = 0) {
     ? menuPlayer
     : audioPlayerForRender(snapshot, cameraPlayerId);
   updateLocalShipAudio(audioPlayer, timeSeconds);
+  if (state.perfDebug.enabled) {
+    updatePerfUpdateMetrics(performance.now() - updateStart);
+  }
   const renderStart = state.perfDebug.enabled ? performance.now() : 0;
-  renderer.draw(snapshot, {
+  const renderPerf = renderer.draw(snapshot, {
     playerId,
     cameraPlayerId: readyMenu ? MENU_PLAYER_ID : cameraPlayerId,
     asteroid: readyMenu ? state.menu.asteroid : state.asteroid,
@@ -1032,10 +1045,11 @@ function draw(now = 0) {
 	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
 	    botDebugOverlay,
 	    theme: state.theme,
-	    timeSeconds
+	    timeSeconds,
+	    measurePerf: state.perfDebug.enabled
 	  });
   if (state.perfDebug.enabled) {
-    updatePerfRenderMetrics(performance.now() - renderStart);
+    updatePerfRenderMetrics(performance.now() - renderStart, renderPerf);
     updatePerfDebugPanel(now);
   }
   requestAnimationFrame(draw);
@@ -3795,7 +3809,16 @@ function setPerfDebug(enabled) {
   state.perfDebug.lastNowMs = 0;
   state.perfDebug.fps = 0;
   state.perfDebug.frameMs = 0;
+  state.perfDebug.updateMs = 0;
   state.perfDebug.renderMs = 0;
+  state.perfDebug.drawMs = 0;
+  state.perfDebug.presentMs = 0;
+  state.perfDebug.minimapMs = 0;
+  state.perfDebug.stormGpuMs = 0;
+  state.perfDebug.stormGpuReadMs = 0;
+  state.perfDebug.stormGpuCalls = 0;
+  state.perfDebug.stormGpuRequests = 0;
+  state.perfDebug.stormGpuReady = false;
   state.perfDebug.panelLastUpdateMs = 0;
   state.perfDebug.panelLastText = "";
   updatePerfDebugPanel(performance.now(), true);
@@ -3884,7 +3907,7 @@ function updatePerfFrameMetrics(nowMs) {
     : fps;
 }
 
-function updatePerfRenderMetrics(renderMs) {
+function updatePerfRenderMetrics(renderMs, renderPerf = null) {
   if (!Number.isFinite(renderMs)) {
     return;
   }
@@ -3892,6 +3915,31 @@ function updatePerfRenderMetrics(renderMs) {
   state.perfDebug.renderMs = state.perfDebug.renderMs
     ? state.perfDebug.renderMs * (1 - alpha) + renderMs * alpha
     : renderMs;
+  updatePerfMetric("drawMs", renderPerf?.drawMs, alpha);
+  updatePerfMetric("presentMs", renderPerf?.presentMs, alpha);
+  updatePerfMetric("minimapMs", renderPerf?.minimapMs, alpha);
+  updatePerfMetric("stormGpuMs", renderPerf?.stormGpuMs, alpha);
+  updatePerfMetric("stormGpuReadMs", renderPerf?.stormGpuReadMs, alpha);
+  if (Number.isFinite(renderPerf?.stormGpuCalls)) {
+    state.perfDebug.stormGpuCalls = renderPerf.stormGpuCalls;
+  }
+  if (Number.isFinite(renderPerf?.stormGpuRequests)) {
+    state.perfDebug.stormGpuRequests = renderPerf.stormGpuRequests;
+  }
+  state.perfDebug.stormGpuReady = Boolean(renderPerf?.stormGpuReady);
+}
+
+function updatePerfUpdateMetrics(updateMs) {
+  updatePerfMetric("updateMs", updateMs, 0.12);
+}
+
+function updatePerfMetric(key, value, alpha) {
+  if (!Number.isFinite(value)) {
+    return;
+  }
+  state.perfDebug[key] = state.perfDebug[key]
+    ? state.perfDebug[key] * (1 - alpha) + value * alpha
+    : value;
 }
 
 function perfDebugRenderState() {
@@ -3899,7 +3947,16 @@ function perfDebugRenderState() {
   return {
     fps: state.perfDebug.fps,
     frameMs: state.perfDebug.frameMs,
+    updateMs: state.perfDebug.updateMs,
     renderMs: state.perfDebug.renderMs,
+    drawMs: state.perfDebug.drawMs,
+    presentMs: state.perfDebug.presentMs,
+    minimapMs: state.perfDebug.minimapMs,
+    stormGpuMs: state.perfDebug.stormGpuMs,
+    stormGpuReadMs: state.perfDebug.stormGpuReadMs,
+    stormGpuCalls: state.perfDebug.stormGpuCalls,
+    stormGpuRequests: state.perfDebug.stormGpuRequests,
+    stormGpuReady: state.perfDebug.stormGpuReady,
     core
   };
 }
@@ -3935,12 +3992,23 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     "BITSPACE PERF",
     `FPS        ${formatPerfNumber(perf.fps, 1)}`,
     `FRAME MS   ${formatPerfNumber(perf.frameMs, 2)}`,
+    `UPDATE MS  ${formatPerfNumber(perf.updateMs, 2)}`,
     `RENDER MS  ${formatPerfNumber(perf.renderMs, 2)}`,
+    `DRAW MS    ${formatPerfNumber(perf.drawMs, 2)}`,
+    `PRESENT MS ${formatPerfNumber(perf.presentMs, 2)}`,
+    `MINIMAP MS ${formatPerfNumber(perf.minimapMs, 2)}`,
+    `STORM GPU  ${perf.stormGpuReady ? `${perf.stormGpuRequests || 0}->${perf.stormGpuCalls || 0}/${formatPerfNumber(perf.stormGpuMs, 3)}MS` : "OFF"}`,
+    `GPU READ   ${formatPerfNumber(perf.stormGpuReadMs, 3)}MS`,
     `CORE       ${core.ready ? "WASM" : "JS"}`,
     `VIS CALLS  ${core.visibilityNativeCalls || 0}/${core.visibilityCalls || 0}`,
     `VIS AVG    ${formatPerfNumber(core.visibilityAvgMs, 3)}MS`,
     `VIS SEGS   ${core.visibilityMaxSegments || 0}`,
+    `LAYER AVG  ${formatPerfNumber(core.renderLayerAvgMs, 3)}MS`,
     `STORM AVG  ${formatPerfNumber(core.stormAvgMs, 3)}MS`,
+    `STORM LYR  ${formatPerfNumber(core.stormLayerAvgMs, 3)}MS`,
+    `STORM RUN  ${formatPerfNumber(core.stormRunAvgMs, 3)}MS/${core.stormRunMaxRuns || 0}`,
+    `STORM BND  ${formatPerfNumber(core.stormBoundaryRunAvgMs, 3)}MS/${core.stormBoundaryRunMaxRuns || 0}`,
+    `ROCK AVG   ${formatPerfNumber(core.huckRockAvgMs, 3)}MS`,
     `PATH AVG   ${formatPerfNumber(core.pathAvgMs, 3)}MS`,
     `TRAJ AVG   ${formatPerfNumber(core.avgMs, 3)}MS`
   ].join("\n");

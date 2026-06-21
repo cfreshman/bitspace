@@ -17,7 +17,12 @@ import {
   upgradeLevel
 } from "/shared/upgrades.js";
 import {
+  huckRockHullNative,
+  stormBoundaryRunsNative,
   stormPatternRowsNative,
+  stormLayerNative,
+  stormRunsNative,
+  visibilityCheckerLayerNative,
   visibilitySpansFromGridNative,
   visibilitySpansNative
 } from "/shared/core/bitspace-core.js";
@@ -139,6 +144,7 @@ const PLAYER_MAP_MARGIN = 8;
 const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
 const PLAYER_MAP_STORM_NONE = 0;
 const PLAYER_MAP_STORM_BAND = 1;
+const ASTEROID_VISIBILITY_CHECKER_SIZE = 2;
 const playerMapArenaCircleCache = new WeakMap();
 const playerMapStormMaskCache = new WeakMap();
 const PLAYER_MAP_CARDINAL_OFFSETS = Object.freeze([
@@ -172,6 +178,9 @@ const BOT_DEBUG_COLORS = Object.freeze({
 const stormNoiseCache = new Map();
 const stormPatternCache = new Map();
 let stormPatternCacheFrame = null;
+let stormOverlayLayerCache = null;
+let stormBoundaryRunCache = null;
+const stormGpuPermutationCache = new Map();
 const huckRockShapeCache = new Map();
 const asteroidBoundaryContourCache = new WeakMap();
 let playerMapScratchCanvas = null;
@@ -314,6 +323,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   let minimapMapState = null;
   let minimapAsteroid = null;
   let minimapSizeKey = "";
+  let gpuStormRenderer = null;
 
   function sizeCanvasBox() {
     const viewport = getViewportSize();
@@ -344,6 +354,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
     canvas.height = size.height;
     surface = createPixelSurface(canvasContext, size.width, size.height);
     textRenderer = createPixelTextRenderer(size.width, size.height, () => colors);
+    gpuStormRenderer = createGpuStormRenderer(size.width, size.height);
   }
 
   function resizeMinimapSurface(viewport = getViewportSize()) {
@@ -477,7 +488,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         colors.background = options.theme.background || colors.background;
         colors.backing = options.theme.backing || colors.backing;
       }
-      const frameOptions = { ...options, timeSeconds, dtSeconds };
+      const frameOptions = { ...options, timeSeconds, dtSeconds, gpuStormRenderer };
       const frameParticleState = {
         particles,
         miningParticles,
@@ -487,13 +498,49 @@ export function createRenderer(canvas, minimapCanvas = null) {
           return particleSeed;
         }
       };
+      const measurePerf = options.measurePerf === true;
+      const perf = measurePerf
+        ? {
+          drawMs: 0,
+          presentMs: 0,
+          minimapMs: 0,
+          stormGpuMs: 0,
+          stormGpuReadMs: 0,
+          stormGpuCalls: 0,
+          stormGpuRequests: 0,
+          visibilityGpuMs: 0,
+          visibilityGpuReadMs: 0,
+          visibilityGpuCalls: 0,
+          visibilityGpuRequests: 0,
+          stormGpuReady: Boolean(gpuStormRenderer)
+        }
+        : null;
 
+      gpuStormRenderer?.beginFrame?.();
+      const drawStart = measurePerf ? performance.now() : 0;
       drawFrame(surface, snapshot, frameOptions, colors, textRenderer, frameParticleState);
+      if (measurePerf) {
+        perf.drawMs = performance.now() - drawStart;
+        const stormStats = gpuStormRenderer?.frameStats?.();
+        perf.stormGpuMs = stormStats?.totalMs || 0;
+        perf.stormGpuReadMs = stormStats?.readMs || 0;
+        perf.stormGpuCalls = stormStats?.calls || 0;
+        perf.stormGpuRequests = stormStats?.requests || 0;
+        perf.visibilityGpuMs = stormStats?.visibilityTotalMs || 0;
+        perf.visibilityGpuReadMs = stormStats?.visibilityReadMs || 0;
+        perf.visibilityGpuCalls = stormStats?.visibilityCalls || 0;
+        perf.visibilityGpuRequests = stormStats?.visibilityRequests || 0;
+      }
+      const presentStart = measurePerf ? performance.now() : 0;
       surface.present();
+      if (measurePerf) {
+        perf.presentMs = performance.now() - presentStart;
+      }
       if (!minimapVisible) {
-        return;
+        return perf;
       }
 
+      const minimapStart = measurePerf ? performance.now() : 0;
       if (options.playerMapLarge) {
         drawGameLensOverlay(
           minimapSurface,
@@ -515,6 +562,10 @@ export function createRenderer(canvas, minimapCanvas = null) {
           timeSeconds
         );
       }
+      if (measurePerf) {
+        perf.minimapMs = performance.now() - minimapStart;
+      }
+      return perf;
     }
   };
 }
@@ -549,7 +600,7 @@ function createPixelSurface(canvasContext, width, height) {
   let activeLens = null;
   let activeWorldMask = null;
 
-  function canWriteProjectedPixel(x, y) {
+  function canWriteFinalPixel(x, y) {
     return x >= 0 &&
       y >= 0 &&
       x < width &&
@@ -557,29 +608,29 @@ function createPixelSurface(canvasContext, width, height) {
       (!activeClip || (x >= activeClip.starts[y] && x < activeClip.ends[y]));
   }
 
-  function writeProjectedPixel(projected) {
+  function writeProjectedPixel(projected, color = currentColor) {
     if (!projected) {
       return false;
     }
 
     let wrote = false;
     if (projected.baseX !== projected.x || projected.baseY !== projected.y) {
-      wrote = writeProjectedPoint(projected.baseX, projected.baseY) || wrote;
+      wrote = writeProjectedPoint(projected.baseX, projected.baseY, color) || wrote;
     }
 
-    return writeProjectedPoint(projected.x, projected.y) || wrote;
+    return writeProjectedPoint(projected.x, projected.y, color) || wrote;
   }
 
-  function writeProjectedPoint(x, y) {
-    if (!canWriteProjectedPixel(x, y)) {
+  function writeProjectedPoint(x, y, color = currentColor) {
+    if (!canWriteFinalPixel(x, y)) {
       return false;
     }
 
-    pixels[y * width + x] = currentColor;
+    pixels[y * width + x] = color;
     return true;
   }
 
-  function writeProjectedBridge(from, to) {
+  function writeProjectedBridge(from, to, color = currentColor) {
     let x = from.x;
     let y = from.y;
     const dx = Math.abs(to.x - from.x);
@@ -589,8 +640,8 @@ function createPixelSurface(canvasContext, width, height) {
     let error = dx + dy;
 
     while (true) {
-      if (canWriteProjectedPixel(x, y)) {
-        pixels[y * width + x] = currentColor;
+      if (canWriteFinalPixel(x, y)) {
+        pixels[y * width + x] = color;
       }
 
       if (x === to.x && y === to.y) {
@@ -746,11 +797,845 @@ function createPixelSurface(canvasContext, width, height) {
         }
       }
     },
+    drawCodeLayer(codes, palette = {}) {
+      if (!codes || codes.length < width * height) {
+        return;
+      }
+      const background = colorFor(palette.background || RENDER.background, colorCache);
+      const foreground = colorFor(palette.foreground || RENDER.foreground, colorCache);
+      const backing = colorFor(palette.backing || "#000000", colorCache);
+      const codeColors = [0, background, foreground, backing];
+      const maskSpans = activeWorldMask?.spans?.rows;
+      if (Array.isArray(maskSpans)) {
+        const offsetY = activeWorldMask.spans.offsetY || 0;
+        for (let y = 0; y < height; y += 1) {
+          if (activeClip && (activeClip.starts[y] >= activeClip.ends[y])) {
+            continue;
+          }
+
+          const spans = maskSpans[y - offsetY];
+          if (!Array.isArray(spans)) {
+            continue;
+          }
+
+          const row = y * width;
+          for (let spanIndex = 0; spanIndex < spans.length; spanIndex += 2) {
+            const start = Math.max(0, activeClip ? activeClip.starts[y] : 0, spans[spanIndex]);
+            const end = Math.min(width, activeClip ? activeClip.ends[y] : width, spans[spanIndex + 1]);
+            for (let x = start; x < end; x += 1) {
+              const color = codeColors[codes[row + x]] || 0;
+              if (color) {
+                pixels[row + x] = color;
+              }
+            }
+          }
+        }
+        return;
+      }
+
+      const count = width * height;
+      let index = 0;
+      while (index < count) {
+        const code = codes[index];
+        const color = codeColors[code] || 0;
+        if (!color) {
+          index += 1;
+          continue;
+        }
+
+        const start = index;
+        index += 1;
+        while (index < count && codes[index] === code) {
+          index += 1;
+        }
+        pixels.fill(color, start, index);
+      }
+    },
+    drawCodeRuns(runs, palette = {}) {
+      if (!runs || runs.length < 4) {
+        return;
+      }
+      const background = colorFor(palette.background || RENDER.background, colorCache);
+      const foreground = colorFor(palette.foreground || RENDER.foreground, colorCache);
+      const backing = colorFor(palette.backing || "#000000", colorCache);
+      const codeColors = [0, background, foreground, backing];
+      const maskSpans = activeWorldMask?.spans?.rows;
+      const maskOffsetY = activeWorldMask?.spans?.offsetY || 0;
+      for (let index = 0; index + 3 < runs.length; index += 4) {
+        const y = runs[index];
+        if (y < 0 || y >= height) {
+          continue;
+        }
+
+        const color = codeColors[runs[index + 3]] || 0;
+        if (!color) {
+          continue;
+        }
+
+        const row = y * width;
+        let start = Math.max(0, runs[index + 1]);
+        let end = Math.min(width, runs[index + 2]);
+        if (activeClip) {
+          start = Math.max(start, activeClip.starts[y]);
+          end = Math.min(end, activeClip.ends[y]);
+        }
+        if (start >= end) {
+          continue;
+        }
+
+        if (!Array.isArray(maskSpans)) {
+          pixels.fill(color, row + start, row + end);
+          continue;
+        }
+
+        const spans = maskSpans[y - maskOffsetY];
+        if (!Array.isArray(spans)) {
+          continue;
+        }
+        for (let spanIndex = 0; spanIndex < spans.length; spanIndex += 2) {
+          const clippedStart = Math.max(start, spans[spanIndex]);
+          const clippedEnd = Math.min(end, spans[spanIndex + 1]);
+          if (clippedStart < clippedEnd) {
+            pixels.fill(color, row + clippedStart, row + clippedEnd);
+          }
+        }
+      }
+    },
+    drawRgbaLayer(rgba, layerWidth, layerHeight, options = {}) {
+      if (!rgba || layerWidth !== width || layerHeight !== height) {
+        return;
+      }
+
+      const source = rgba instanceof Uint8ClampedArray
+        ? new Uint32Array(rgba.buffer, rgba.byteOffset, rgba.byteLength / 4)
+        : new Uint32Array(rgba.buffer, rgba.byteOffset, rgba.byteLength / 4);
+      const flipY = options.flipY === true;
+      const maskSpans = activeWorldMask?.spans?.rows;
+      const maskOffsetY = activeWorldMask?.spans?.offsetY || 0;
+
+      function copyRange(y, start, end) {
+        if (start >= end) {
+          return;
+        }
+        const sourceY = flipY ? height - 1 - y : y;
+        const sourceRow = sourceY * width;
+        const destRow = y * width;
+        for (let x = start; x < end; x += 1) {
+          const color = source[sourceRow + x];
+          if ((color >>> 24) !== 0) {
+            pixels[destRow + x] = color;
+          }
+        }
+      }
+
+      for (let y = 0; y < height; y += 1) {
+        if (activeClip && activeClip.starts[y] >= activeClip.ends[y]) {
+          continue;
+        }
+
+        const clipStart = activeClip ? activeClip.starts[y] : 0;
+        const clipEnd = activeClip ? activeClip.ends[y] : width;
+        if (!Array.isArray(maskSpans)) {
+          if (activeWorldMask?.allows) {
+            const sourceY = flipY ? height - 1 - y : y;
+            const sourceRow = sourceY * width;
+            const destRow = y * width;
+            for (let x = clipStart; x < clipEnd; x += 1) {
+              if (!activeWorldMask.allows(x, y)) {
+                continue;
+              }
+              const color = source[sourceRow + x];
+              if ((color >>> 24) !== 0) {
+                pixels[destRow + x] = color;
+              }
+            }
+            continue;
+          }
+
+          copyRange(y, clipStart, clipEnd);
+          continue;
+        }
+
+        const spans = maskSpans[y - maskOffsetY];
+        if (!Array.isArray(spans)) {
+          continue;
+        }
+        for (let spanIndex = 0; spanIndex < spans.length; spanIndex += 2) {
+          copyRange(
+            y,
+            Math.max(clipStart, spans[spanIndex]),
+            Math.min(clipEnd, spans[spanIndex + 1])
+          );
+        }
+      }
+    },
+    drawGpuCodeLayer(rgba, layerWidth, layerHeight, palette = {}, options = {}) {
+      if (!rgba || layerWidth !== width || layerHeight !== height) {
+        return;
+      }
+
+      const background = colorFor(palette.background || RENDER.background, colorCache);
+      const foreground = colorFor(palette.foreground || RENDER.foreground, colorCache);
+      const backing = colorFor(palette.backing || "#000000", colorCache);
+      const codeColors = [0, background, foreground, backing];
+      const flipY = options.flipY === true;
+      const maskSpans = activeWorldMask?.spans?.rows;
+      const maskOffsetY = activeWorldMask?.spans?.offsetY || 0;
+
+      function copyRange(y, start, end) {
+        if (start >= end) {
+          return;
+        }
+        const sourceY = flipY ? height - 1 - y : y;
+        const sourceRow = sourceY * width * 4;
+        const destRow = y * width;
+        for (let x = start; x < end; x += 1) {
+          const offset = sourceRow + x * 4;
+          if (rgba[offset + 3] === 0) {
+            continue;
+          }
+
+          const color = codeColors[rgba[offset]] || 0;
+          if (color) {
+            pixels[destRow + x] = color;
+          }
+        }
+      }
+
+      for (let y = 0; y < height; y += 1) {
+        if (activeClip && activeClip.starts[y] >= activeClip.ends[y]) {
+          continue;
+        }
+
+        const clipStart = activeClip ? activeClip.starts[y] : 0;
+        const clipEnd = activeClip ? activeClip.ends[y] : width;
+        if (!Array.isArray(maskSpans)) {
+          if (activeWorldMask?.allows) {
+            const sourceY = flipY ? height - 1 - y : y;
+            const sourceRow = sourceY * width * 4;
+            const destRow = y * width;
+            for (let x = clipStart; x < clipEnd; x += 1) {
+              if (!activeWorldMask.allows(x, y)) {
+                continue;
+              }
+
+              const offset = sourceRow + x * 4;
+              if (rgba[offset + 3] === 0) {
+                continue;
+              }
+
+              const color = codeColors[rgba[offset]] || 0;
+              if (color) {
+                pixels[destRow + x] = color;
+              }
+            }
+            continue;
+          }
+
+          copyRange(y, clipStart, clipEnd);
+          continue;
+        }
+
+        const spans = maskSpans[y - maskOffsetY];
+        if (!Array.isArray(spans)) {
+          continue;
+        }
+        for (let spanIndex = 0; spanIndex < spans.length; spanIndex += 2) {
+          copyRange(
+            y,
+            Math.max(clipStart, spans[spanIndex]),
+            Math.min(clipEnd, spans[spanIndex + 1])
+          );
+        }
+      }
+    },
     present() {
       canvasContext.putImageData(imageData, 0, 0);
     }
   };
 }
+
+function createGpuStormRenderer(width, height) {
+  if (typeof document === "undefined" || !document.createElement) {
+    return null;
+  }
+
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const gl = canvas.getContext("webgl", {
+      alpha: true,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: true
+    });
+    if (!gl) {
+      return null;
+    }
+
+    const program = createGpuProgram(gl, GPU_STORM_VERTEX_SHADER, GPU_STORM_FRAGMENT_SHADER);
+    if (!program) {
+      return null;
+    }
+
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        -1, -1,
+        1, -1,
+        -1, 1,
+        -1, 1,
+        1, -1,
+        1, 1
+      ]),
+      gl.STATIC_DRAW
+    );
+
+    const gridTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, gridTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+
+    const permTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, permTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    const locations = {
+      position: gl.getAttribLocation(program, "a_position"),
+      resolution: gl.getUniformLocation(program, "u_resolution"),
+      camera: gl.getUniformLocation(program, "u_camera"),
+      mapSize: gl.getUniformLocation(program, "u_mapSize"),
+      tileSize: gl.getUniformLocation(program, "u_tileSize"),
+      time: gl.getUniformLocation(program, "u_time"),
+      seed: gl.getUniformLocation(program, "u_seed"),
+      threshold: gl.getUniformLocation(program, "u_threshold"),
+      noiseScale: gl.getUniformLocation(program, "u_noiseScale"),
+      speedX: gl.getUniformLocation(program, "u_speedX"),
+      speedY: gl.getUniformLocation(program, "u_speedY"),
+      speedZ: gl.getUniformLocation(program, "u_speedZ"),
+      lensEdgeScale: gl.getUniformLocation(program, "u_lensEdgeScale"),
+      lensPower: gl.getUniformLocation(program, "u_lensPower"),
+      lensNoiseRadial: gl.getUniformLocation(program, "u_lensNoiseRadial"),
+      lensNoiseTangential: gl.getUniformLocation(program, "u_lensNoiseTangential"),
+      lensDefectDensity: gl.getUniformLocation(program, "u_lensDefectDensity"),
+      grid: gl.getUniformLocation(program, "u_grid"),
+      perm: gl.getUniformLocation(program, "u_perm")
+    };
+
+    const rgba = new Uint8Array(width * height * 4);
+    let gridKey = "";
+    let gridWidth = 0;
+    let gridHeight = 0;
+    let gridData = null;
+    let permKey = "";
+    let layerKey = "";
+    let layerRuns = null;
+    let frameStats = {
+      calls: 0,
+      totalMs: 0,
+      readMs: 0,
+      requests: 0
+    };
+
+    function uploadGrid(asteroid) {
+      const nextWidth = Math.max(0, asteroid.widthTiles | 0);
+      const nextHeight = Math.max(0, asteroid.heightTiles | 0);
+      if (nextWidth <= 0 || nextHeight <= 0 || !asteroid.storm) {
+        return false;
+      }
+
+      const nextKey = [
+        asteroid.seed || "default",
+        asteroid.revision || asteroid._revision || 0,
+        nextWidth,
+        nextHeight,
+        asteroid.tiles?.length || 0,
+        asteroid.storm?.length || 0
+      ].join(":");
+      if (nextKey === gridKey) {
+        return true;
+      }
+
+      gridWidth = nextWidth;
+      gridHeight = nextHeight;
+      const length = gridWidth * gridHeight * 4;
+      if (!gridData || gridData.length !== length) {
+        gridData = new Uint8Array(length);
+      }
+
+      for (let tileY = 0; tileY < gridHeight; tileY += 1) {
+        for (let tileX = 0; tileX < gridWidth; tileX += 1) {
+          const index = tileY * gridWidth + tileX;
+          const offset = index * 4;
+          gridData[offset] = Number(asteroid.storm[index] || STORM_STATE.safe);
+          gridData[offset + 1] = isPlayableTile(asteroid, tileX, tileY) ? 255 : 0;
+          gridData[offset + 2] = 0;
+          gridData[offset + 3] = 255;
+        }
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D, gridTexture);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gridWidth,
+        gridHeight,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        gridData
+      );
+      gridKey = nextKey;
+      return true;
+    }
+
+    function uploadPermutation(seed) {
+      const nextKey = `${seed || "default"}:storm-visual`;
+      if (nextKey === permKey) {
+        return;
+      }
+
+      const permutation = stormGpuPermutationForSeed(seed);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, permTexture);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        256,
+        1,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        permutation
+      );
+      permKey = nextKey;
+    }
+
+    return {
+      width,
+      height,
+      beginFrame() {
+        frameStats = {
+          calls: 0,
+          totalMs: 0,
+          readMs: 0,
+          requests: 0
+        };
+      },
+      frameStats() {
+        return {
+          calls: frameStats.calls,
+          totalMs: frameStats.totalMs,
+          readMs: frameStats.readMs,
+          requests: frameStats.requests
+        };
+      },
+      draw(asteroid, camera, timeSeconds) {
+        frameStats.requests += 1;
+        if (!uploadGrid(asteroid)) {
+          return null;
+        }
+
+        const stableTimeSeconds = Math.floor(Number(timeSeconds || 0) * STORM_PATTERN_FPS) / STORM_PATTERN_FPS;
+        uploadPermutation(asteroid.seed);
+        const nextLayerKey = [
+          gridKey,
+          permKey,
+          width,
+          height,
+          Math.round(Number(camera.x || 0) * 1000),
+          Math.round(Number(camera.y || 0) * 1000),
+          Math.round(stableTimeSeconds * STORM_PATTERN_FPS)
+        ].join(":");
+        if (nextLayerKey === layerKey) {
+          return { rgba, runs: layerRuns, width, height, cached: true };
+        }
+
+        const startMs = performance.now();
+        gl.viewport(0, 0, width, height);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.enableVertexAttribArray(locations.position);
+        gl.vertexAttribPointer(locations.position, 2, gl.FLOAT, false, 0, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, gridTexture);
+        gl.uniform1i(locations.grid, 0);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, permTexture);
+        gl.uniform1i(locations.perm, 1);
+        gl.uniform2f(locations.resolution, width, height);
+        gl.uniform2f(locations.camera, Number(camera.x || 0), Number(camera.y || 0));
+        gl.uniform2f(locations.mapSize, gridWidth, gridHeight);
+        gl.uniform1f(locations.tileSize, asteroid.tileSize || RENDER.tileSize);
+        gl.uniform1f(locations.time, stableTimeSeconds);
+        gl.uniform1f(locations.seed, seedToUnitFloat(asteroid.seed));
+        gl.uniform1f(locations.threshold, STORM_NOISE_THRESHOLD);
+        gl.uniform1f(locations.noiseScale, STORM_NOISE_SCALE);
+        gl.uniform1f(locations.speedX, STORM_NOISE_SPEED_X);
+        gl.uniform1f(locations.speedY, STORM_NOISE_SPEED_Y);
+        gl.uniform1f(locations.speedZ, STORM_NOISE_SPEED_Z);
+        gl.uniform1f(locations.lensEdgeScale, WORLD_LENS_EDGE_SCALE);
+        gl.uniform1f(locations.lensPower, WORLD_LENS_POWER);
+        gl.uniform1f(locations.lensNoiseRadial, WORLD_LENS_NOISE_RADIAL);
+        gl.uniform1f(locations.lensNoiseTangential, WORLD_LENS_NOISE_TANGENTIAL);
+        gl.uniform1f(locations.lensDefectDensity, WORLD_LENS_DEFECT_DENSITY);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        const readStartMs = performance.now();
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+        layerRuns = gpuStormRunsFromRgba(rgba, width, height);
+        const endMs = performance.now();
+        frameStats.calls += 1;
+        frameStats.totalMs += endMs - startMs;
+        frameStats.readMs += endMs - readStartMs;
+        layerKey = nextLayerKey;
+        return { rgba, runs: layerRuns, width, height };
+      }
+    };
+  } catch (error) {
+    console.warn("BITSPACE GPU storm renderer unavailable", error);
+    return null;
+  }
+}
+
+function createGpuProgram(gl, vertexSource, fragmentSource) {
+  const vertexShader = compileGpuShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragmentShader = compileGpuShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  if (!vertexShader || !fragmentShader) {
+    return null;
+  }
+
+  const program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.warn("BITSPACE GPU storm program link failed", gl.getProgramInfoLog(program));
+    gl.deleteProgram(program);
+    return null;
+  }
+
+  return program;
+}
+
+function compileGpuShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.warn("BITSPACE GPU storm shader compile failed", gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function gpuStormRunsFromRgba(rgba, width, height) {
+  const runs = [];
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = height - 1 - y;
+    const sourceRow = sourceY * width * 4;
+    let runCode = 0;
+    let runStart = 0;
+
+    for (let x = 0; x < width; x += 1) {
+      const offset = sourceRow + x * 4;
+      const code = rgba[offset + 3] === 0 ? 0 : rgba[offset];
+      if (code === runCode) {
+        continue;
+      }
+
+      if (runCode !== 0) {
+        runs.push(y, runStart, x, runCode);
+      }
+      runCode = code;
+      runStart = x;
+    }
+
+    if (runCode !== 0) {
+      runs.push(y, runStart, width, runCode);
+    }
+  }
+  return runs;
+}
+
+function seedToUnitFloat(seed) {
+  const text = String(seed || "default");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+function stormGpuPermutationForSeed(seed) {
+  const cacheKey = `${seed || "default"}:storm-visual`;
+  let cached = stormGpuPermutationCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const random = createSeededRandom(cacheKey);
+  const permutation = Array.from({ length: 256 }, (_value, index) => index);
+  for (let index = permutation.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const value = permutation[index];
+    permutation[index] = permutation[swapIndex];
+    permutation[swapIndex] = value;
+  }
+
+  cached = new Uint8Array(256 * 4);
+  for (let index = 0; index < 256; index += 1) {
+    const offset = index * 4;
+    cached[offset] = permutation[index];
+    cached[offset + 1] = permutation[index];
+    cached[offset + 2] = permutation[index];
+    cached[offset + 3] = 255;
+  }
+  stormGpuPermutationCache.set(cacheKey, cached);
+  return cached;
+}
+
+const GPU_STORM_VERTEX_SHADER = `
+attribute vec2 a_position;
+
+void main() {
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+const GPU_STORM_FRAGMENT_SHADER = `
+precision highp float;
+
+uniform vec2 u_resolution;
+uniform vec2 u_camera;
+uniform vec2 u_mapSize;
+uniform float u_tileSize;
+uniform float u_time;
+uniform float u_seed;
+uniform float u_threshold;
+uniform float u_noiseScale;
+uniform float u_speedX;
+uniform float u_speedY;
+uniform float u_speedZ;
+uniform float u_lensEdgeScale;
+uniform float u_lensPower;
+uniform float u_lensNoiseRadial;
+uniform float u_lensNoiseTangential;
+uniform float u_lensDefectDensity;
+uniform sampler2D u_grid;
+uniform sampler2D u_perm;
+
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+float permLookup(float index) {
+  float wrapped = mod(floor(index), 256.0);
+  return floor(texture2D(u_perm, vec2((wrapped + 0.5) / 256.0, 0.5)).r * 255.0 + 0.5);
+}
+
+float gradientDot(float gradientIndex, float x, float y, float z) {
+  float h = mod(gradientIndex, 12.0);
+  if (h < 0.5) {
+    return x + y;
+  }
+  if (h < 1.5) {
+    return -x + y;
+  }
+  if (h < 2.5) {
+    return x - y;
+  }
+  if (h < 3.5) {
+    return -x - y;
+  }
+  if (h < 4.5) {
+    return x + z;
+  }
+  if (h < 5.5) {
+    return -x + z;
+  }
+  if (h < 6.5) {
+    return x - z;
+  }
+  if (h < 7.5) {
+    return -x - z;
+  }
+  if (h < 8.5) {
+    return y + z;
+  }
+  if (h < 9.5) {
+    return -y + z;
+  }
+  if (h < 10.5) {
+    return y - z;
+  }
+  return -y - z;
+}
+
+float simplexCorner(float ii, float jj, float kk, float i, float j, float k, float x, float y, float z) {
+  float influence = 0.6 - x * x - y * y - z * z;
+  if (influence < 0.0) {
+    return 0.0;
+  }
+
+  float hash = permLookup(ii + i + permLookup(jj + j + permLookup(kk + k)));
+  influence *= influence;
+  return influence * influence * gradientDot(hash, x, y, z);
+}
+
+float simplexNoise3D(vec3 p) {
+  float skew = (p.x + p.y + p.z) / 3.0;
+  float i = floor(p.x + skew);
+  float j = floor(p.y + skew);
+  float k = floor(p.z + skew);
+  float unskew = (i + j + k) / 6.0;
+  float x0 = p.x - (i - unskew);
+  float y0 = p.y - (j - unskew);
+  float z0 = p.z - (k - unskew);
+  float i1;
+  float j1;
+  float k1;
+  float i2;
+  float j2;
+  float k2;
+
+  if (x0 >= y0) {
+    if (y0 >= z0) {
+      i1 = 1.0; j1 = 0.0; k1 = 0.0; i2 = 1.0; j2 = 1.0; k2 = 0.0;
+    } else if (x0 >= z0) {
+      i1 = 1.0; j1 = 0.0; k1 = 0.0; i2 = 1.0; j2 = 0.0; k2 = 1.0;
+    } else {
+      i1 = 0.0; j1 = 0.0; k1 = 1.0; i2 = 1.0; j2 = 0.0; k2 = 1.0;
+    }
+  } else if (y0 < z0) {
+    i1 = 0.0; j1 = 0.0; k1 = 1.0; i2 = 0.0; j2 = 1.0; k2 = 1.0;
+  } else if (x0 < z0) {
+    i1 = 0.0; j1 = 1.0; k1 = 0.0; i2 = 0.0; j2 = 1.0; k2 = 1.0;
+  } else {
+    i1 = 0.0; j1 = 1.0; k1 = 0.0; i2 = 1.0; j2 = 1.0; k2 = 0.0;
+  }
+
+  float x1 = x0 - i1 + 1.0 / 6.0;
+  float y1 = y0 - j1 + 1.0 / 6.0;
+  float z1 = z0 - k1 + 1.0 / 6.0;
+  float x2 = x0 - i2 + 1.0 / 3.0;
+  float y2 = y0 - j2 + 1.0 / 3.0;
+  float z2 = z0 - k2 + 1.0 / 3.0;
+  float x3 = x0 - 0.5;
+  float y3 = y0 - 0.5;
+  float z3 = z0 - 0.5;
+  float ii = mod(i, 256.0);
+  float jj = mod(j, 256.0);
+  float kk = mod(k, 256.0);
+
+  return 32.0 * (
+    simplexCorner(ii, jj, kk, 0.0, 0.0, 0.0, x0, y0, z0) +
+    simplexCorner(ii, jj, kk, i1, j1, k1, x1, y1, z1) +
+    simplexCorner(ii, jj, kk, i2, j2, k2, x2, y2, z2) +
+    simplexCorner(ii, jj, kk, 1.0, 1.0, 1.0, x3, y3, z3)
+  );
+}
+
+float lensNoiseUnit(vec2 p, float salt) {
+  vec2 q = floor(p);
+  return hash13(vec3(q.x * 0.071 + u_seed * 173.0, q.y * 0.097, salt));
+}
+
+float lensNoiseSigned(vec2 p, float salt) {
+  return lensNoiseUnit(p, salt) * 2.0 - 1.0;
+}
+
+vec2 inverseLensSource(vec2 screen) {
+  if (u_lensEdgeScale <= 1.0001) {
+    return screen;
+  }
+
+  vec2 center = u_resolution * 0.5;
+  vec2 delta = screen + vec2(0.5) - center;
+  float screenRadius = length(delta);
+  if (screenRadius <= 0.0001) {
+    return screen;
+  }
+
+  float radius = min(u_resolution.x, u_resolution.y) * 0.5;
+  float maxSourceRadius = radius * u_lensEdgeScale;
+  float lo = screenRadius;
+  float hi = maxSourceRadius;
+  for (int i = 0; i < 8; i += 1) {
+    float mid = (lo + hi) * 0.5;
+    float t = clamp(mid / maxSourceRadius, 0.0, 1.0);
+    float scale = 1.0 + (u_lensEdgeScale - 1.0) * pow(t, max(1.0, u_lensPower));
+    float projected = mid / scale;
+    if (projected < screenRadius) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  float sourceRadius = hi;
+  vec2 unit = delta / screenRadius;
+  vec2 source = center + unit * sourceRadius - vec2(0.5);
+  float t = clamp(sourceRadius / maxSourceRadius, 0.0, 1.0);
+  float scale = 1.0 + (u_lensEdgeScale - 1.0) * pow(t, max(1.0, u_lensPower));
+  float falloff = (scale - 1.0) / max(0.0001, u_lensEdgeScale - 1.0);
+  float defectDensity = clamp(falloff * u_lensDefectDensity, 0.0, 1.0);
+  if (lensNoiseUnit(source, 73.31) <= defectDensity) {
+    vec2 tangent = vec2(-unit.y, unit.x);
+    source += unit * lensNoiseSigned(source, 17.91) * u_lensNoiseRadial;
+    source += tangent * lensNoiseSigned(source, 41.27) * u_lensNoiseTangential;
+  }
+  return source;
+}
+
+void main() {
+  vec2 screen = vec2(gl_FragCoord.x - 0.5, u_resolution.y - gl_FragCoord.y - 0.5);
+  vec2 source = inverseLensSource(screen);
+  vec2 world = source + u_camera;
+  vec2 tile = floor(world / max(1.0, u_tileSize));
+
+  bool inMap = tile.x >= 0.0 && tile.y >= 0.0 && tile.x < u_mapSize.x && tile.y < u_mapSize.y;
+  if (inMap) {
+    vec4 grid = texture2D(u_grid, (tile + vec2(0.5)) / u_mapSize);
+    float stormState = grid.r * 255.0;
+    float playable = grid.g;
+    if (playable > 0.5 && stormState < 1.5) {
+      discard;
+    }
+  }
+
+  vec2 visualWorld = floor(world);
+  vec3 p = vec3(
+    (visualWorld.x + u_time * u_speedX) * u_noiseScale,
+    (visualWorld.y + u_time * u_speedY) * u_noiseScale,
+    u_time * u_speedZ + u_seed * 11.0
+  );
+  float stormValue = simplexNoise3D(p);
+  float code = stormValue >= u_threshold ? 2.0 : 1.0;
+  gl_FragColor = vec4(code / 255.0, 0.0, 0.0, 1.0);
+}
+`;
 
 function createCircleClipSpans(width, height) {
   const starts = new Int16Array(height);
@@ -1080,7 +1965,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         options.asteroid,
         camera,
         colors,
-        options.timeSeconds ?? snapshot.tick / 60
+        options.timeSeconds ?? snapshot.tick / 60,
+        options.gpuStormRenderer
       );
       if (typeof ctx.beginWorldMask === "function") {
         ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
@@ -1100,7 +1986,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         colors,
         options.timeSeconds ?? snapshot.tick / 60,
         asteroidMiningTargets,
-        visibility
+        visibility,
+        options.gpuStormRenderer
       );
     } else {
       drawWorldBounds(ctx, snapshot, camera);
@@ -3380,10 +4267,11 @@ function drawAsteroid(
   colors,
   timeSeconds,
   asteroidMiningTargets,
-  visibility = null
+  visibility = null,
+  gpuStormRenderer = null
 ) {
   drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility);
-  drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds);
+  drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility, gpuStormRenderer);
   if (asteroid.storm) {
     drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
   } else {
@@ -3391,23 +4279,63 @@ function drawAsteroid(
   }
 }
 
-function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
+function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility = null, gpuStormRenderer = null) {
   if (!asteroid.storm) {
     return;
   }
 
+  if (gpuStormRenderer && typeof ctx.drawGpuCodeLayer === "function") {
+    const gpuStorm = gpuStormRenderer.draw(asteroid, camera, timeSeconds);
+    if (gpuStorm?.runs && typeof ctx.drawCodeRuns === "function") {
+      ctx.drawCodeRuns(gpuStorm.runs, {
+        background: colors.background,
+        foreground: colors.foreground,
+        backing: colors.backing || "#000000"
+      });
+      return;
+    }
+    if (gpuStorm?.rgba) {
+      ctx.drawGpuCodeLayer(gpuStorm.rgba, gpuStorm.width, gpuStorm.height, {
+        background: colors.background,
+        foreground: colors.foreground,
+        backing: colors.backing || "#000000"
+      }, { flipY: true });
+      return;
+    }
+  }
+
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
-  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
-  const maxTileX = Math.min(
-    asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
-  );
-  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
-  const maxTileY = Math.min(
-    asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
-  );
+  const lensSource = typeof ctx.lensSourceSize === "function" ? ctx.lensSourceSize() : null;
+  const renderWidth = lensSource?.width || ctx.width;
+  const renderHeight = lensSource?.height || ctx.height;
+  const renderCamera = lensSource
+    ? { x: camera.x - lensSource.padding, y: camera.y - lensSource.padding }
+    : camera;
+  const nativeStorm = typeof ctx.drawCodeRuns === "function" || typeof ctx.drawCodeLayer === "function"
+    ? cachedStormOverlayNative(asteroid, renderCamera, renderWidth, renderHeight, timeSeconds, lensSource ? 0 : padding, Boolean(lensSource))
+    : null;
+  if (nativeStorm?.runs && typeof ctx.drawCodeRuns === "function") {
+    ctx.drawCodeRuns(nativeStorm.runs, {
+      background: colors.background,
+      foreground: colors.foreground,
+      backing: colors.backing || "#000000"
+    });
+    return;
+  }
+  if (nativeStorm?.layer && typeof ctx.drawCodeLayer === "function") {
+    ctx.drawCodeLayer(nativeStorm.layer, {
+      background: colors.background,
+      foreground: colors.foreground,
+      backing: colors.backing || "#000000"
+    });
+    return;
+  }
+
+  const minTileX = Math.floor((camera.x - padding) / tileSize) - 1;
+  const maxTileX = Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1;
+  const minTileY = Math.floor((camera.y - padding) / tileSize) - 1;
+  const maxTileY = Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1;
 
   const visibleStormTiles = [];
   ctx.fillStyle = colors.background;
@@ -3440,6 +4368,53 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds) {
     const screenY = Math.round(tile.tileY * tileSize - camera.y);
     drawStormTilePattern(ctx, asteroid, screenX, screenY, tileSize, tile.tileX, tile.tileY, timeSeconds);
   }
+}
+
+function cachedStormOverlayNative(asteroid, camera, width, height, timeSeconds, padding, noLens = false) {
+  const frame = Math.floor(Number(timeSeconds || 0) * STORM_PATTERN_FPS);
+  const key = [
+    asteroid.seed || "default",
+    asteroid.revision || asteroid._revision || 0,
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    asteroid.storm?.length || 0,
+    Math.floor(width),
+    Math.floor(height),
+    Math.floor(Number(camera.x || 0)),
+    Math.floor(Number(camera.y || 0)),
+    Math.floor(Number(padding || 0)),
+    noLens ? 1 : 0,
+    frame
+  ].join(":");
+  if (stormOverlayLayerCache?.key === key) {
+    return stormOverlayLayerCache.value;
+  }
+
+  const nativeOptions = {
+    sourcePadding: padding,
+    noLens,
+    lensEdgeScale: WORLD_LENS_EDGE_SCALE,
+    lensPower: WORLD_LENS_POWER,
+    lensNoiseRadial: WORLD_LENS_NOISE_RADIAL,
+    lensNoiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
+    lensDefectDensity: WORLD_LENS_DEFECT_DENSITY,
+    constants: {
+      fps: STORM_PATTERN_FPS,
+      scale: STORM_NOISE_SCALE,
+      speedX: STORM_NOISE_SPEED_X,
+      speedY: STORM_NOISE_SPEED_Y,
+      speedZ: STORM_NOISE_SPEED_Z
+    }
+  };
+  const stableTimeSeconds = frame / STORM_PATTERN_FPS;
+  const runs = stormRunsNative(asteroid, camera, width, height, stableTimeSeconds, STORM_NOISE_THRESHOLD, nativeOptions);
+  const value = runs
+    ? { runs }
+    : {
+      layer: stormLayerNative(asteroid, camera, width, height, stableTimeSeconds, STORM_NOISE_THRESHOLD, nativeOptions)
+    };
+  stormOverlayLayerCache = { key, value };
+  return value;
 }
 
 function drawStormBackingRun(ctx, startTileX, endTileX, tileY, tileSize, camera) {
@@ -3808,10 +4783,10 @@ function asteroidVisibilityCanStartAt(asteroid, tileX, tileY) {
   }
 
   const index = tileY * asteroid.widthTiles + tileX;
-  return isPlayableTile(asteroid, tileX, tileY) && !isSolidTile(asteroid.tiles[index]);
+  return !isSolidTile(asteroid.tiles[index]);
 }
 
-function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSeconds) {
+function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSeconds, gpuStormRenderer = null) {
   if (!asteroid) {
     return;
   }
@@ -3833,20 +4808,38 @@ function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSecon
     viewMaxTileY
   );
 
-  for (let tileY = viewMinTileY; tileY <= viewMaxTileY; tileY += 1) {
-    for (let tileX = viewMinTileX; tileX <= viewMaxTileX; tileX += 1) {
-      if (
-        tileX >= 0 &&
-        tileY >= 0 &&
-        tileX < asteroid.widthTiles &&
-        tileY < asteroid.heightTiles &&
-        isPlayableTile(asteroid, tileX, tileY) &&
-        isSolidTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX])
-      ) {
-        continue;
-      }
+  const nativeCheckerLayer = typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
+    ? visibilityCheckerLayerNative(asteroid, camera, ctx.width, ctx.height, {
+      sourcePadding: padding,
+      lensEdgeScale: WORLD_LENS_EDGE_SCALE,
+      lensPower: WORLD_LENS_POWER,
+      lensNoiseRadial: WORLD_LENS_NOISE_RADIAL,
+      lensNoiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
+      lensDefectDensity: WORLD_LENS_DEFECT_DENSITY
+    })
+    : null;
+  if (nativeCheckerLayer) {
+    ctx.drawCodeLayer(nativeCheckerLayer, {
+      background: colors.background,
+      foreground: colors.foreground,
+      backing: colors.backing || "#000000"
+    });
+  } else {
+    for (let tileY = viewMinTileY; tileY <= viewMaxTileY; tileY += 1) {
+      for (let tileX = viewMinTileX; tileX <= viewMaxTileX; tileX += 1) {
+        if (
+          tileX >= 0 &&
+          tileY >= 0 &&
+          tileX < asteroid.widthTiles &&
+          tileY < asteroid.heightTiles &&
+          isPlayableTile(asteroid, tileX, tileY) &&
+          isSolidTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX])
+        ) {
+          continue;
+        }
 
-      drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors);
+        drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors);
+      }
     }
   }
 
@@ -3867,9 +4860,9 @@ function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSecon
       const screenX = Math.round(tileX * tileSize - camera.x);
       const screenY = Math.round(tileY * tileSize - camera.y);
       if (tile === ASTEROID_TILE.wall) {
-        drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+        drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
       } else {
-        drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+        drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
       }
     }
   }
@@ -3886,7 +4879,7 @@ function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSecon
     colors
   );
   if (asteroid.storm) {
-    drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds);
+    drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
     drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
   } else {
     drawAsteroidBoundary(ctx, asteroid, camera, ghostColors);
@@ -3896,33 +4889,31 @@ function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSecon
 function drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors) {
   const x = Math.round(tileX * tileSize - camera.x);
   const y = Math.round(tileY * tileSize - camera.y);
-  const checkerSize = 2;
 
   ctx.fillStyle = colors.background;
-  for (let offsetY = 0; offsetY < tileSize; offsetY += checkerSize) {
-    for (let offsetX = 0; offsetX < tileSize; offsetX += checkerSize) {
-      if ((((offsetX / checkerSize) + (offsetY / checkerSize)) & 1) !== 0) {
+  for (let offsetY = 0; offsetY < tileSize; offsetY += 1) {
+    for (let offsetX = 0; offsetX < tileSize; offsetX += 1) {
+      if (!asteroidVisibilityCheckerPixelOn(x + offsetX, y + offsetY, camera)) {
         continue;
       }
 
-      ctx.fillRect(
-        x + offsetX,
-        y + offsetY,
-        Math.min(checkerSize, tileSize - offsetX),
-        Math.min(checkerSize, tileSize - offsetY)
-      );
+      ctx.fillRect(x + offsetX, y + offsetY, 1, 1);
     }
   }
 }
 
-function asteroidVisibilityCheckerPixelOn(pixelX, pixelY, tileScreenX, tileScreenY) {
-  const checkerSize = 2;
-  const localX = pixelX - tileScreenX;
-  const localY = pixelY - tileScreenY;
-  return (((Math.floor(localX / checkerSize) + Math.floor(localY / checkerSize)) & 1)) === 0;
+function asteroidVisibilityCheckerPixelOn(pixelX, pixelY, camera) {
+  const worldX = pixelX + renderedCameraPixelOffset(camera?.x || 0);
+  const worldY = pixelY + renderedCameraPixelOffset(camera?.y || 0);
+  return (((Math.floor(worldX / ASTEROID_VISIBILITY_CHECKER_SIZE) +
+    Math.floor(worldY / ASTEROID_VISIBILITY_CHECKER_SIZE)) & 1)) !== 0;
 }
 
-function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
+function renderedCameraPixelOffset(value) {
+  return Math.ceil(value - 0.5);
+}
+
+function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, camera) {
   const north = rockTileBlocksVisibleOutline(asteroid, null, tileX, tileY - 1);
   const east = rockTileBlocksVisibleOutline(asteroid, null, tileX + 1, tileY);
   const south = rockTileBlocksVisibleOutline(asteroid, null, tileX, tileY + 1);
@@ -3969,66 +4960,62 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
   if (outerTopLeft) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      x,
-      y,
       x + ROCK_OUTER_CORNER_RADIUS,
       y + ROCK_OUTER_CORNER_RADIUS,
       -1,
       -1,
-      colors
+      colors,
+      camera
     );
   }
   if (outerTopRight) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      x,
-      y,
       right - ROCK_OUTER_CORNER_RADIUS,
       y + ROCK_OUTER_CORNER_RADIUS,
       1,
       -1,
-      colors
+      colors,
+      camera
     );
   }
   if (outerBottomRight) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      x,
-      y,
       right - ROCK_OUTER_CORNER_RADIUS,
       bottom - ROCK_OUTER_CORNER_RADIUS,
       1,
       1,
-      colors
+      colors,
+      camera
     );
   }
   if (outerBottomLeft) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      x,
-      y,
       x + ROCK_OUTER_CORNER_RADIUS,
       bottom - ROCK_OUTER_CORNER_RADIUS,
       -1,
       1,
-      colors
+      colors,
+      camera
     );
   }
 
   if (topOpen && x + topTrimLeft <= right - topTrimRight) {
-    drawAsteroidVisibilityCheckerLine(ctx, x + topTrimLeft, y, right - topTrimRight, y, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + topTrimLeft, y, right - topTrimRight, y, camera, colors);
   }
 
   if (rightOpen && y + rightTrimTop <= bottom - rightTrimBottom) {
-    drawAsteroidVisibilityCheckerLine(ctx, right, y + rightTrimTop, right, bottom - rightTrimBottom, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, right, y + rightTrimTop, right, bottom - rightTrimBottom, camera, colors);
   }
 
   if (bottomOpen && x + bottomTrimLeft <= right - bottomTrimRight) {
-    drawAsteroidVisibilityCheckerLine(ctx, right - bottomTrimRight, bottom, x + bottomTrimLeft, bottom, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, right - bottomTrimRight, bottom, x + bottomTrimLeft, bottom, camera, colors);
   }
 
   if (leftOpen && y + leftTrimTop <= bottom - leftTrimBottom) {
-    drawAsteroidVisibilityCheckerLine(ctx, x, bottom - leftTrimBottom, x, y + leftTrimTop, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x, bottom - leftTrimBottom, x, y + leftTrimTop, camera, colors);
   }
 
   drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom, {
@@ -4036,10 +5023,10 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
     outerTopRight,
     outerBottomRight,
     outerBottomLeft
-  }, colors);
+  }, colors, camera);
 }
 
-function drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
+function drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, camera) {
   const north = wallTileBlocksVisibleOutline(asteroid, null, tileX, tileY - 1);
   const east = wallTileBlocksVisibleOutline(asteroid, null, tileX + 1, tileY);
   const south = wallTileBlocksVisibleOutline(asteroid, null, tileX, tileY + 1);
@@ -4054,43 +5041,43 @@ function drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, x, 
   const bottom = y + size - 1 - (south ? 0 : 1);
 
   if (!north) {
-    drawAsteroidVisibilityCheckerLine(ctx, left, top, right, top, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, left, top, right, top, camera, colors);
   }
 
   if (!east) {
-    drawAsteroidVisibilityCheckerLine(ctx, right, top, right, bottom, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, right, top, right, bottom, camera, colors);
   }
 
   if (!south) {
-    drawAsteroidVisibilityCheckerLine(ctx, right, bottom, left, bottom, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, right, bottom, left, bottom, camera, colors);
   }
 
   if (!west) {
-    drawAsteroidVisibilityCheckerLine(ctx, left, bottom, left, top, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, left, bottom, left, top, camera, colors);
   }
 
   if (north && west && !northWest) {
-    drawAsteroidVisibilityCheckerLine(ctx, x + 1, y, x + 1, y + 1, x, y, colors);
-    drawAsteroidVisibilityCheckerLine(ctx, x, y + 1, x + 1, y + 1, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + 1, y, x + 1, y + 1, camera, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x, y + 1, x + 1, y + 1, camera, colors);
   }
 
   if (north && east && !northEast) {
-    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y, x + size - 2, y + 1, x, y, colors);
-    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y + 1, x + size, y + 1, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y, x + size - 2, y + 1, camera, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y + 1, x + size, y + 1, camera, colors);
   }
 
   if (south && east && !southEast) {
-    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y + size - 2, x + size - 2, y + size, x, y, colors);
-    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y + size - 2, x + size, y + size - 2, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y + size - 2, x + size - 2, y + size, camera, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + size - 2, y + size - 2, x + size, y + size - 2, camera, colors);
   }
 
   if (south && west && !southWest) {
-    drawAsteroidVisibilityCheckerLine(ctx, x + 1, y + size - 2, x + 1, y + size, x, y, colors);
-    drawAsteroidVisibilityCheckerLine(ctx, x, y + size - 2, x + 1, y + size - 2, x, y, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x + 1, y + size - 2, x + 1, y + size, camera, colors);
+    drawAsteroidVisibilityCheckerLine(ctx, x, y + size - 2, x + 1, y + size - 2, camera, colors);
   }
 }
 
-function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, tileScreenX, tileScreenY, centerX, centerY, signX, signY, colors) {
+function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, signX, signY, colors, camera) {
   const radiusSq = ROCK_OUTER_CORNER_RADIUS * ROCK_OUTER_CORNER_RADIUS;
   ctx.fillStyle = colors.background;
   for (let offsetY = 0; offsetY <= ROCK_OUTER_CORNER_RADIUS; offsetY += 1) {
@@ -4101,7 +5088,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, tileScreenX, tileScre
 
       const pixelX = centerX + signX * offsetX;
       const pixelY = centerY + signY * offsetY;
-      if (!asteroidVisibilityCheckerPixelOn(pixelX, pixelY, tileScreenX, tileScreenY)) {
+      if (!asteroidVisibilityCheckerPixelOn(pixelX, pixelY, camera)) {
         continue;
       }
 
@@ -4110,7 +5097,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, tileScreenX, tileScre
   }
 }
 
-function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom, corners, colors) {
+function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom, corners, colors, camera) {
   ctx.fillStyle = colors.background;
   if (corners.outerTopLeft) {
     drawAsteroidVisibilityCheckerRockCornerArc(
@@ -4120,8 +5107,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       ROCK_OUTER_CORNER_RADIUS,
       -1,
       -1,
-      x,
-      y
+      camera
     );
   }
 
@@ -4133,8 +5119,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       ROCK_OUTER_CORNER_RADIUS,
       1,
       -1,
-      x,
-      y
+      camera
     );
   }
 
@@ -4146,8 +5131,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       ROCK_OUTER_CORNER_RADIUS,
       1,
       1,
-      x,
-      y
+      camera
     );
   }
 
@@ -4159,24 +5143,23 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       ROCK_OUTER_CORNER_RADIUS,
       -1,
       1,
-      x,
-      y
+      camera
     );
   }
 }
 
-function drawAsteroidVisibilityCheckerRockCornerArc(ctx, centerX, centerY, radius, signX, signY, tileScreenX, tileScreenY) {
+function drawAsteroidVisibilityCheckerRockCornerArc(ctx, centerX, centerY, radius, signX, signY, camera) {
   for (let step = 0; step <= radius; step += 1) {
     const other = Math.round(Math.sqrt(Math.max(0, radius * radius - step * step)));
-    drawAsteroidVisibilityCheckerArcPixel(ctx, centerX + signX * step, centerY + signY * other, tileScreenX, tileScreenY);
-    drawAsteroidVisibilityCheckerArcPixel(ctx, centerX + signX * other, centerY + signY * step, tileScreenX, tileScreenY);
+    drawAsteroidVisibilityCheckerArcPixel(ctx, centerX + signX * step, centerY + signY * other, camera);
+    drawAsteroidVisibilityCheckerArcPixel(ctx, centerX + signX * other, centerY + signY * step, camera);
   }
 }
 
-function drawAsteroidVisibilityCheckerArcPixel(ctx, x, y, tileScreenX, tileScreenY) {
+function drawAsteroidVisibilityCheckerArcPixel(ctx, x, y, camera) {
   const px = Math.round(x);
   const py = Math.round(y);
-  if (asteroidVisibilityCheckerPixelOn(px, py, tileScreenX, tileScreenY)) {
+  if (asteroidVisibilityCheckerPixelOn(px, py, camera)) {
     ctx.fillRect(px, py, 1, 1);
   }
 }
@@ -4216,11 +5199,11 @@ function drawAsteroidVisibilityGhostInnerRockCornerConnectors(
       const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
 
       if (north && west && northWest) {
-        drawAsteroidVisibilityCheckerLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS, x, y, colors);
+        drawAsteroidVisibilityCheckerLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS, camera, colors);
       }
 
       if (north && east && northEast) {
-        drawAsteroidVisibilityCheckerLine(ctx, rightInside - ROCK_INNER_CORNER_RADIUS, topEdge, rightEdge, y + ROCK_INNER_CORNER_RADIUS, x, y, colors);
+        drawAsteroidVisibilityCheckerLine(ctx, rightInside - ROCK_INNER_CORNER_RADIUS, topEdge, rightEdge, y + ROCK_INNER_CORNER_RADIUS, camera, colors);
       }
 
       if (south && east && southEast) {
@@ -4230,20 +5213,19 @@ function drawAsteroidVisibilityGhostInnerRockCornerConnectors(
           bottomInside - ROCK_INNER_CORNER_RADIUS,
           rightInside - ROCK_INNER_CORNER_RADIUS,
           bottomEdge,
-          x,
-          y,
+          camera,
           colors
         );
       }
 
       if (south && west && southWest) {
-        drawAsteroidVisibilityCheckerLine(ctx, x + ROCK_INNER_CORNER_RADIUS, bottomEdge, leftEdge, bottomInside - ROCK_INNER_CORNER_RADIUS, x, y, colors);
+        drawAsteroidVisibilityCheckerLine(ctx, x + ROCK_INNER_CORNER_RADIUS, bottomEdge, leftEdge, bottomInside - ROCK_INNER_CORNER_RADIUS, camera, colors);
       }
     }
   }
 }
 
-function drawAsteroidVisibilityCheckerLine(ctx, x0, y0, x1, y1, tileScreenX, tileScreenY, colors) {
+function drawAsteroidVisibilityCheckerLine(ctx, x0, y0, x1, y1, camera, colors) {
   let x = x0;
   let y = y0;
   const dx = Math.abs(x1 - x0);
@@ -4254,7 +5236,7 @@ function drawAsteroidVisibilityCheckerLine(ctx, x0, y0, x1, y1, tileScreenX, til
 
   ctx.fillStyle = colors.background;
   while (true) {
-    if (asteroidVisibilityCheckerPixelOn(x, y, tileScreenX, tileScreenY)) {
+    if (asteroidVisibilityCheckerPixelOn(x, y, camera)) {
       ctx.fillRect(x, y, 1, 1);
     }
     if (x === x1 && y === y1) {
@@ -4307,10 +5289,6 @@ function buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bound
 
 function asteroidVisibilityBlockerKind(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
-    return null;
-  }
-
-  if (!isPlayableTile(asteroid, tileX, tileY)) {
     return null;
   }
 
@@ -4959,6 +5937,7 @@ function asteroidVisibilityPointPaintsBackground(visibility, worldX, worldY) {
 
 function createAsteroidVisibilityWorldMask(visibility) {
   return {
+    spans: visibility.spans,
     allows(screenX, screenY) {
       return asteroidVisibilityScreenPointVisible(visibility, screenX, screenY);
     }
@@ -5789,6 +6768,24 @@ function projectPoint3D(point, centerX, centerY) {
 function drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
+  const lensSource = typeof ctx.lensSourceSize === "function" ? ctx.lensSourceSize() : null;
+  const renderWidth = lensSource?.width || ctx.width;
+  const renderHeight = lensSource?.height || ctx.height;
+  const renderCamera = lensSource
+    ? { x: camera.x - lensSource.padding, y: camera.y - lensSource.padding }
+    : camera;
+  const nativeBoundary = typeof ctx.drawCodeRuns === "function"
+    ? cachedStormBoundaryNative(asteroid, renderCamera, renderWidth, renderHeight, timeSeconds, lensSource ? 0 : padding, Boolean(lensSource))
+    : null;
+  if (nativeBoundary?.runs && typeof ctx.drawCodeRuns === "function") {
+    ctx.drawCodeRuns(nativeBoundary.runs, {
+      background: colors.background,
+      foreground: colors.foreground,
+      backing: colors.backing || "#000000"
+    });
+    return;
+  }
+
   const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
@@ -5848,6 +6845,57 @@ function drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds) {
       }
     }
   }
+}
+
+function cachedStormBoundaryNative(asteroid, camera, width, height, timeSeconds, padding, noLens = false) {
+  const frame = Math.floor(Number(timeSeconds || 0) * STORM_PATTERN_FPS);
+  const key = [
+    asteroid.seed || "default",
+    asteroid.revision || asteroid._revision || 0,
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    asteroid.storm?.length || 0,
+    Math.floor(width),
+    Math.floor(height),
+    Math.floor(Number(camera.x || 0)),
+    Math.floor(Number(camera.y || 0)),
+    Math.floor(Number(padding || 0)),
+    noLens ? 1 : 0,
+    frame
+  ].join(":");
+  if (stormBoundaryRunCache?.key === key) {
+    return stormBoundaryRunCache.value;
+  }
+
+  const nativeOptions = {
+    sourcePadding: padding,
+    noLens,
+    lensEdgeScale: WORLD_LENS_EDGE_SCALE,
+    lensPower: WORLD_LENS_POWER,
+    lensNoiseRadial: WORLD_LENS_NOISE_RADIAL,
+    lensNoiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
+    lensDefectDensity: WORLD_LENS_DEFECT_DENSITY,
+    constants: {
+      fps: STORM_PATTERN_FPS,
+      scale: STORM_NOISE_SCALE,
+      speedX: STORM_NOISE_SPEED_X,
+      speedY: STORM_NOISE_SPEED_Y,
+      speedZ: STORM_NOISE_SPEED_Z
+    }
+  };
+  const stableTimeSeconds = frame / STORM_PATTERN_FPS;
+  const runs = stormBoundaryRunsNative(
+    asteroid,
+    camera,
+    width,
+    height,
+    stableTimeSeconds,
+    STORM_BOUNDARY_NOISE_THRESHOLD,
+    nativeOptions
+  );
+  const value = runs ? { runs } : null;
+  stormBoundaryRunCache = { key, value };
+  return value;
 }
 
 function drawStormBoundaryVertical(ctx, asteroid, x, y, length, worldX, worldY, timeSeconds, clip = null) {
@@ -6392,16 +7440,14 @@ function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {
 function drawHuckRockEntity(ctx, entity, camera, colors) {
   const screen = worldToScreen(entity, camera);
   const radius = Number(entity.radius || ENGINE.huckRock.radius);
-  const points = projectedHuckRockPoints(
-    entity.shapeSeed || entity.id || "huck-rock",
-    Math.round(screen.x),
-    Math.round(screen.y),
-    radius,
-    Number(entity.angleY) || 0,
-    Number(entity.angleX) || 0,
-    Number(entity.angleZ) || 0
-  );
-  const hull = convexHull(points);
+  const seed = entity.shapeSeed || entity.id || "huck-rock";
+  const centerX = Math.round(screen.x);
+  const centerY = Math.round(screen.y);
+  const yaw = Number(entity.angleY) || 0;
+  const pitch = Number(entity.angleX) || 0;
+  const roll = Number(entity.angleZ) || 0;
+  const hull = huckRockHullNative(seed, centerX, centerY, radius, yaw, pitch, roll) ||
+    convexHull(projectedHuckRockPoints(seed, centerX, centerY, radius, yaw, pitch, roll));
 
   if (hull.length < 2) {
     return;

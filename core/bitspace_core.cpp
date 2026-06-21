@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <queue>
+#include <unordered_map>
 #include <vector>
 
 #ifdef __EMSCRIPTEN__
@@ -21,6 +22,26 @@ constexpr int kMaxStoredStates = kMaxBeam * kMaxCandidates * kMaxSteps + kMaxBea
 constexpr double kEpsilon = 0.000001;
 constexpr int kPathDirectionCount = 5;
 constexpr int kPathStartDirection = 4;
+constexpr int kHuckRockPointCount = 14;
+constexpr int kSimplexGradientCount = 12;
+constexpr double kRaycastStepPixels = 0.5;
+constexpr double kRockCollisionCornerRadiusScale = 1.0 / 3.0;
+constexpr int kStormPatternRowCacheMax = 65536;
+
+constexpr int kSimplexGradients3D[kSimplexGradientCount][3] = {
+  {1, 1, 0},
+  {-1, 1, 0},
+  {1, -1, 0},
+  {-1, -1, 0},
+  {1, 0, 1},
+  {-1, 0, 1},
+  {1, 0, -1},
+  {-1, 0, -1},
+  {0, 1, 1},
+  {0, -1, 1},
+  {0, 1, -1},
+  {0, -1, -1}
+};
 
 struct Blocker {
   double x = 0;
@@ -122,6 +143,11 @@ struct VisibilitySegment {
   int wraps = 0;
 };
 
+struct HullPoint {
+  double x = 0;
+  double y = 0;
+};
+
 struct VisibilityEvent {
   double angle = 0;
   int segmentIndex = 0;
@@ -148,8 +174,149 @@ bool isFiniteDouble(double value) {
   return std::isfinite(value);
 }
 
+uint32_t mixUint32(uint32_t value) {
+  value ^= value >> 16;
+  value *= 2246822519U;
+  value ^= value >> 13;
+  value *= 3266489917U;
+  value ^= value >> 16;
+  return value;
+}
+
+struct StormPatternRowKey {
+  uint32_t permHash = 0;
+  int tileX = 0;
+  int tileY = 0;
+  int localY = 0;
+  int size = 0;
+  int threshold = 0;
+  int fps = 0;
+  int scale = 0;
+  int speedX = 0;
+  int speedY = 0;
+  int speedZ = 0;
+
+  bool operator==(const StormPatternRowKey& other) const {
+    return permHash == other.permHash &&
+      tileX == other.tileX &&
+      tileY == other.tileY &&
+      localY == other.localY &&
+      size == other.size &&
+      threshold == other.threshold &&
+      fps == other.fps &&
+      scale == other.scale &&
+      speedX == other.speedX &&
+      speedY == other.speedY &&
+      speedZ == other.speedZ;
+  }
+};
+
+struct StormPatternRowKeyHash {
+  std::size_t operator()(const StormPatternRowKey& key) const {
+    uint32_t hash = key.permHash ^ 2166136261U;
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.tileX));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.tileY));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.localY));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.size));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.threshold));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.fps));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.scale));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.speedX));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.speedY));
+    hash = mixUint32(hash ^ static_cast<uint32_t>(key.speedZ));
+    return static_cast<std::size_t>(hash);
+  }
+};
+
+std::unordered_map<StormPatternRowKey, uint32_t, StormPatternRowKeyHash> gStormPatternRowCache;
+int gStormPatternRowCacheFrame = std::numeric_limits<int>::min();
+
+struct LensProjectionEntry {
+  int baseX = 0;
+  int baseY = 0;
+  int defectX = 0;
+  int defectY = 0;
+  uint8_t baseValid = 0;
+  uint8_t defectPresent = 0;
+  uint8_t defectValid = 0;
+};
+
+struct LensProjectionCacheConfig {
+  int screenWidth = 0;
+  int screenHeight = 0;
+  int padding = 0;
+  int edgeScale = 0;
+  int power = 0;
+  int noiseRadial = 0;
+  int noiseTangential = 0;
+  int defectDensity = 0;
+};
+
+std::vector<LensProjectionEntry> gLensProjectionCache;
+LensProjectionCacheConfig gLensProjectionCacheConfig;
+bool gLensProjectionCacheReady = false;
+
+double randomUnit32(uint32_t seed, int salt) {
+  uint32_t value = seed ^ (static_cast<uint32_t>(salt + 1) * 374761393U);
+  value *= 668265263U;
+  return static_cast<double>(mixUint32(value)) / 4294967296.0;
+}
+
+uint32_t lensNoiseUint(int x, int y, uint32_t salt) {
+  uint32_t value = static_cast<uint32_t>(x) * 374761393U;
+  value ^= static_cast<uint32_t>(y) * 668265263U;
+  value ^= salt;
+  value = (value ^ (value >> 13)) * 1274126177U;
+  value = (value ^ (value >> 16)) * 2246822519U;
+  return value ^ (value >> 15);
+}
+
+double lensNoiseUnitAt(int x, int y, uint32_t salt) {
+  return static_cast<double>(lensNoiseUint(x, y, salt)) / 4294967295.0;
+}
+
+int floorInt(double value) {
+  return static_cast<int>(std::floor(value));
+}
+
+int floorDivInt(int value, int divisor) {
+  if (divisor <= 0) {
+    return 0;
+  }
+  int quotient = value / divisor;
+  const int remainder = value % divisor;
+  if (remainder != 0 && ((remainder < 0) != (divisor < 0))) {
+    quotient -= 1;
+  }
+  return quotient;
+}
+
+int positiveModuloInt(int value, int modulus) {
+  if (modulus <= 0) {
+    return 0;
+  }
+  int result = value % modulus;
+  return result < 0 ? result + modulus : result;
+}
+
+double roundedHundredth(double value) {
+  return std::round(value * 100.0) / 100.0;
+}
+
+double hullCross(const HullPoint& origin, const HullPoint& a, const HullPoint& b) {
+  return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
+}
+
 bool isMineableTile(uint8_t tile) {
   return tile == 1 || tile == 2 || tile == 3 || tile == 4;
+}
+
+bool isRenderSolidTile(uint8_t tile) {
+  return tile == 1 || tile == 2 || tile == 3 || tile == 4;
+}
+
+bool isRockCollisionTile(uint8_t tile) {
+  return tile == 1 || tile == 2 || tile == 3;
 }
 
 int pathStateId(int index, int direction) {
@@ -508,18 +675,301 @@ double valueNoise3(double x, double y, double z, uint32_t seed) {
   return lerpDouble(y0v, y1v, fz);
 }
 
-double stormVisualNoise(double x, double y, double z, uint32_t seed) {
-  double value = 0;
-  double amplitude = 1;
-  double weight = 0;
-  double frequency = 1;
-  for (int octave = 0; octave < 4; ++octave) {
-    value += (valueNoise3(x * frequency, y * frequency, z * frequency, seed + static_cast<uint32_t>(octave) * 1013U) * 2 - 1) * amplitude;
-    weight += amplitude;
-    amplitude *= 0.52;
-    frequency *= 2.07;
+double simplexCorner(
+  const uint8_t* perm,
+  int ii,
+  int jj,
+  int kk,
+  int i,
+  int j,
+  int k,
+  double x,
+  double y,
+  double z
+) {
+  double influence = 0.6 - x * x - y * y - z * z;
+  if (influence < 0) {
+    return 0;
   }
-  return weight > 0 ? clampDouble((value / weight) * 2.35, -1.0, 1.0) : 0;
+
+  const int gradientIndex = perm[ii + i + perm[jj + j + perm[kk + k]]] % kSimplexGradientCount;
+  const int* gradient = kSimplexGradients3D[gradientIndex];
+  influence *= influence;
+  return influence * influence * (
+    static_cast<double>(gradient[0]) * x +
+    static_cast<double>(gradient[1]) * y +
+    static_cast<double>(gradient[2]) * z
+  );
+}
+
+double simplexNoise3D(const uint8_t* perm, double x, double y, double z) {
+  const double skew = (x + y + z) / 3.0;
+  const int i = static_cast<int>(std::floor(x + skew));
+  const int j = static_cast<int>(std::floor(y + skew));
+  const int k = static_cast<int>(std::floor(z + skew));
+  const double unskew = static_cast<double>(i + j + k) / 6.0;
+  const double x0 = x - (static_cast<double>(i) - unskew);
+  const double y0 = y - (static_cast<double>(j) - unskew);
+  const double z0 = z - (static_cast<double>(k) - unskew);
+  int i1 = 0;
+  int j1 = 0;
+  int k1 = 0;
+  int i2 = 0;
+  int j2 = 0;
+  int k2 = 0;
+
+  if (x0 >= y0) {
+    if (y0 >= z0) {
+      i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0;
+    } else if (x0 >= z0) {
+      i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1;
+    } else {
+      i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1;
+    }
+  } else if (y0 < z0) {
+    i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1;
+  } else if (x0 < z0) {
+    i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1;
+  } else {
+    i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0;
+  }
+
+  const double x1 = x0 - static_cast<double>(i1) + 1.0 / 6.0;
+  const double y1 = y0 - static_cast<double>(j1) + 1.0 / 6.0;
+  const double z1 = z0 - static_cast<double>(k1) + 1.0 / 6.0;
+  const double x2 = x0 - static_cast<double>(i2) + 1.0 / 3.0;
+  const double y2 = y0 - static_cast<double>(j2) + 1.0 / 3.0;
+  const double z2 = z0 - static_cast<double>(k2) + 1.0 / 3.0;
+  const double x3 = x0 - 0.5;
+  const double y3 = y0 - 0.5;
+  const double z3 = z0 - 0.5;
+  const int ii = i & 255;
+  const int jj = j & 255;
+  const int kk = k & 255;
+
+  return 32.0 * (
+    simplexCorner(perm, ii, jj, kk, 0, 0, 0, x0, y0, z0) +
+    simplexCorner(perm, ii, jj, kk, i1, j1, k1, x1, y1, z1) +
+    simplexCorner(perm, ii, jj, kk, i2, j2, k2, x2, y2, z2) +
+    simplexCorner(perm, ii, jj, kk, 1, 1, 1, x3, y3, z3)
+  );
+}
+
+uint32_t stormPermutationHash(const uint8_t* perm) {
+  uint32_t hash = 2166136261U;
+  for (int index = 0; index < 256; ++index) {
+    hash ^= static_cast<uint32_t>(perm[index]);
+    hash *= 16777619U;
+  }
+  return hash;
+}
+
+int stormPatternQuantized(double value, double scale) {
+  return static_cast<int>(std::round(value * scale));
+}
+
+uint32_t stormPatternRowCached(
+  const uint8_t* perm,
+  uint32_t permHash,
+  int tileX,
+  int tileY,
+  int localY,
+  int size,
+  int frame,
+  double fps,
+  double threshold,
+  double scale,
+  double speedX,
+  double speedY,
+  double speedZ
+) {
+  if (!perm || size <= 0 || size > 31 || localY < 0 || localY >= size || fps <= 0 || scale <= 0) {
+    return 0;
+  }
+
+  if (gStormPatternRowCacheFrame != frame) {
+    gStormPatternRowCache.clear();
+    gStormPatternRowCacheFrame = frame;
+  } else if (gStormPatternRowCache.size() > kStormPatternRowCacheMax) {
+    gStormPatternRowCache.clear();
+  }
+
+  const StormPatternRowKey key {
+    permHash,
+    tileX,
+    tileY,
+    localY,
+    size,
+    stormPatternQuantized(threshold, 10000.0),
+    stormPatternQuantized(fps, 1000.0),
+    stormPatternQuantized(scale, 10000.0),
+    stormPatternQuantized(speedX, 1000.0),
+    stormPatternQuantized(speedY, 1000.0),
+    stormPatternQuantized(speedZ, 10000.0)
+  };
+  const auto cached = gStormPatternRowCache.find(key);
+  if (cached != gStormPatternRowCache.end()) {
+    return cached->second;
+  }
+
+  const double timeSeconds = static_cast<double>(frame) / fps;
+  const int worldLeft = tileX * size;
+  const int worldY = tileY * size + localY;
+  uint32_t row = 0;
+  for (int px = 0; px < size; ++px) {
+    const double sampleX = (static_cast<double>(worldLeft + px) + timeSeconds * speedX) * scale;
+    const double sampleY = (static_cast<double>(worldY) + timeSeconds * speedY) * scale;
+    const double sampleZ = timeSeconds * speedZ;
+    if (simplexNoise3D(perm, sampleX, sampleY, sampleZ) >= threshold) {
+      row |= (1U << static_cast<uint32_t>(px));
+    }
+  }
+  gStormPatternRowCache.emplace(key, row);
+  return row;
+}
+
+int lensProjectionQuantized(double value, double scale) {
+  return static_cast<int>(std::round(value * scale));
+}
+
+bool lensProjectionConfigMatches(const LensProjectionCacheConfig& config) {
+  return gLensProjectionCacheReady &&
+    gLensProjectionCacheConfig.screenWidth == config.screenWidth &&
+    gLensProjectionCacheConfig.screenHeight == config.screenHeight &&
+    gLensProjectionCacheConfig.padding == config.padding &&
+    gLensProjectionCacheConfig.edgeScale == config.edgeScale &&
+    gLensProjectionCacheConfig.power == config.power &&
+    gLensProjectionCacheConfig.noiseRadial == config.noiseRadial &&
+    gLensProjectionCacheConfig.noiseTangential == config.noiseTangential &&
+    gLensProjectionCacheConfig.defectDensity == config.defectDensity;
+}
+
+bool lensProjectionFinalInside(int screenWidth, int screenHeight, double radiusSq, double centerX, double centerY, int x, int y) {
+  if (x < 0 || y < 0 || x >= screenWidth || y >= screenHeight) {
+    return false;
+  }
+  const double dx = static_cast<double>(x) + 0.5 - centerX;
+  const double dy = static_cast<double>(y) + 0.5 - centerY;
+  return dx * dx + dy * dy <= radiusSq;
+}
+
+void ensureLensProjectionCache(
+  int screenWidth,
+  int screenHeight,
+  int padding,
+  double lensEdgeScale,
+  double lensPower,
+  double lensNoiseRadial,
+  double lensNoiseTangential,
+  double lensDefectDensity
+) {
+  padding = std::max(0, padding);
+  const LensProjectionCacheConfig config {
+    screenWidth,
+    screenHeight,
+    padding,
+    lensProjectionQuantized(lensEdgeScale, 10000.0),
+    lensProjectionQuantized(lensPower, 10000.0),
+    lensProjectionQuantized(lensNoiseRadial, 10000.0),
+    lensProjectionQuantized(lensNoiseTangential, 10000.0),
+    lensProjectionQuantized(lensDefectDensity, 10000.0)
+  };
+  if (lensProjectionConfigMatches(config)) {
+    return;
+  }
+
+  const int sourceWidth = screenWidth + padding * 2;
+  const int sourceHeight = screenHeight + padding * 2;
+  if (screenWidth <= 0 || screenHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+    gLensProjectionCache.clear();
+    gLensProjectionCacheReady = false;
+    return;
+  }
+
+  gLensProjectionCache.assign(static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight), {});
+  gLensProjectionCacheConfig = config;
+  gLensProjectionCacheReady = true;
+
+  const double centerX = static_cast<double>(screenWidth) / 2.0;
+  const double centerY = static_cast<double>(screenHeight) / 2.0;
+  const double radius = std::min(screenWidth, screenHeight) / 2.0;
+  const double radiusSq = radius * radius;
+  const double edgeScale = std::max(1.0, lensEdgeScale);
+  const double maxSourceRadius = radius * edgeScale;
+  const double power = std::max(1.0, lensPower);
+  const double edgeDenominator = std::max(0.0001, edgeScale - 1.0);
+
+  for (int sy = -padding; sy < screenHeight + padding; ++sy) {
+    for (int sx = -padding; sx < screenWidth + padding; ++sx) {
+      LensProjectionEntry entry;
+      const double dx = static_cast<double>(sx) + 0.5 - centerX;
+      const double dy = static_cast<double>(sy) + 0.5 - centerY;
+      const double sourceRadius = std::sqrt(dx * dx + dy * dy);
+      if (sourceRadius <= maxSourceRadius) {
+        if (sourceRadius == 0) {
+          entry.baseX = static_cast<int>(std::floor(centerX));
+          entry.baseY = static_cast<int>(std::floor(centerY));
+        } else {
+          const double t = clampDouble(sourceRadius / maxSourceRadius, 0.0, 1.0);
+          const double lensScale = 1.0 + (edgeScale - 1.0) * std::pow(t, power);
+          const double screenRadius = sourceRadius / lensScale;
+          const double unitX = dx / sourceRadius;
+          const double unitY = dy / sourceRadius;
+          entry.baseX = static_cast<int>(std::floor(centerX + unitX * screenRadius));
+          entry.baseY = static_cast<int>(std::floor(centerY + unitY * screenRadius));
+
+          const double lensFalloff = (lensScale - 1.0) / edgeDenominator;
+          const double defectDensity = clampDouble(lensFalloff * lensDefectDensity, 0.0, 1.0);
+          if (lensNoiseUnitAt(sx, sy, 0x36d2ae31U) <= defectDensity) {
+            const double radialNoise = (lensNoiseUnitAt(sx, sy, 0x4f1bbcdcU) * 2.0 - 1.0) * lensNoiseRadial;
+            const double tangentNoise = (lensNoiseUnitAt(sx, sy, 0x8ab23d31U) * 2.0 - 1.0) * lensNoiseTangential;
+            entry.defectX = static_cast<int>(std::floor(centerX + unitX * (screenRadius + radialNoise) - unitY * tangentNoise));
+            entry.defectY = static_cast<int>(std::floor(centerY + unitY * (screenRadius + radialNoise) + unitX * tangentNoise));
+            entry.defectPresent = 1;
+            entry.defectValid = lensProjectionFinalInside(
+              screenWidth,
+              screenHeight,
+              radiusSq,
+              centerX,
+              centerY,
+              entry.defectX,
+              entry.defectY
+            ) ? 1 : 0;
+          }
+        }
+        entry.baseValid = lensProjectionFinalInside(
+          screenWidth,
+          screenHeight,
+          radiusSq,
+          centerX,
+          centerY,
+          entry.baseX,
+          entry.baseY
+        ) ? 1 : 0;
+      }
+
+      const int cacheX = sx + padding;
+      const int cacheY = sy + padding;
+      gLensProjectionCache[static_cast<std::size_t>(cacheY) * static_cast<std::size_t>(sourceWidth) + static_cast<std::size_t>(cacheX)] = entry;
+    }
+  }
+}
+
+const LensProjectionEntry& lensProjectionEntryAt(int sx, int sy, int screenWidth, int padding) {
+  const int sourceWidth = screenWidth + padding * 2;
+  const int cacheX = sx + padding;
+  const int cacheY = sy + padding;
+  static const LensProjectionEntry empty;
+  if (
+    sourceWidth <= 0 ||
+    cacheX < 0 ||
+    cacheY < 0 ||
+    cacheX >= sourceWidth ||
+    static_cast<std::size_t>(cacheY) * static_cast<std::size_t>(sourceWidth) + static_cast<std::size_t>(cacheX) >= gLensProjectionCache.size()
+  ) {
+    return empty;
+  }
+  return gLensProjectionCache[static_cast<std::size_t>(cacheY) * static_cast<std::size_t>(sourceWidth) + static_cast<std::size_t>(cacheX)];
 }
 
 bool visibilityInBounds(int width, int height, int tileX, int tileY) {
@@ -549,7 +999,8 @@ int visibilityBlockerKind(
   int tileX,
   int tileY
 ) {
-  if (!visibilityPlayable(playable, width, height, tileX, tileY)) {
+  (void)playable;
+  if (!visibilityInBounds(width, height, tileX, tileY)) {
     return 0;
   }
   const uint8_t tile = tiles[tileY * width + tileX];
@@ -567,7 +1018,8 @@ bool visibilityBlocksSightTile(
   int tileX,
   int tileY
 ) {
-  if (!visibilityPlayable(playable, width, height, tileX, tileY)) {
+  (void)playable;
+  if (!visibilityInBounds(width, height, tileX, tileY)) {
     return false;
   }
   return visibilitySolidTile(tiles[tileY * width + tileX]);
@@ -581,7 +1033,8 @@ bool visibilityRockTileAt(
   int tileX,
   int tileY
 ) {
-  if (!visibilityPlayable(playable, width, height, tileX, tileY)) {
+  (void)playable;
+  if (!visibilityInBounds(width, height, tileX, tileY)) {
     return false;
   }
   return visibilityRockTile(tiles[tileY * width + tileX]);
@@ -866,6 +1319,123 @@ bool pointOverlapsBlockerShape(double x, double y, const Blocker& blocker) {
     return true;
   }
   return !pointInRoundedCutout(x, y, blocker);
+}
+
+bool raycastInBounds(int width, int height, int tileX, int tileY) {
+  return tileX >= 0 && tileY >= 0 && tileX < width && tileY < height;
+}
+
+bool raycastRockCollisionTileAt(const uint8_t* tiles, int width, int height, int tileX, int tileY) {
+  if (!raycastInBounds(width, height, tileX, tileY)) {
+    return false;
+  }
+  return isRockCollisionTile(tiles[tileY * width + tileX]);
+}
+
+Blocker raycastTileBlocker(
+  const uint8_t* tiles,
+  int width,
+  int height,
+  double tileSize,
+  int tileX,
+  int tileY,
+  uint8_t tile
+) {
+  Blocker blocker;
+  blocker.x = static_cast<double>(tileX) * tileSize;
+  blocker.y = static_cast<double>(tileY) * tileSize;
+  blocker.width = tileSize;
+  blocker.height = tileSize;
+  blocker.radius = 0;
+  blocker.cornerMask = 0;
+
+  if (!isRockCollisionTile(tile)) {
+    return blocker;
+  }
+
+  const bool north = raycastRockCollisionTileAt(tiles, width, height, tileX, tileY - 1);
+  const bool east = raycastRockCollisionTileAt(tiles, width, height, tileX + 1, tileY);
+  const bool south = raycastRockCollisionTileAt(tiles, width, height, tileX, tileY + 1);
+  const bool west = raycastRockCollisionTileAt(tiles, width, height, tileX - 1, tileY);
+  int cornerMask = 0;
+  if (!north && !west) {
+    cornerMask |= 1;
+  }
+  if (!north && !east) {
+    cornerMask |= 2;
+  }
+  if (!south && !east) {
+    cornerMask |= 4;
+  }
+  if (!south && !west) {
+    cornerMask |= 8;
+  }
+  if (cornerMask) {
+    blocker.cornerMask = cornerMask;
+    blocker.radius = std::max(1.0, std::round(tileSize * kRockCollisionCornerRadiusScale));
+  }
+  return blocker;
+}
+
+int raycastCollisionAt(
+  const uint8_t* tiles,
+  const uint8_t* playable,
+  int width,
+  int height,
+  int tileX,
+  int tileY,
+  int blockNonPlayable,
+  int& outTileX,
+  int& outTileY,
+  int& outIndex,
+  int& outTile,
+  int& outMineable
+) {
+  outTileX = tileX;
+  outTileY = tileY;
+  outIndex = -1;
+  outTile = 0;
+  outMineable = 0;
+  if (!raycastInBounds(width, height, tileX, tileY)) {
+    return blockNonPlayable ? 1 : 0;
+  }
+
+  const int index = tileY * width + tileX;
+  const uint8_t tile = tiles[index];
+  outIndex = index;
+  outTile = static_cast<int>(tile);
+  if (isMineableTile(tile)) {
+    outMineable = 1;
+    return 1;
+  }
+  if (blockNonPlayable && playable && playable[index] == 0) {
+    return 1;
+  }
+  return 0;
+}
+
+void writeRaycastOut(
+  double* out,
+  int hit,
+  int mineable,
+  double x,
+  double y,
+  double distance,
+  int tileX,
+  int tileY,
+  int index,
+  int tile
+) {
+  out[0] = 1;
+  out[1] = hit ? 1 : 0;
+  out[2] = mineable ? 1 : 0;
+  out[3] = x;
+  out[4] = y;
+  out[5] = distance;
+  out[6] = static_cast<double>(tileX);
+  out[7] = static_cast<double>(tileY);
+  out[8] = static_cast<double>(index);
+  out[9] = static_cast<double>(tile);
 }
 
 int roundedPrimitives(const Blocker& blocker, Primitive* primitives) {
@@ -1864,8 +2434,938 @@ BS_EXPORT int bs_visibility_spans_from_grid(
   );
 }
 
-BS_EXPORT int bs_storm_pattern_rows(
+BS_EXPORT int bs_huck_rock_hull(
   uint32_t seedHash,
+  double centerX,
+  double centerY,
+  double radius,
+  double yaw,
+  double pitch,
+  double roll,
+  double* outPoints,
+  int maxPointDoubles
+) {
+  if (!outPoints || maxPointDoubles < 4 || !isFiniteDouble(radius) || radius <= 0) {
+    return 0;
+  }
+
+  const double pi = std::acos(-1);
+  const double yawCos = std::cos(yaw);
+  const double yawSin = std::sin(yaw);
+  const double pitchCos = std::cos(pitch);
+  const double pitchSin = std::sin(pitch);
+  const double rollCos = std::cos(roll);
+  const double rollSin = std::sin(roll);
+  std::vector<HullPoint> projected;
+  projected.reserve(kHuckRockPointCount);
+
+  for (int index = 0; index < kHuckRockPointCount; ++index) {
+    const double z = randomUnit32(seedHash, index * 2) * 2.0 - 1.0;
+    const double angle = randomUnit32(seedHash, index * 2 + 1) * pi * 2.0;
+    const double pointRadius = std::sqrt(std::max(0.0, 1.0 - z * z));
+    const double px = std::cos(angle) * pointRadius;
+    const double py = std::sin(angle) * pointRadius;
+
+    const double yawedX = px * yawCos + z * yawSin;
+    const double yawedY = py;
+    const double yawedZ = -px * yawSin + z * yawCos;
+    const double pitchedX = yawedX;
+    const double pitchedY = yawedY * pitchCos - yawedZ * pitchSin;
+    const double pitchedZ = yawedY * pitchSin + yawedZ * pitchCos;
+    const double rotatedX = pitchedX * rollCos - pitchedY * rollSin;
+    const double rotatedY = pitchedX * rollSin + pitchedY * rollCos;
+    const double rotatedZ = pitchedZ;
+    const double perspective = 2.7 / (2.7 - rotatedZ * 0.55);
+
+    projected.push_back({
+      roundedHundredth(centerX + rotatedX * radius * perspective),
+      roundedHundredth(centerY + rotatedY * radius * perspective)
+    });
+  }
+
+  std::sort(projected.begin(), projected.end(), [](const HullPoint& a, const HullPoint& b) {
+    if (a.x == b.x) {
+      return a.y < b.y;
+    }
+    return a.x < b.x;
+  });
+
+  std::vector<HullPoint> lower;
+  lower.reserve(kHuckRockPointCount);
+  for (const HullPoint& point : projected) {
+    while (lower.size() >= 2 &&
+      hullCross(lower[lower.size() - 2], lower[lower.size() - 1], point) <= 0) {
+      lower.pop_back();
+    }
+    lower.push_back(point);
+  }
+
+  std::vector<HullPoint> upper;
+  upper.reserve(kHuckRockPointCount);
+  for (auto it = projected.rbegin(); it != projected.rend(); ++it) {
+    while (upper.size() >= 2 &&
+      hullCross(upper[upper.size() - 2], upper[upper.size() - 1], *it) <= 0) {
+      upper.pop_back();
+    }
+    upper.push_back(*it);
+  }
+  if (!lower.empty()) {
+    lower.pop_back();
+  }
+  if (!upper.empty()) {
+    upper.pop_back();
+  }
+
+  std::vector<HullPoint> hull;
+  hull.reserve(lower.size() + upper.size());
+  for (const HullPoint& point : lower) {
+    hull.push_back(point);
+  }
+  for (const HullPoint& point : upper) {
+    hull.push_back(point);
+  }
+
+  const int maxPoints = maxPointDoubles / 2;
+  const int count = std::min(static_cast<int>(hull.size()), maxPoints);
+  for (int index = 0; index < count; ++index) {
+    outPoints[index * 2] = hull[index].x;
+    outPoints[index * 2 + 1] = hull[index].y;
+  }
+  return count;
+}
+
+BS_EXPORT int bs_render_visibility_checker_layer(
+  const uint8_t* tiles,
+  const uint8_t* playable,
+  int mapWidth,
+  int mapHeight,
+  double tileSize,
+  double cameraX,
+  double cameraY,
+  int screenWidth,
+  int screenHeight,
+  int sourcePadding,
+  double lensEdgeScale,
+  double lensPower,
+  double lensNoiseRadial,
+  double lensNoiseTangential,
+  double lensDefectDensity,
+  uint8_t* outCodes,
+  int outCapacity
+) {
+  if (
+    !tiles ||
+    !playable ||
+    !outCodes ||
+    mapWidth <= 0 ||
+    mapHeight <= 0 ||
+    tileSize <= 0 ||
+    screenWidth <= 0 ||
+    screenHeight <= 0 ||
+    outCapacity < screenWidth * screenHeight
+  ) {
+    return 0;
+  }
+
+  std::fill(outCodes, outCodes + screenWidth * screenHeight, static_cast<uint8_t>(0));
+
+  const int tilePixels = std::max(1, static_cast<int>(std::round(tileSize)));
+  const int checkerSize = 2;
+  const double centerX = static_cast<double>(screenWidth) / 2.0;
+  const double centerY = static_cast<double>(screenHeight) / 2.0;
+  const double radius = std::min(screenWidth, screenHeight) / 2.0;
+  const double radiusSq = radius * radius;
+  const double edgeScale = std::max(1.0, lensEdgeScale);
+  const double maxSourceRadius = radius * edgeScale;
+  const double power = std::max(1.0, lensPower);
+  const double edgeDenominator = std::max(0.0001, edgeScale - 1.0);
+  const int minSourceX = -std::max(0, sourcePadding);
+  const int minSourceY = -std::max(0, sourcePadding);
+  const int maxSourceX = screenWidth + std::max(0, sourcePadding);
+  const int maxSourceY = screenHeight + std::max(0, sourcePadding);
+  const int mapTileCount = mapWidth * mapHeight;
+  const int renderCameraX = static_cast<int>(std::ceil(cameraX - 0.5));
+  const int renderCameraY = static_cast<int>(std::ceil(cameraY - 0.5));
+
+  auto writeFinal = [&](int x, int y) {
+    if (x < 0 || y < 0 || x >= screenWidth || y >= screenHeight) {
+      return;
+    }
+    const double dx = static_cast<double>(x) + 0.5 - centerX;
+    const double dy = static_cast<double>(y) + 0.5 - centerY;
+    if (dx * dx + dy * dy > radiusSq) {
+      return;
+    }
+    outCodes[y * screenWidth + x] = 1;
+  };
+
+  auto projectAndWrite = [&](int sx, int sy) {
+    const double dx = static_cast<double>(sx) + 0.5 - centerX;
+    const double dy = static_cast<double>(sy) + 0.5 - centerY;
+    const double sourceRadius = std::sqrt(dx * dx + dy * dy);
+    if (sourceRadius > maxSourceRadius) {
+      return;
+    }
+
+    if (sourceRadius == 0) {
+      writeFinal(static_cast<int>(std::floor(centerX)), static_cast<int>(std::floor(centerY)));
+      return;
+    }
+
+    const double t = clampDouble(sourceRadius / maxSourceRadius, 0.0, 1.0);
+    const double scale = 1.0 + (edgeScale - 1.0) * std::pow(t, power);
+    const double screenRadius = sourceRadius / scale;
+    const double unitX = dx / sourceRadius;
+    const double unitY = dy / sourceRadius;
+    const int baseX = static_cast<int>(std::floor(centerX + unitX * screenRadius));
+    const int baseY = static_cast<int>(std::floor(centerY + unitY * screenRadius));
+    writeFinal(baseX, baseY);
+
+    const double lensFalloff = (scale - 1.0) / edgeDenominator;
+    const double defectDensity = clampDouble(lensFalloff * lensDefectDensity, 0.0, 1.0);
+    if (lensNoiseUnitAt(sx, sy, 0x36d2ae31U) > defectDensity) {
+      return;
+    }
+
+    const double radialNoise = (lensNoiseUnitAt(sx, sy, 0x4f1bbcdcU) * 2.0 - 1.0) * lensNoiseRadial;
+    const double tangentNoise = (lensNoiseUnitAt(sx, sy, 0x8ab23d31U) * 2.0 - 1.0) * lensNoiseTangential;
+    writeFinal(
+      static_cast<int>(std::floor(centerX + unitX * (screenRadius + radialNoise) - unitY * tangentNoise)),
+      static_cast<int>(std::floor(centerY + unitY * (screenRadius + radialNoise) + unitX * tangentNoise))
+    );
+  };
+
+  for (int sy = minSourceY; sy < maxSourceY; ++sy) {
+    const int worldPixelY = sy + renderCameraY;
+    const int tileY = floorDivInt(worldPixelY, tilePixels);
+    const int localY = positiveModuloInt(worldPixelY, tilePixels);
+    const int checkerY = localY / checkerSize;
+
+    for (int sx = minSourceX; sx < maxSourceX; ++sx) {
+      const int worldPixelX = sx + renderCameraX;
+      const int tileX = floorDivInt(worldPixelX, tilePixels);
+      const int localX = positiveModuloInt(worldPixelX, tilePixels);
+      if ((((localX / checkerSize) + checkerY) & 1) == 0) {
+        continue;
+      }
+
+      bool skip = false;
+      if (tileX >= 0 && tileY >= 0 && tileX < mapWidth && tileY < mapHeight) {
+        const int index = tileY * mapWidth + tileX;
+        if (index >= 0 && index < mapTileCount && playable[index] && isRenderSolidTile(tiles[index])) {
+          skip = true;
+        }
+      }
+      if (!skip) {
+        projectAndWrite(sx, sy);
+      }
+    }
+  }
+
+  return 1;
+}
+
+BS_EXPORT int bs_render_storm_layer(
+  const uint8_t* storm,
+  const uint8_t* playable,
+  const uint8_t* perm,
+  int mapWidth,
+  int mapHeight,
+  double tileSize,
+  double cameraX,
+  double cameraY,
+  int screenWidth,
+  int screenHeight,
+  int sourcePadding,
+  double lensEdgeScale,
+  double lensPower,
+  double lensNoiseRadial,
+  double lensNoiseTangential,
+  double lensDefectDensity,
+  const int* maskRows,
+  int maskRowCount,
+  const int* maskSpans,
+  int maskSpanCount,
+  int maskOffsetY,
+  int frame,
+  double fps,
+  double threshold,
+  double scale,
+  double speedX,
+  double speedY,
+  double speedZ,
+  uint8_t* outCodes,
+  int outCapacity
+) {
+  if (
+    !storm ||
+    !perm ||
+    !outCodes ||
+    mapWidth <= 0 ||
+    mapHeight <= 0 ||
+    tileSize <= 0 ||
+    screenWidth <= 0 ||
+    screenHeight <= 0 ||
+    fps <= 0 ||
+    scale <= 0 ||
+    outCapacity < screenWidth * screenHeight
+  ) {
+    return 0;
+  }
+
+  std::fill(outCodes, outCodes + screenWidth * screenHeight, static_cast<uint8_t>(0));
+
+  const bool sourceMode = lensEdgeScale <= 0;
+  const double centerX = static_cast<double>(screenWidth) / 2.0;
+  const double centerY = static_cast<double>(screenHeight) / 2.0;
+  const double radius = std::min(screenWidth, screenHeight) / 2.0;
+  const double radiusSq = radius * radius;
+  const int padding = std::max(0, sourcePadding);
+  const int minSourceX = -padding;
+  const int minSourceY = -padding;
+  const int maxSourceX = screenWidth + padding;
+  const int maxSourceY = screenHeight + padding;
+  const double timeSeconds = static_cast<double>(frame) / fps;
+  const int tilePixels = std::max(1, static_cast<int>(std::round(tileSize)));
+  const uint32_t permHash = stormPermutationHash(perm);
+  int written = 0;
+  if (!sourceMode) {
+    ensureLensProjectionCache(
+      screenWidth,
+      screenHeight,
+      padding,
+      lensEdgeScale,
+      lensPower,
+      lensNoiseRadial,
+      lensNoiseTangential,
+      lensDefectDensity
+    );
+  }
+
+  auto maskAllows = [&](int sx, int sy) {
+    if (!maskRows || !maskSpans || maskRowCount <= 0 || maskSpanCount <= 0) {
+      return true;
+    }
+    const int row = sy - maskOffsetY;
+    if (row < 0 || row >= maskRowCount) {
+      return false;
+    }
+    const int start = maskRows[row * 2];
+    const int count = maskRows[row * 2 + 1];
+    if (start < 0 || count <= 0 || start + count > maskSpanCount) {
+      return false;
+    }
+    for (int index = start; index + 1 < start + count; index += 2) {
+      if (sx >= maskSpans[index] && sx < maskSpans[index + 1]) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto writeFinal = [&](int x, int y, uint8_t code) {
+    if (x < 0 || y < 0 || x >= screenWidth || y >= screenHeight) {
+      return false;
+    }
+    if (!sourceMode) {
+      const double dx = static_cast<double>(x) + 0.5 - centerX;
+      const double dy = static_cast<double>(y) + 0.5 - centerY;
+      if (dx * dx + dy * dy > radiusSq) {
+        return false;
+      }
+    }
+    uint8_t& target = outCodes[y * screenWidth + x];
+    const bool wasEmpty = target == 0;
+    if (code == 2 || target == 0) {
+      target = code;
+      if (wasEmpty) {
+        written += 1;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  struct StormProjectedPoint {
+    bool valid;
+    int x;
+    int y;
+  };
+
+  auto writeProjectedBridge = [&](int fromX, int fromY, int toX, int toY, uint8_t code) {
+    int x = fromX;
+    int y = fromY;
+    const int dx = std::abs(toX - fromX);
+    const int dy = -std::abs(toY - fromY);
+    const int stepX = fromX < toX ? 1 : -1;
+    const int stepY = fromY < toY ? 1 : -1;
+    int error = dx + dy;
+
+    while (true) {
+      writeFinal(x, y, code);
+      if (x == toX && y == toY) {
+        break;
+      }
+      const int doubled = error * 2;
+      if (doubled >= dy) {
+        error += dy;
+        x += stepX;
+      }
+      if (doubled <= dx) {
+        error += dx;
+        y += stepY;
+      }
+    }
+  };
+
+  auto projectAndWrite = [&](int sx, int sy, uint8_t code) -> StormProjectedPoint {
+    if (sourceMode) {
+      return {writeFinal(sx, sy, code), sx, sy};
+    }
+
+    const LensProjectionEntry& entry = lensProjectionEntryAt(sx, sy, screenWidth, padding);
+    if (!entry.baseValid && !entry.defectPresent) {
+      return {false, 0, 0};
+    }
+
+    bool wrote = false;
+    if (entry.baseValid) {
+      wrote = writeFinal(entry.baseX, entry.baseY, code) || wrote;
+    }
+
+    if (entry.defectPresent) {
+      if (entry.defectValid) {
+        wrote = writeFinal(entry.defectX, entry.defectY, code) || wrote;
+      }
+      return {wrote, entry.defectX, entry.defectY};
+    }
+
+    return {wrote, entry.baseX, entry.baseY};
+  };
+
+  for (int sy = minSourceY; sy < maxSourceY; ++sy) {
+    if (maskRows && maskRowCount > 0) {
+      const int row = sy - maskOffsetY;
+      if (row < 0 || row >= maskRowCount || maskRows[row * 2 + 1] <= 0) {
+        continue;
+      }
+    }
+
+    const double worldY = static_cast<double>(sy) + cameraY;
+    const int worldPixelY = floorInt(worldY);
+    const int tileY = static_cast<int>(std::floor(worldY / tileSize));
+    const int localY = positiveModuloInt(worldPixelY, tilePixels);
+    int cachedTileX = std::numeric_limits<int>::min();
+    uint32_t cachedPatternRow = 0;
+    StormProjectedPoint previousForeground{false, 0, 0};
+    int previousForegroundTileX = std::numeric_limits<int>::min();
+    int previousForegroundLocalY = -1;
+    int previousForegroundSourceX = std::numeric_limits<int>::min();
+    for (int sx = minSourceX; sx < maxSourceX; ++sx) {
+      if (!maskAllows(sx, sy)) {
+        previousForeground.valid = false;
+        continue;
+      }
+
+      const double worldX = static_cast<double>(sx) + cameraX;
+      const int worldPixelX = floorInt(worldX);
+      const int tileX = static_cast<int>(std::floor(worldX / tileSize));
+      const int localX = positiveModuloInt(worldPixelX, tilePixels);
+      const bool outOfBounds = tileX < 0 || tileY < 0 || tileX >= mapWidth || tileY >= mapHeight;
+      const int tileIndex = outOfBounds ? -1 : tileY * mapWidth + tileX;
+      if (
+        !outOfBounds &&
+        storm[tileIndex] != 2 &&
+        (!playable || playable[tileIndex] != 0)
+      ) {
+        previousForeground.valid = false;
+        continue;
+      }
+
+      if (tileX != cachedTileX) {
+        cachedTileX = tileX;
+        cachedPatternRow = stormPatternRowCached(
+          perm,
+          permHash,
+          tileX,
+          tileY,
+          localY,
+          tilePixels,
+          frame,
+          fps,
+          threshold,
+          scale,
+          speedX,
+          speedY,
+          speedZ
+        );
+      }
+      const uint8_t code = (cachedPatternRow & (1U << static_cast<uint32_t>(localX))) != 0 ? 2 : 1;
+      StormProjectedPoint projected = projectAndWrite(sx, sy, code);
+      if (code == 2 && projected.valid) {
+        if (
+          previousForeground.valid &&
+          previousForegroundTileX == tileX &&
+          previousForegroundLocalY == localY &&
+          previousForegroundSourceX + 1 == sx
+        ) {
+          writeProjectedBridge(previousForeground.x, previousForeground.y, projected.x, projected.y, code);
+        }
+        previousForeground = projected;
+        previousForegroundTileX = tileX;
+        previousForegroundLocalY = localY;
+        previousForegroundSourceX = sx;
+      } else {
+        previousForeground.valid = false;
+      }
+    }
+  }
+
+  return written;
+}
+
+BS_EXPORT int bs_render_storm_runs(
+  const uint8_t* storm,
+  const uint8_t* playable,
+  const uint8_t* perm,
+  int mapWidth,
+  int mapHeight,
+  double tileSize,
+  double cameraX,
+  double cameraY,
+  int screenWidth,
+  int screenHeight,
+  int sourcePadding,
+  double lensEdgeScale,
+  double lensPower,
+  double lensNoiseRadial,
+  double lensNoiseTangential,
+  double lensDefectDensity,
+  int frame,
+  double fps,
+  double threshold,
+  double scale,
+  double speedX,
+  double speedY,
+  double speedZ,
+  uint8_t* scratchCodes,
+  int scratchCapacity,
+  int* outRuns,
+  int outRunCapacityInts
+) {
+  if (
+    !outRuns ||
+    outRunCapacityInts < 4 ||
+    screenWidth <= 0 ||
+    screenHeight <= 0
+  ) {
+    return 0;
+  }
+
+  const int written = bs_render_storm_layer(
+    storm,
+    playable,
+    perm,
+    mapWidth,
+    mapHeight,
+    tileSize,
+    cameraX,
+    cameraY,
+    screenWidth,
+    screenHeight,
+    sourcePadding,
+    lensEdgeScale,
+    lensPower,
+    lensNoiseRadial,
+    lensNoiseTangential,
+    lensDefectDensity,
+    nullptr,
+    0,
+    nullptr,
+    0,
+    0,
+    frame,
+    fps,
+    threshold,
+    scale,
+    speedX,
+    speedY,
+    speedZ,
+    scratchCodes,
+    scratchCapacity
+  );
+  if (written <= 0) {
+    return 0;
+  }
+
+  const int maxRuns = outRunCapacityInts / 4;
+  int runCount = 0;
+  for (int y = 0; y < screenHeight; ++y) {
+    const int row = y * screenWidth;
+    int x = 0;
+    while (x < screenWidth) {
+      const uint8_t code = scratchCodes[row + x];
+      if (code == 0) {
+        x += 1;
+        continue;
+      }
+
+      const int startX = x;
+      x += 1;
+      while (x < screenWidth && scratchCodes[row + x] == code) {
+        x += 1;
+      }
+
+      if (runCount >= maxRuns) {
+        return -runCount;
+      }
+
+      const int offset = runCount * 4;
+      outRuns[offset] = y;
+      outRuns[offset + 1] = startX;
+      outRuns[offset + 2] = x;
+      outRuns[offset + 3] = static_cast<int>(code);
+      runCount += 1;
+    }
+  }
+
+  return runCount;
+}
+
+BS_EXPORT int bs_render_storm_boundary_runs(
+  const uint8_t* storm,
+  const uint8_t* playable,
+  const uint8_t* perm,
+  int mapWidth,
+  int mapHeight,
+  double tileSize,
+  double cameraX,
+  double cameraY,
+  int screenWidth,
+  int screenHeight,
+  int sourcePadding,
+  double lensEdgeScale,
+  double lensPower,
+  double lensNoiseRadial,
+  double lensNoiseTangential,
+  double lensDefectDensity,
+  int frame,
+  double fps,
+  double threshold,
+  double scale,
+  double speedX,
+  double speedY,
+  double speedZ,
+  int* outRuns,
+  int outRunCapacityInts
+) {
+  if (
+    !storm ||
+    !playable ||
+    !perm ||
+    !outRuns ||
+    mapWidth <= 0 ||
+    mapHeight <= 0 ||
+    tileSize <= 0 ||
+    screenWidth <= 0 ||
+    screenHeight <= 0 ||
+    fps <= 0 ||
+    scale <= 0 ||
+    outRunCapacityInts < 4
+  ) {
+    return 0;
+  }
+
+  auto safeTile = [&](int tileX, int tileY) {
+    if (tileX < 0 || tileY < 0 || tileX >= mapWidth || tileY >= mapHeight) {
+      return false;
+    }
+    const int index = tileY * mapWidth + tileX;
+    return playable[index] != 0 && storm[index] == 0;
+  };
+
+  const int tilePixels = std::max(1, static_cast<int>(std::round(tileSize)));
+  const uint32_t permHash = stormPermutationHash(perm);
+  const bool sourceMode = lensEdgeScale <= 0;
+  auto stormBoundaryMask = [&](int worldX, int worldY) {
+    const int tileX = static_cast<int>(std::floor(static_cast<double>(worldX) / tileSize));
+    const int tileY = static_cast<int>(std::floor(static_cast<double>(worldY) / tileSize));
+    const int localX = positiveModuloInt(worldX, tilePixels);
+    const int localY = positiveModuloInt(worldY, tilePixels);
+    const uint32_t row = stormPatternRowCached(
+      perm,
+      permHash,
+      tileX,
+      tileY,
+      localY,
+      tilePixels,
+      frame,
+      fps,
+      threshold,
+      scale,
+      speedX,
+      speedY,
+      speedZ
+    );
+    return (row & (1U << static_cast<uint32_t>(localX))) != 0;
+  };
+
+  const int maxRuns = outRunCapacityInts / 4;
+  int runCount = 0;
+  auto pushRun = [&](int y, int startX, int endX) {
+    if (y < 0 || y >= screenHeight || startX >= endX) {
+      return true;
+    }
+    startX = std::max(0, startX);
+    endX = std::min(screenWidth, endX);
+    if (startX >= endX) {
+      return true;
+    }
+    if (runCount >= maxRuns) {
+      return false;
+    }
+    const int offset = runCount * 4;
+    outRuns[offset] = y;
+    outRuns[offset + 1] = startX;
+    outRuns[offset + 2] = endX;
+    outRuns[offset + 3] = 2;
+    runCount += 1;
+    return true;
+  };
+
+  const int padding = std::max(0, sourcePadding);
+  const int minTileX = std::max(0, static_cast<int>(std::floor((cameraX - padding) / tileSize)) - 1);
+  const int maxTileX = std::min(
+    mapWidth - 1,
+    static_cast<int>(std::ceil((cameraX + static_cast<double>(screenWidth) + padding) / tileSize)) + 1
+  );
+  const int minTileY = std::max(0, static_cast<int>(std::floor((cameraY - padding) / tileSize)) - 1);
+  const int maxTileY = std::min(
+    mapHeight - 1,
+    static_cast<int>(std::ceil((cameraY + static_cast<double>(screenHeight) + padding) / tileSize)) + 1
+  );
+  const double centerX = static_cast<double>(screenWidth) / 2.0;
+  const double centerY = static_cast<double>(screenHeight) / 2.0;
+  const double radius = std::min(screenWidth, screenHeight) / 2.0;
+  const double radiusSq = radius * radius;
+  const double edgeScale = std::max(1.0, lensEdgeScale);
+  const double maxSourceRadius = radius * edgeScale;
+  const double power = std::max(1.0, lensPower);
+  const double edgeDenominator = std::max(0.0001, edgeScale - 1.0);
+
+  auto emitPixel = [&](int x, int y) {
+    if (x < 0 || y < 0 || x >= screenWidth || y >= screenHeight) {
+      return true;
+    }
+    if (!sourceMode) {
+      const double dx = static_cast<double>(x) + 0.5 - centerX;
+      const double dy = static_cast<double>(y) + 0.5 - centerY;
+      if (dx * dx + dy * dy > radiusSq) {
+        return true;
+      }
+    }
+    return pushRun(y, x, x + 1);
+  };
+
+  auto emitLine = [&](int x0, int y0, int x1, int y1) {
+    const int dx = std::abs(x1 - x0);
+    const int dy = -std::abs(y1 - y0);
+    const int stepX = x0 < x1 ? 1 : -1;
+    const int stepY = y0 < y1 ? 1 : -1;
+    int error = dx + dy;
+    int x = x0;
+    int y = y0;
+    while (true) {
+      if (!emitPixel(x, y)) {
+        return false;
+      }
+      if (x == x1 && y == y1) {
+        break;
+      }
+      const int doubled = error * 2;
+      if (doubled >= dy) {
+        error += dy;
+        x += stepX;
+      }
+      if (doubled <= dx) {
+        error += dx;
+        y += stepY;
+      }
+    }
+    return true;
+  };
+
+  auto projectBasePoint = [&](int sx, int sy, int& outX, int& outY) {
+    if (sourceMode) {
+      if (sx < 0 || sy < 0 || sx >= screenWidth || sy >= screenHeight) {
+        return false;
+      }
+      outX = sx;
+      outY = sy;
+      return true;
+    }
+
+    const double dx = static_cast<double>(sx) + 0.5 - centerX;
+    const double dy = static_cast<double>(sy) + 0.5 - centerY;
+    const double sourceRadius = std::sqrt(dx * dx + dy * dy);
+    if (sourceRadius > maxSourceRadius) {
+      return false;
+    }
+    if (sourceRadius == 0) {
+      outX = static_cast<int>(std::floor(centerX));
+      outY = static_cast<int>(std::floor(centerY));
+      return true;
+    }
+
+    const double t = clampDouble(sourceRadius / maxSourceRadius, 0.0, 1.0);
+    const double lensScale = 1.0 + (edgeScale - 1.0) * std::pow(t, power);
+    const double screenRadius = sourceRadius / lensScale;
+    const double unitX = dx / sourceRadius;
+    const double unitY = dy / sourceRadius;
+    outX = static_cast<int>(std::floor(centerX + unitX * screenRadius));
+    outY = static_cast<int>(std::floor(centerY + unitY * screenRadius));
+    return true;
+  };
+
+  auto emitDefectPoint = [&](int sx, int sy) {
+    if (sourceMode) {
+      return true;
+    }
+
+    const double dx = static_cast<double>(sx) + 0.5 - centerX;
+    const double dy = static_cast<double>(sy) + 0.5 - centerY;
+    const double sourceRadius = std::sqrt(dx * dx + dy * dy);
+    if (sourceRadius <= 0 || sourceRadius > maxSourceRadius) {
+      return true;
+    }
+
+    const double t = clampDouble(sourceRadius / maxSourceRadius, 0.0, 1.0);
+    const double lensScale = 1.0 + (edgeScale - 1.0) * std::pow(t, power);
+    const double lensFalloff = (lensScale - 1.0) / edgeDenominator;
+    const double defectDensity = clampDouble(lensFalloff * lensDefectDensity, 0.0, 1.0);
+    if (lensNoiseUnitAt(sx, sy, 0x36d2ae31U) > defectDensity) {
+      return true;
+    }
+
+    const double screenRadius = sourceRadius / lensScale;
+    const double unitX = dx / sourceRadius;
+    const double unitY = dy / sourceRadius;
+    const double radialNoise = (lensNoiseUnitAt(sx, sy, 0x4f1bbcdcU) * 2.0 - 1.0) * lensNoiseRadial;
+    const double tangentNoise = (lensNoiseUnitAt(sx, sy, 0x8ab23d31U) * 2.0 - 1.0) * lensNoiseTangential;
+    return emitPixel(
+      static_cast<int>(std::floor(centerX + unitX * (screenRadius + radialNoise) - unitY * tangentNoise)),
+      static_cast<int>(std::floor(centerY + unitY * (screenRadius + radialNoise) + unitX * tangentNoise))
+    );
+  };
+
+  auto drawVertical = [&](int screenX, int screenY, int worldX, int worldY) {
+    int previousX = 0;
+    int previousY = 0;
+    bool hasPrevious = false;
+    for (int offset = 0; offset < tilePixels; ++offset) {
+      const int px = screenX;
+      const int py = screenY + offset;
+      const bool on = px >= -padding &&
+        px < screenWidth + padding &&
+        py >= -padding &&
+        py < screenHeight + padding &&
+        stormBoundaryMask(worldX, worldY + offset);
+      if (on) {
+        int projectedX = 0;
+        int projectedY = 0;
+        if (projectBasePoint(px, py, projectedX, projectedY)) {
+          if (hasPrevious) {
+            if (!emitLine(previousX, previousY, projectedX, projectedY)) {
+              return false;
+            }
+          } else if (!emitPixel(projectedX, projectedY)) {
+            return false;
+          }
+          if (!emitDefectPoint(px, py)) {
+            return false;
+          }
+          previousX = projectedX;
+          previousY = projectedY;
+          hasPrevious = true;
+        } else {
+          hasPrevious = false;
+        }
+      } else {
+        hasPrevious = false;
+      }
+    }
+    return true;
+  };
+
+  auto drawHorizontal = [&](int screenX, int screenY, int worldX, int worldY) {
+    int previousX = 0;
+    int previousY = 0;
+    bool hasPrevious = false;
+    for (int offset = 0; offset < tilePixels; ++offset) {
+      const int px = screenX + offset;
+      const int py = screenY;
+      const bool on = px >= -padding &&
+        px < screenWidth + padding &&
+        py >= -padding &&
+        py < screenHeight + padding &&
+        stormBoundaryMask(worldX + offset, worldY);
+      if (on) {
+        int projectedX = 0;
+        int projectedY = 0;
+        if (projectBasePoint(px, py, projectedX, projectedY)) {
+          if (hasPrevious) {
+            if (!emitLine(previousX, previousY, projectedX, projectedY)) {
+              return false;
+            }
+          } else if (!emitPixel(projectedX, projectedY)) {
+            return false;
+          }
+          if (!emitDefectPoint(px, py)) {
+            return false;
+          }
+          previousX = projectedX;
+          previousY = projectedY;
+          hasPrevious = true;
+        } else {
+          hasPrevious = false;
+        }
+      } else {
+        hasPrevious = false;
+      }
+    }
+    return true;
+  };
+
+  for (int tileY = minTileY; tileY <= maxTileY; ++tileY) {
+    for (int tileX = minTileX; tileX <= maxTileX; ++tileX) {
+      if (!safeTile(tileX, tileY)) {
+        continue;
+      }
+      const int screenX = static_cast<int>(std::round(static_cast<double>(tileX) * tileSize - cameraX));
+      const int screenY = static_cast<int>(std::round(static_cast<double>(tileY) * tileSize - cameraY));
+      const int worldX = static_cast<int>(std::round(static_cast<double>(tileX) * tileSize));
+      const int worldY = static_cast<int>(std::round(static_cast<double>(tileY) * tileSize));
+
+      if (!safeTile(tileX - 1, tileY) && !drawVertical(screenX, screenY, worldX, worldY)) {
+        return -runCount;
+      }
+      if (!safeTile(tileX + 1, tileY) && !drawVertical(screenX + tilePixels - 1, screenY, worldX + tilePixels - 1, worldY)) {
+        return -runCount;
+      }
+      if (!safeTile(tileX, tileY - 1) && !drawHorizontal(screenX, screenY, worldX, worldY)) {
+        return -runCount;
+      }
+      if (!safeTile(tileX, tileY + 1) && !drawHorizontal(screenX, screenY + tilePixels - 1, worldX, worldY + tilePixels - 1)) {
+        return -runCount;
+      }
+    }
+  }
+
+  return runCount;
+}
+
+BS_EXPORT int bs_storm_pattern_rows(
+  const uint8_t* perm,
   int tileX,
   int tileY,
   int size,
@@ -1878,7 +3378,7 @@ BS_EXPORT int bs_storm_pattern_rows(
   double speedZ,
   uint32_t* outRows
 ) {
-  if (!outRows || size <= 0 || size > 32 || fps <= 0 || scale <= 0) {
+  if (!perm || !outRows || size <= 0 || size > 32 || fps <= 0 || scale <= 0) {
     return 0;
   }
 
@@ -1891,7 +3391,7 @@ BS_EXPORT int bs_storm_pattern_rows(
       const double sampleX = (static_cast<double>(worldLeft + px) + timeSeconds * speedX) * scale;
       const double sampleY = (static_cast<double>(worldTop + py) + timeSeconds * speedY) * scale;
       const double sampleZ = timeSeconds * speedZ;
-      if (stormVisualNoise(sampleX, sampleY, sampleZ, seedHash) >= threshold) {
+      if (simplexNoise3D(perm, sampleX, sampleY, sampleZ) >= threshold) {
         row |= (1U << static_cast<uint32_t>(px));
       }
     }
