@@ -146,7 +146,7 @@ const THEME_PRESETS = Object.freeze([
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
-  y: 8,
+  y: 70,
   padding: 8,
   rowTopOffset: 20,
   rowHeight: 16,
@@ -2105,17 +2105,8 @@ function bounceHuckRocks(a, b, spawnedFragments) {
     b.vy += normal.y * impulse;
   }
 
-  consumeHuckRockBounce(a, spawnedFragments, "rock");
-  consumeHuckRockBounce(b, spawnedFragments, "rock");
-}
-
-function consumeHuckRockBounce(rock, spawnedFragments, reason) {
-  if ((rock.bounceCount || 0) >= 1) {
-    breakMenuHuckRock(rock, null, spawnedFragments, reason);
-    return;
-  }
-
-  rock.bounceCount = 1;
+  breakMenuHuckRock(a, null, spawnedFragments, "rock");
+  breakMenuHuckRock(b, null, spawnedFragments, "rock");
 }
 
 function breakMenuHuckRock(rock, hit, spawnedFragments, reason = "break") {

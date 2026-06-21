@@ -772,17 +772,8 @@ function bounceHuckRocks(arena, a, b) {
     b.vy += normal.y * impulse;
   }
 
-  consumeHuckRockBounce(arena, a, "rock");
-  consumeHuckRockBounce(arena, b, "rock");
-}
-
-function consumeHuckRockBounce(arena, rock, reason) {
-  if ((rock.bounceCount || 0) >= 1) {
-    breakHuckRock(arena, rock, reason);
-    return;
-  }
-
-  rock.bounceCount = 1;
+  breakHuckRock(arena, a, "rock");
+  breakHuckRock(arena, b, "rock");
 }
 
 function breakHuckRock(arena, rock, reason = "break") {
