@@ -43,6 +43,25 @@ const STORM_NOISE_SPEED_Y = 5;
 const STORM_NOISE_SPEED_Z = 0.1;
 const STORM_PATTERN_FPS = 20;
 const STORM_PATTERN_MAX_CACHE = 4096;
+const ASTEROID_VISIBILITY_EXPERIMENT = true;
+const ASTEROID_VISIBILITY_STORAGE_VERSION = 1;
+const ASTEROID_VISIBILITY_STORAGE_PREFIX = "bitspace.asteroidVisibility:";
+const ASTEROID_VISIBILITY_SAVE_INTERVAL_MS = 500;
+const ASTEROID_VISIBILITY_BASE_RAYS = 96;
+const ASTEROID_VISIBILITY_ANGLE_EPSILON = 0.0008;
+const ASTEROID_VISIBILITY_DILATE_PIXELS = 1;
+const ASTEROID_VISIBILITY_CORNER = Object.freeze({
+  topLeft: 1,
+  topRight: 2,
+  bottomRight: 4,
+  bottomLeft: 8
+});
+const ASTEROID_VISIBILITY_ALL_CORNERS =
+  ASTEROID_VISIBILITY_CORNER.topLeft |
+  ASTEROID_VISIBILITY_CORNER.topRight |
+  ASTEROID_VISIBILITY_CORNER.bottomRight |
+  ASTEROID_VISIBILITY_CORNER.bottomLeft;
+const ASTEROID_VISIBILITY_FULL_CIRCLE = Math.PI * 2;
 const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
   { x: -1, y: -1 },
   { x: 0, y: -1 },
@@ -55,6 +74,7 @@ const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
 ]);
 const ROCK_OUTER_CORNER_RADIUS = Math.round(RENDER.tileSize / 3);
 const ROCK_INNER_CORNER_RADIUS = 1;
+const ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS = Math.max(2, Math.ceil(ROCK_OUTER_CORNER_RADIUS * 0.5));
 const SMALL_ORB_RADIUS = 3;
 const REAR_ORBS = Object.freeze([
   { rear: 7, side: -5, layer: "back" },
@@ -147,8 +167,16 @@ const stormPatternCache = new Map();
 let stormPatternCacheFrame = null;
 const huckRockShapeCache = new Map();
 const asteroidBoundaryContourCache = new WeakMap();
+const asteroidVisibilityExploredCache = new WeakMap();
+const asteroidVisibilityExploredRecords = new Set();
 let playerMapScratchCanvas = null;
 let playerMapScratchContext = null;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    flushAsteroidVisibilityExploredRecords();
+  });
+}
 
 function playerMapCompactCellSize() {
   return PLAYER_MAP_CELL_SIZE / Math.max(1, PLAYER_MAP_COMPACT_SAMPLE_TILES);
@@ -520,6 +548,7 @@ function createPixelSurface(canvasContext, width, height) {
   let currentColor = packColor(RENDER.foreground);
   let activeClip = null;
   let activeLens = null;
+  let activeWorldMask = null;
 
   function canWriteProjectedPixel(x, y) {
     return x >= 0 &&
@@ -600,6 +629,21 @@ function createPixelSurface(canvasContext, width, height) {
     endLens() {
       activeLens = null;
     },
+    beginWorldMask(mask) {
+      activeWorldMask = mask || null;
+    },
+    endWorldMask() {
+      activeWorldMask = null;
+    },
+    withoutWorldMask(callback) {
+      const previous = activeWorldMask;
+      activeWorldMask = null;
+      try {
+        return callback();
+      } finally {
+        activeWorldMask = previous;
+      }
+    },
     endClip() {
       activeClip = null;
     },
@@ -629,6 +673,10 @@ function createPixelSurface(canvasContext, width, height) {
           let previous = null;
           for (let py = y0; py < y1; py += 1) {
             for (let px = x0; px < x1; px += 1) {
+              if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+                previous = null;
+                continue;
+              }
               const projected = projectLensPixel(px, py, activeLens);
               if (!writeProjectedPixel(projected)) {
                 previous = null;
@@ -646,6 +694,9 @@ function createPixelSurface(canvasContext, width, height) {
 
         for (let py = y0; py < y1; py += 1) {
           for (let px = x0; px < x1; px += 1) {
+            if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+              continue;
+            }
             const projected = projectLensPixel(px, py, activeLens);
             writeProjectedPixel(projected);
           }
@@ -672,13 +723,16 @@ function createPixelSurface(canvasContext, width, height) {
 
           const row = py * width;
           for (let px = start; px < end; px += 1) {
+            if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+              continue;
+            }
             pixels[row + px] = currentColor;
           }
         }
         return;
       }
 
-      if (x0 === 0 && y0 === 0 && x1 === width && y1 === height) {
+      if (!activeWorldMask && x0 === 0 && y0 === 0 && x1 === width && y1 === height) {
         pixels.fill(currentColor);
         return;
       }
@@ -686,6 +740,9 @@ function createPixelSurface(canvasContext, width, height) {
       for (let py = y0; py < y1; py += 1) {
         const row = py * width;
         for (let px = x0; px < x1; px += 1) {
+          if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+            continue;
+          }
           pixels[row + px] = currentColor;
         }
       }
@@ -1003,14 +1060,41 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   );
   const asteroidMiningTargets = asteroidMiningTargetMap(snapshot);
   const localPlayer = renderPlayers.find((player) => player.id === options.playerId);
+  const cameraPlayer = renderPlayers.find((player) => player.id === (options.cameraPlayerId || options.playerId)) ||
+    localPlayer ||
+    renderPlayers.find((player) => player.alive !== false) ||
+    renderPlayers[0] ||
+    null;
+  const visibility = createAsteroidVisibilityMask(ctx, options, options.asteroid, cameraPlayer, camera);
+  const worldRenderPlayers = visibility
+    ? renderPlayers.filter((player) => playerTouchesAsteroidVisibility(visibility, player))
+    : renderPlayers;
 
   if (options.playerMapLarge && options.playerMap?.cells && options.asteroid) {
     drawFullPlayerMapFrame(ctx, options, colors);
   } else {
-    beginWorldViewport(ctx, colors);
-    drawStars(ctx, snapshot, camera);
+    beginWorldViewport(ctx, colors, !visibility);
+    if (visibility) {
+      drawAsteroidVisibilityExploredBackground(ctx, visibility, camera, colors);
+      if (typeof ctx.beginWorldMask === "function") {
+        ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
+      }
+      ctx.fillStyle = colors.background;
+      ctx.fillRect(-visibility.sourcePadding, -visibility.sourcePadding, ctx.width + visibility.sourcePadding * 2, ctx.height + visibility.sourcePadding * 2);
+      drawStars(ctx, snapshot, camera);
+    } else {
+      drawStars(ctx, snapshot, camera);
+    }
     if (options.asteroid) {
-      drawAsteroid(ctx, options.asteroid, camera, colors, options.timeSeconds ?? snapshot.tick / 60, asteroidMiningTargets);
+      drawAsteroid(
+        ctx,
+        options.asteroid,
+        camera,
+        colors,
+        options.timeSeconds ?? snapshot.tick / 60,
+        asteroidMiningTargets,
+        visibility
+      );
     } else {
       drawWorldBounds(ctx, snapshot, camera);
     }
@@ -1023,7 +1107,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       drawBuildPreview(ctx, options.asteroid, localPlayer, renderPlayers, camera, options.build, colors);
     }
 
-    for (const renderPlayer of renderPlayers) {
+    for (const renderPlayer of worldRenderPlayers) {
       if (renderPlayer.thrusting) {
         emitThrusterParticles(particleState, renderPlayer, options.dtSeconds);
       }
@@ -1037,9 +1121,11 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     updateParticles(particleState.miningParticles, options.dtSeconds);
     drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
 
-    for (const renderPlayer of renderPlayers) {
+    for (const renderPlayer of worldRenderPlayers) {
       if (renderPlayer.mining) {
-        drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+        drawWithoutWorldMask(ctx, () => {
+          drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+        });
       }
       drawShip(
         ctx,
@@ -1055,15 +1141,19 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
     drawControllerAimCursor(ctx, localPlayer, camera, options.controllerAimCursor, colors);
 
-    drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
+    drawWithoutWorldMask(ctx, () => {
+      drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
+    });
 
-    for (const renderPlayer of renderPlayers) {
+    for (const renderPlayer of worldRenderPlayers) {
       if (renderPlayer.mining) {
-        drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+        drawWithoutWorldMask(ctx, () => {
+          drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+        });
       }
     }
 
-    for (const renderPlayer of renderPlayers) {
+    for (const renderPlayer of worldRenderPlayers) {
       drawTalkBubble(ctx, renderPlayer, camera, colors, textRenderer);
     }
     drawBotDebugWorldOverlay(ctx, options.botDebugOverlay, camera);
@@ -1221,17 +1311,30 @@ function drawFullPlayerMapFrame(ctx, options, colors) {
   ctx.endClip();
 }
 
-function beginWorldViewport(ctx, colors) {
+function beginWorldViewport(ctx, colors, fillBackground = true) {
   ctx.beginCircleClip();
-  ctx.fillStyle = colors.background;
-  ctx.fillRect(0, 0, ctx.width, ctx.height);
+  if (fillBackground) {
+    ctx.fillStyle = colors.background;
+    ctx.fillRect(0, 0, ctx.width, ctx.height);
+  }
   ctx.beginLens(createWorldLens(ctx.width, ctx.height));
   ctx.fillStyle = colors.foreground;
 }
 
 function endWorldViewport(ctx) {
+  if (typeof ctx.endWorldMask === "function") {
+    ctx.endWorldMask();
+  }
   ctx.endLens();
   ctx.endClip();
+}
+
+function drawWithoutWorldMask(ctx, callback) {
+  if (typeof ctx.withoutWorldMask === "function") {
+    return ctx.withoutWorldMask(callback);
+  }
+
+  return callback();
 }
 
 function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
@@ -3110,8 +3213,16 @@ function asteroidMiningTargetMap(snapshot) {
   return targets;
 }
 
-function drawAsteroid(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets) {
-  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets);
+function drawAsteroid(
+  ctx,
+  asteroid,
+  camera,
+  colors,
+  timeSeconds,
+  asteroidMiningTargets,
+  visibility = null
+) {
+  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility);
   drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds);
   if (asteroid.storm) {
     drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
@@ -3349,7 +3460,15 @@ function stormNoiseForSeed(seed) {
   return noise;
 }
 
-function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets) {
+function drawAsteroidTiles(
+  ctx,
+  asteroid,
+  camera,
+  colors,
+  timeSeconds,
+  asteroidMiningTargets,
+  visibility = null
+) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
   const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
@@ -3363,17 +3482,19 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidM
     Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
   );
 
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      const index = tileY * asteroid.widthTiles + tileX;
-      const tile = asteroid.tiles[index];
-      if (!isSolidTile(tile)) {
-        continue;
-      }
+  if (!visibility) {
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        const index = tileY * asteroid.widthTiles + tileX;
+        const tile = asteroid.tiles[index];
+        if (!isSolidTile(tile)) {
+          continue;
+        }
 
-      const screenX = Math.round(tileX * tileSize - camera.x);
-      const screenY = Math.round(tileY * tileSize - camera.y);
-      drawRockFill(ctx, screenX, screenY, tileSize, colors);
+        const screenX = Math.round(tileX * tileSize - camera.x);
+        const screenY = Math.round(tileY * tileSize - camera.y);
+        drawRockFill(ctx, screenX, screenY, tileSize, colors);
+      }
     }
   }
 
@@ -3382,55 +3503,1075 @@ function drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidM
       const index = tileY * asteroid.widthTiles + tileX;
       const tile = asteroid.tiles[index];
       if (!isSolidTile(tile)) {
+        continue;
+      }
+      if (visibility && !asteroidVisibilityRendersShell(visibility, tileX, tileY)) {
         continue;
       }
 
       const screenX = Math.round(tileX * tileSize - camera.x);
       const screenY = Math.round(tileY * tileSize - camera.y);
       if (tile === ASTEROID_TILE.wall) {
-        drawWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+        drawWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
       } else {
-        drawRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors);
+        drawRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
       }
     }
   }
 
-  drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors);
+  drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility);
 
-  ctx.fillStyle = colors.foreground;
+  const drawResources = () => {
+    ctx.fillStyle = colors.foreground;
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        const index = tileY * asteroid.widthTiles + tileX;
+        const tile = asteroid.tiles[index];
+        if (!isRockTile(tile)) {
+          continue;
+        }
+
+        const screenX = Math.round(tileX * tileSize - camera.x);
+        const screenY = Math.round(tileY * tileSize - camera.y);
+        if (tile === ASTEROID_TILE.ore) {
+          const amount = amountAt(asteroid, index);
+          drawOreRings(
+            ctx,
+            screenX,
+            screenY,
+            tileSize,
+            amount,
+            hashCell(asteroid.seed, tileX, tileY),
+            oreMiningProgressFor(asteroidMiningTargets, index, amount)
+          );
+        } else if (tile === ASTEROID_TILE.diamond) {
+          drawDiamondWireframe(
+            ctx,
+            screenX,
+            screenY,
+            tileSize,
+            hashCell(asteroid.seed, tileX, tileY),
+            diamondMiningProgressFor(asteroidMiningTargets, index)
+          );
+        }
+      }
+    }
+  };
+  if (visibility && typeof ctx.withoutWorldMask === "function") {
+    ctx.withoutWorldMask(drawResources);
+  } else {
+    drawResources();
+  }
+}
+
+function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
+  if (
+    !ASTEROID_VISIBILITY_EXPERIMENT ||
+    options.playerMapLarge ||
+    options.room?.state !== "active" ||
+    !asteroid ||
+    !player ||
+    player.alive === false
+  ) {
+    return null;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const width = asteroid.widthTiles;
+  const height = asteroid.heightTiles;
+  const count = width * height;
+  const playerId = player.id || "camera";
+  const storageKey = asteroidVisibilityStorageKey(options, asteroid, playerId, count);
+  const exploredRecord = asteroidVisibilityExploredCells(asteroid, playerId, count, storageKey);
+  const explored = exploredRecord.cells;
+  const sourcePadding = cameraCullPadding(camera);
+  const radius = Math.min(ctx.width, ctx.height) / 2 + sourcePadding;
+  const bounds = {
+    minTileX: clamp(Math.floor((player.x - radius) / tileSize) - 1, 0, width - 1),
+    maxTileX: clamp(Math.ceil((player.x + radius) / tileSize) + 1, 0, width - 1),
+    minTileY: clamp(Math.floor((player.y - radius) / tileSize) - 1, 0, height - 1),
+    maxTileY: clamp(Math.ceil((player.y + radius) / tileSize) + 1, 0, height - 1)
+  };
+  const startTileX = Math.floor(player.x / tileSize);
+  const startTileY = Math.floor(player.y / tileSize);
+  if (startTileX < 0 || startTileY < 0 || startTileX >= width || startTileY >= height) {
+    return null;
+  }
+
+  if (!asteroidVisibilityCanStartAt(asteroid, startTileX, startTileY)) {
+    return null;
+  }
+
+  const origin = {
+    x: player.x - camera.x,
+    y: player.y - camera.y
+  };
+  const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds);
+  const polygon = buildAsteroidVisibilityPolygon(origin, radius, segments);
+  const spans = rasterizeAsteroidVisibilityPolygon(polygon);
+  const visibility = {
+    asteroid,
+    explored,
+    width,
+    height,
+    tileSize,
+    playerId,
+    cameraX: camera.x,
+    cameraY: camera.y,
+    origin,
+    radius,
+    sourcePadding,
+    spans
+  };
+  markAsteroidVisibilityExploredFromMask(exploredRecord, visibility, bounds);
+  saveAsteroidVisibilityExploredRecord(exploredRecord);
+  return visibility;
+}
+
+function asteroidVisibilityExploredCells(asteroid, playerId, count, storageKey) {
+  let byPlayer = asteroidVisibilityExploredCache.get(asteroid);
+  if (!byPlayer) {
+    byPlayer = new Map();
+    asteroidVisibilityExploredCache.set(asteroid, byPlayer);
+  }
+
+  const key = storageKey || String(playerId || "camera");
+  const cached = byPlayer.get(key);
+  if (cached?.cells?.length === count) {
+    return cached;
+  }
+
+  const explored = readAsteroidVisibilityExploredCells(storageKey, count) || new Uint8Array(count);
+  const record = {
+    cells: explored,
+    storageKey,
+    dirty: false,
+    lastSaveAtMs: 0
+  };
+  byPlayer.set(key, record);
+  if (storageKey) {
+    asteroidVisibilityExploredRecords.add(record);
+  }
+  return record;
+}
+
+function asteroidVisibilityStorageKey(options, asteroid, playerId, count) {
+  if (typeof window === "undefined" || !window.localStorage || !asteroid) {
+    return null;
+  }
+
+  const roomId = options.room?.roomId ||
+    options.room?.id ||
+    options.room?.roomName ||
+    "local";
+  const asteroidSeed = asteroid.seed || options.room?.seed || "asteroid";
+  return [
+    ASTEROID_VISIBILITY_STORAGE_PREFIX,
+    localStorageKeyPart(roomId),
+    localStorageKeyPart(playerId || "camera"),
+    localStorageKeyPart(asteroidSeed),
+    asteroid.widthTiles,
+    asteroid.heightTiles,
+    count
+  ].join(":");
+}
+
+function localStorageKeyPart(value) {
+  return encodeURIComponent(String(value ?? ""));
+}
+
+function readAsteroidVisibilityExploredCells(storageKey, count) {
+  if (!storageKey || typeof window === "undefined" || !window.localStorage) {
+    return null;
+  }
+
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(storageKey) || "null");
+    if (
+      !stored ||
+      stored.version !== ASTEROID_VISIBILITY_STORAGE_VERSION ||
+      stored.count !== count ||
+      typeof stored.cells !== "string"
+    ) {
+      return null;
+    }
+
+    return decodeAsteroidVisibilityCells(stored.cells, count);
+  } catch (error) {
+    window.localStorage.removeItem(storageKey);
+    return null;
+  }
+}
+
+function markAsteroidVisibilityExplored(record, index) {
+  if (!record?.cells || index < 0 || index >= record.cells.length || record.cells[index] === 1) {
+    return;
+  }
+
+  record.cells[index] = 1;
+  record.dirty = true;
+}
+
+function saveAsteroidVisibilityExploredRecord(record, options = {}) {
+  if (!record?.dirty || !record.storageKey || typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+
+  const now = performance.now();
+  if (
+    !options.force &&
+    record.lastSaveAtMs > 0 &&
+    now - record.lastSaveAtMs < ASTEROID_VISIBILITY_SAVE_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(record.storageKey, JSON.stringify({
+      version: ASTEROID_VISIBILITY_STORAGE_VERSION,
+      count: record.cells.length,
+      cells: encodeAsteroidVisibilityCells(record.cells)
+    }));
+    record.dirty = false;
+    record.lastSaveAtMs = now;
+  } catch (error) {
+    // Visibility memory is a rendering cache; storage failure should not affect gameplay.
+  }
+}
+
+function flushAsteroidVisibilityExploredRecords() {
+  for (const record of asteroidVisibilityExploredRecords) {
+    saveAsteroidVisibilityExploredRecord(record, { force: true });
+  }
+}
+
+function encodeAsteroidVisibilityCells(cells) {
+  const bytes = new Uint8Array(Math.ceil(cells.length / 8));
+  for (let index = 0; index < cells.length; index += 1) {
+    if (cells[index] !== 1) {
+      continue;
+    }
+    bytes[index >> 3] |= 1 << (index & 7);
+  }
+  return bytesToBase64(bytes);
+}
+
+function decodeAsteroidVisibilityCells(encoded, count) {
+  const bytes = base64ToBytes(encoded);
+  if (!bytes) {
+    return null;
+  }
+
+  const cells = new Uint8Array(count);
+  for (let index = 0; index < count; index += 1) {
+    cells[index] = (bytes[index >> 3] & (1 << (index & 7))) !== 0 ? 1 : 0;
+  }
+  return cells;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 8192;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(encoded) {
+  try {
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  } catch (error) {
+    return null;
+  }
+}
+
+function asteroidVisibilityCanStartAt(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  return isPlayableTile(asteroid, tileX, tileY) && !isSolidTile(asteroid.tiles[index]);
+}
+
+function drawAsteroidVisibilityExploredBackground(ctx, visibility, camera, colors) {
+  const tileSize = visibility.tileSize;
+  const padding = visibility.sourcePadding || cameraCullPadding(camera);
+  const minTileX = clamp(Math.floor((camera.x - padding) / tileSize) - 1, 0, visibility.width - 1);
+  const maxTileX = clamp(Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1, 0, visibility.width - 1);
+  const minTileY = clamp(Math.floor((camera.y - padding) / tileSize) - 1, 0, visibility.height - 1);
+  const maxTileY = clamp(Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1, 0, visibility.height - 1);
+
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      const index = tileY * asteroid.widthTiles + tileX;
-      const tile = asteroid.tiles[index];
-      if (!isRockTile(tile)) {
+      const index = tileY * visibility.width + tileX;
+      if (visibility.explored?.[index] !== 1 || isSolidTile(visibility.asteroid.tiles[index])) {
         continue;
       }
 
-      const screenX = Math.round(tileX * tileSize - camera.x);
-      const screenY = Math.round(tileY * tileSize - camera.y);
-      if (tile === ASTEROID_TILE.ore) {
-        const amount = amountAt(asteroid, index);
-        drawOreRings(
-          ctx,
-          screenX,
-          screenY,
-          tileSize,
-          amount,
-          hashCell(asteroid.seed, tileX, tileY),
-          oreMiningProgressFor(asteroidMiningTargets, index, amount)
+      drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors);
+    }
+  }
+}
+
+function drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors) {
+  const x = Math.round(tileX * tileSize - camera.x);
+  const y = Math.round(tileY * tileSize - camera.y);
+  const checkerSize = 2;
+
+  ctx.fillStyle = colors.background;
+  for (let offsetY = 0; offsetY < tileSize; offsetY += checkerSize) {
+    for (let offsetX = 0; offsetX < tileSize; offsetX += checkerSize) {
+      if ((((offsetX / checkerSize) + (offsetY / checkerSize)) & 1) !== 0) {
+        continue;
+      }
+
+      ctx.fillRect(
+        x + offsetX,
+        y + offsetY,
+        Math.min(checkerSize, tileSize - offsetX),
+        Math.min(checkerSize, tileSize - offsetY)
+      );
+    }
+  }
+}
+
+function buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds) {
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const segments = [];
+  const radiusSq = radius * radius;
+
+  for (let tileY = bounds.minTileY; tileY <= bounds.maxTileY; tileY += 1) {
+    for (let tileX = bounds.minTileX; tileX <= bounds.maxTileX; tileX += 1) {
+      const blockerKind = asteroidVisibilityBlockerKind(asteroid, tileX, tileY);
+      if (!blockerKind) {
+        continue;
+      }
+
+      const left = tileX * tileSize;
+      const top = tileY * tileSize;
+      if (!tileRectTouchesCircleWorld(left, top, tileSize, player.x, player.y, radiusSq)) {
+        continue;
+      }
+
+      if (blockerKind === "rock") {
+        addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, left, top, tileSize, camera);
+      } else {
+        addAsteroidVisibilitySquareSegments(segments, asteroid, tileX, tileY, left, top, tileSize, camera);
+      }
+    }
+  }
+
+  addAsteroidVisibilityInnerCornerSegments(segments, asteroid, player, radiusSq, bounds, tileSize, camera);
+
+  return segments;
+}
+
+function asteroidVisibilityBlockerKind(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return asteroid.storm ? null : "square";
+  }
+
+  if (!isPlayableTile(asteroid, tileX, tileY)) {
+    return asteroid.storm ? null : "square";
+  }
+
+  const tile = asteroid.tiles[tileY * asteroid.widthTiles + tileX];
+  if (isRockTile(tile)) {
+    return "rock";
+  }
+
+  return isWallTile(tile) ? "square" : null;
+}
+
+function addAsteroidVisibilitySquareSegments(segments, asteroid, tileX, tileY, left, top, size, camera) {
+  const right = left + size;
+  const bottom = top + size;
+  if (!asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY - 1)) {
+    addAsteroidVisibilitySegment(segments, left, top, right, top, camera);
+  }
+  if (!asteroidVisibilityBlocksSightTile(asteroid, tileX + 1, tileY)) {
+    addAsteroidVisibilitySegment(segments, right, top, right, bottom, camera);
+  }
+  if (!asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY + 1)) {
+    addAsteroidVisibilitySegment(segments, right, bottom, left, bottom, camera);
+  }
+  if (!asteroidVisibilityBlocksSightTile(asteroid, tileX - 1, tileY)) {
+    addAsteroidVisibilitySegment(segments, left, bottom, left, top, camera);
+  }
+}
+
+function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, left, top, size, camera) {
+  const north = asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY - 1);
+  const east = asteroidVisibilityBlocksSightTile(asteroid, tileX + 1, tileY);
+  const south = asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY + 1);
+  const west = asteroidVisibilityBlocksSightTile(asteroid, tileX - 1, tileY);
+  const northWest = asteroidVisibilityBlocksSightTile(asteroid, tileX - 1, tileY - 1);
+  const northEast = asteroidVisibilityBlocksSightTile(asteroid, tileX + 1, tileY - 1);
+  const southEast = asteroidVisibilityBlocksSightTile(asteroid, tileX + 1, tileY + 1);
+  const southWest = asteroidVisibilityBlocksSightTile(asteroid, tileX - 1, tileY + 1);
+  const right = left + size - 1;
+  const bottom = top + size - 1;
+  const topOpen = !north;
+  const rightOpen = !east;
+  const bottomOpen = !south;
+  const leftOpen = !west;
+  const outerTopLeft = topOpen && leftOpen;
+  const outerTopRight = topOpen && rightOpen;
+  const outerBottomRight = bottomOpen && rightOpen;
+  const outerBottomLeft = bottomOpen && leftOpen;
+  const outerBevel = ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS;
+  const topTrimLeft = outerTopLeft
+    ? outerBevel
+    : topOpen && west && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const topTrimRight = outerTopRight
+    ? outerBevel
+    : topOpen && east && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const rightTrimTop = outerTopRight
+    ? outerBevel
+    : rightOpen && north && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const rightTrimBottom = outerBottomRight
+    ? outerBevel
+    : rightOpen && south && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const bottomTrimRight = outerBottomRight
+    ? outerBevel
+    : bottomOpen && east && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  const bottomTrimLeft = outerBottomLeft
+    ? outerBevel
+    : bottomOpen && west && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const leftTrimBottom = outerBottomLeft
+    ? outerBevel
+    : leftOpen && south && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const leftTrimTop = outerTopLeft
+    ? outerBevel
+    : leftOpen && north && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+
+  if (topOpen && left + topTrimLeft <= right - topTrimRight) {
+    addAsteroidVisibilityRockEdgeSegment(segments, left + topTrimLeft, top, right - topTrimRight, top, camera);
+  }
+  if (rightOpen && top + rightTrimTop <= bottom - rightTrimBottom) {
+    addAsteroidVisibilityRockEdgeSegment(segments, right, top + rightTrimTop, right, bottom - rightTrimBottom, camera);
+  }
+  if (bottomOpen && left + bottomTrimLeft <= right - bottomTrimRight) {
+    addAsteroidVisibilityRockEdgeSegment(segments, right - bottomTrimRight, bottom, left + bottomTrimLeft, bottom, camera);
+  }
+  if (leftOpen && top + leftTrimTop <= bottom - leftTrimBottom) {
+    addAsteroidVisibilityRockEdgeSegment(segments, left, bottom - leftTrimBottom, left, top + leftTrimTop, camera);
+  }
+
+  if (outerTopLeft) {
+    addAsteroidVisibilityRockBevelSegment(
+      segments,
+      left + outerBevel,
+      top,
+      left,
+      top + outerBevel,
+      camera
+    );
+  }
+  if (outerTopRight) {
+    addAsteroidVisibilityRockBevelSegment(
+      segments,
+      right,
+      top + outerBevel,
+      right - outerBevel,
+      top,
+      camera
+    );
+  }
+  if (outerBottomRight) {
+    addAsteroidVisibilityRockBevelSegment(
+      segments,
+      right - outerBevel,
+      bottom,
+      right,
+      bottom - outerBevel,
+      camera
+    );
+  }
+  if (outerBottomLeft) {
+    addAsteroidVisibilityRockBevelSegment(
+      segments,
+      left + outerBevel,
+      bottom,
+      left,
+      bottom - outerBevel,
+      camera
+    );
+  }
+}
+
+function addAsteroidVisibilityRockEdgeSegment(segments, x0, y0, x1, y1, camera) {
+  const overlap = ASTEROID_VISIBILITY_DILATE_PIXELS;
+  if (y0 === y1) {
+    const direction = x1 >= x0 ? 1 : -1;
+    addAsteroidVisibilitySegment(segments, x0 - direction * overlap, y0, x1 + direction * overlap, y1, camera);
+    return;
+  }
+
+  if (x0 === x1) {
+    const direction = y1 >= y0 ? 1 : -1;
+    addAsteroidVisibilitySegment(segments, x0, y0 - direction * overlap, x1, y1 + direction * overlap, camera);
+    return;
+  }
+
+  addAsteroidVisibilitySegment(segments, x0, y0, x1, y1, camera);
+}
+
+function addAsteroidVisibilityRockBevelSegment(segments, x0, y0, x1, y1, camera) {
+  addAsteroidVisibilitySegment(segments, x0, y0, x1, y1, camera);
+}
+
+function addAsteroidVisibilityInnerCornerSegments(segments, asteroid, player, radiusSq, bounds, tileSize, camera) {
+  for (let tileY = bounds.minTileY - 1; tileY <= bounds.maxTileY + 1; tileY += 1) {
+    for (let tileX = bounds.minTileX - 1; tileX <= bounds.maxTileX + 1; tileX += 1) {
+      if (asteroidVisibilityBlockerKind(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      const left = tileX * tileSize;
+      const top = tileY * tileSize;
+      if (!tileRectTouchesCircleWorld(left, top, tileSize, player.x, player.y, radiusSq)) {
+        continue;
+      }
+
+      const rightEdge = left + tileSize;
+      const bottomEdge = top + tileSize;
+      const topEdge = top - 1;
+      const leftEdge = left - 1;
+      const rightInside = rightEdge - 1;
+      const bottomInside = bottomEdge - 1;
+      const north = isRockTileAt(asteroid, tileX, tileY - 1);
+      const east = isRockTileAt(asteroid, tileX + 1, tileY);
+      const south = isRockTileAt(asteroid, tileX, tileY + 1);
+      const west = isRockTileAt(asteroid, tileX - 1, tileY);
+      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
+      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
+      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
+      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
+
+      if (north && west && northWest) {
+        addAsteroidVisibilitySegment(
+          segments,
+          left + ROCK_INNER_CORNER_RADIUS,
+          topEdge,
+          leftEdge,
+          top + ROCK_INNER_CORNER_RADIUS,
+          camera
         );
-      } else if (tile === ASTEROID_TILE.diamond) {
-        drawDiamondWireframe(
-          ctx,
-          screenX,
-          screenY,
-          tileSize,
-          hashCell(asteroid.seed, tileX, tileY),
-          diamondMiningProgressFor(asteroidMiningTargets, index)
+      }
+
+      if (north && east && northEast) {
+        addAsteroidVisibilitySegment(
+          segments,
+          rightInside - ROCK_INNER_CORNER_RADIUS,
+          topEdge,
+          rightEdge,
+          top + ROCK_INNER_CORNER_RADIUS,
+          camera
+        );
+      }
+
+      if (south && east && southEast) {
+        addAsteroidVisibilitySegment(
+          segments,
+          rightEdge,
+          bottomInside - ROCK_INNER_CORNER_RADIUS,
+          rightInside - ROCK_INNER_CORNER_RADIUS,
+          bottomEdge,
+          camera
+        );
+      }
+
+      if (south && west && southWest) {
+        addAsteroidVisibilitySegment(
+          segments,
+          left + ROCK_INNER_CORNER_RADIUS,
+          bottomEdge,
+          leftEdge,
+          bottomInside - ROCK_INNER_CORNER_RADIUS,
+          camera
         );
       }
     }
   }
+}
+
+function addAsteroidVisibilitySegment(segments, x0, y0, x1, y1, camera) {
+  if (x0 === x1 && y0 === y1) {
+    return;
+  }
+
+  segments.push({
+    x0: x0 - camera.x,
+    y0: y0 - camera.y,
+    x1: x1 - camera.x,
+    y1: y1 - camera.y
+  });
+}
+
+function asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return !asteroid.storm;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  if (!isPlayableTile(asteroid, tileX, tileY)) {
+    return !asteroid.storm;
+  }
+
+  return isSolidTile(asteroid.tiles[index]);
+}
+
+function tileRectTouchesCircleWorld(left, top, size, centerX, centerY, radiusSq) {
+  const closestX = clamp(centerX, left, left + size);
+  const closestY = clamp(centerY, top, top + size);
+  const dx = centerX - closestX;
+  const dy = centerY - closestY;
+  return dx * dx + dy * dy <= radiusSq;
+}
+
+function buildAsteroidVisibilityPolygon(origin, radius, segments) {
+  const sweepSegments = buildAsteroidVisibilitySweepSegments(origin, segments);
+  const eventGroups = buildAsteroidVisibilityEventGroups(sweepSegments);
+  const samples = buildAsteroidVisibilitySweepSamples(eventGroups);
+  const activeSegments = new Set();
+  const distanceHeap = [];
+  for (const segment of sweepSegments) {
+    if (segment.wraps) {
+      activeSegments.add(segment);
+    }
+  }
+
+  const points = [];
+  let eventIndex = 0;
+  for (const angle of samples) {
+    while (
+      eventIndex < eventGroups.length &&
+      eventGroups[eventIndex].angle < angle - 0.000001
+    ) {
+      applyAsteroidVisibilityEventGroup(activeSegments, eventGroups[eventIndex]);
+      eventIndex += 1;
+    }
+
+    const eventGroup = eventIndex < eventGroups.length &&
+      Math.abs(eventGroups[eventIndex].angle - angle) <= 0.000001
+      ? eventGroups[eventIndex]
+      : null;
+    points.push(nearestAsteroidVisibilityPoint(origin, radius, activeSegments, angle, eventGroup, distanceHeap));
+  }
+
+  return points;
+}
+
+function buildAsteroidVisibilitySweepSegments(origin, segments) {
+  const sweepSegments = [];
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const angle0 = normalizeVisibilityAngle(Math.atan2(segment.y0 - origin.y, segment.x0 - origin.x));
+    const angle1 = normalizeVisibilityAngle(Math.atan2(segment.y1 - origin.y, segment.x1 - origin.x));
+    let startAngle = angle0;
+    let span = normalizeVisibilityAngle(angle1 - angle0);
+    if (span < 0.000001) {
+      continue;
+    }
+
+    if (span > Math.PI) {
+      startAngle = angle1;
+      span = ASTEROID_VISIBILITY_FULL_CIRCLE - span;
+    }
+
+    const endAngle = normalizeVisibilityAngle(startAngle + span);
+    sweepSegments.push({
+      ...segment,
+      id: index,
+      startAngle,
+      endAngle,
+      wraps: endAngle < startAngle
+    });
+  }
+
+  return sweepSegments;
+}
+
+function buildAsteroidVisibilityEventGroups(sweepSegments) {
+  const events = [];
+  for (const segment of sweepSegments) {
+    events.push({ angle: segment.startAngle, segment, entering: true });
+    events.push({ angle: segment.endAngle, segment, entering: false });
+  }
+
+  events.sort((a, b) => a.angle - b.angle);
+  const groups = [];
+  for (const event of events) {
+    const previous = groups[groups.length - 1];
+    if (previous && Math.abs(previous.angle - event.angle) <= 0.000001) {
+      previous.events.push(event);
+    } else {
+      groups.push({ angle: event.angle, events: [event] });
+    }
+  }
+
+  return groups;
+}
+
+function buildAsteroidVisibilitySweepSamples(eventGroups) {
+  const angles = [];
+  for (let index = 0; index < ASTEROID_VISIBILITY_BASE_RAYS; index += 1) {
+    angles.push((ASTEROID_VISIBILITY_FULL_CIRCLE * index) / ASTEROID_VISIBILITY_BASE_RAYS);
+  }
+
+  for (const group of eventGroups) {
+    pushAsteroidVisibilityEventAngles(angles, group.angle);
+  }
+
+  angles.sort((a, b) => a - b);
+  const uniqueAngles = [];
+  for (const angle of angles) {
+    const previous = uniqueAngles[uniqueAngles.length - 1];
+    if (previous !== undefined && Math.abs(angle - previous) < 0.000001) {
+      continue;
+    }
+
+    uniqueAngles.push(angle);
+  }
+
+  return uniqueAngles;
+}
+
+function pushAsteroidVisibilityEventAngles(angles, angle) {
+  angles.push(normalizeVisibilityAngle(angle - ASTEROID_VISIBILITY_ANGLE_EPSILON));
+  angles.push(normalizeVisibilityAngle(angle));
+  angles.push(normalizeVisibilityAngle(angle + ASTEROID_VISIBILITY_ANGLE_EPSILON));
+}
+
+function normalizeVisibilityAngle(angle) {
+  let normalized = angle % ASTEROID_VISIBILITY_FULL_CIRCLE;
+  if (normalized < 0) {
+    normalized += ASTEROID_VISIBILITY_FULL_CIRCLE;
+  }
+  return normalized;
+}
+
+function applyAsteroidVisibilityEventGroup(activeSegments, group) {
+  for (const event of group.events) {
+    if (event.entering) {
+      activeSegments.add(event.segment);
+    } else {
+      activeSegments.delete(event.segment);
+    }
+  }
+}
+
+function nearestAsteroidVisibilityPoint(origin, radius, activeSegments, angle, eventGroup = null, distanceHeap = []) {
+  const dirX = Math.cos(angle);
+  const dirY = Math.sin(angle);
+  distanceHeap.length = 0;
+
+  for (const segment of activeSegments) {
+    pushAsteroidVisibilityHeapHit(distanceHeap, origin, dirX, dirY, segment);
+  }
+
+  if (eventGroup) {
+    for (const event of eventGroup.events) {
+      pushAsteroidVisibilityHeapHit(distanceHeap, origin, dirX, dirY, event.segment);
+    }
+  }
+
+  const nearest = clamp(distanceHeap[0] ?? radius, 0, radius);
+  return {
+    x: origin.x + dirX * nearest,
+    y: origin.y + dirY * nearest,
+    angle
+  };
+}
+
+function pushAsteroidVisibilityHeapHit(heap, origin, dirX, dirY, segment) {
+  const distance = raySegmentIntersectionDistance(origin.x, origin.y, dirX, dirY, segment);
+  if (distance === null) {
+    return;
+  }
+
+  asteroidVisibilityHeapPush(heap, distance);
+}
+
+function asteroidVisibilityHeapPush(heap, distance) {
+  heap.push(distance);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2);
+    if (heap[parentIndex] <= distance) {
+      break;
+    }
+
+    heap[index] = heap[parentIndex];
+    heap[parentIndex] = distance;
+    index = parentIndex;
+  }
+}
+
+function raySegmentIntersectionDistance(originX, originY, dirX, dirY, segment) {
+  const segX = segment.x1 - segment.x0;
+  const segY = segment.y1 - segment.y0;
+  const denom = dirX * segY - dirY * segX;
+  if (Math.abs(denom) < 0.000001) {
+    return null;
+  }
+
+  const dx = segment.x0 - originX;
+  const dy = segment.y0 - originY;
+  const t = (dx * segY - dy * segX) / denom;
+  const u = (dx * dirY - dy * dirX) / denom;
+  if (t < 0 || u < -0.000001 || u > 1.000001) {
+    return null;
+  }
+
+  return t;
+}
+
+function rasterizeAsteroidVisibilityPolygon(points) {
+  if (points.length < 3) {
+    return { offsetY: 0, rows: [] };
+  }
+
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  const offsetY = Math.floor(minY) - 1;
+  const endY = Math.ceil(maxY) + 1;
+  const rows = Array.from({ length: Math.max(0, endY - offsetY + 1) }, () => null);
+
+  for (let y = offsetY; y <= endY; y += 1) {
+    const scanY = y + 0.5;
+    const intersections = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const a = points[index];
+      const b = points[(index + 1) % points.length];
+      if ((a.y <= scanY && b.y > scanY) || (b.y <= scanY && a.y > scanY)) {
+        const t = (scanY - a.y) / (b.y - a.y);
+        intersections.push(a.x + (b.x - a.x) * t);
+      }
+    }
+
+    if (intersections.length < 2) {
+      continue;
+    }
+
+    intersections.sort((a, b) => a - b);
+    const spans = [];
+    for (let index = 0; index + 1 < intersections.length; index += 2) {
+      const start = Math.ceil(intersections[index] - 0.5);
+      const end = Math.floor(intersections[index + 1] - 0.5) + 1;
+      if (end > start) {
+        spans.push(start, end);
+      }
+    }
+    rows[y - offsetY] = spans.length > 0 ? spans : null;
+  }
+
+  return dilateAsteroidVisibilitySpans(
+    { offsetY, rows },
+    ASTEROID_VISIBILITY_DILATE_PIXELS
+  );
+}
+
+function dilateAsteroidVisibilitySpans(spans, pixels) {
+  if (pixels <= 0 || spans.rows.length === 0) {
+    return spans;
+  }
+
+  const offsetY = spans.offsetY - pixels;
+  const rows = Array.from({ length: spans.rows.length + pixels * 2 }, () => null);
+  for (let sourceIndex = 0; sourceIndex < spans.rows.length; sourceIndex += 1) {
+    const sourceSpans = spans.rows[sourceIndex];
+    if (!sourceSpans) {
+      continue;
+    }
+
+    for (let dy = -pixels; dy <= pixels; dy += 1) {
+      const targetIndex = sourceIndex + pixels + dy;
+      if (targetIndex < 0 || targetIndex >= rows.length) {
+        continue;
+      }
+
+      rows[targetIndex] = mergeAsteroidVisibilitySpans(
+        rows[targetIndex],
+        sourceSpans,
+        pixels
+      );
+    }
+  }
+
+  return { offsetY, rows };
+}
+
+function mergeAsteroidVisibilitySpans(existing, added, padding) {
+  const merged = existing ? [...existing] : [];
+  for (let index = 0; index < added.length; index += 2) {
+    merged.push(added[index] - padding, added[index + 1] + padding);
+  }
+
+  if (merged.length <= 2) {
+    return merged;
+  }
+
+  const pairs = [];
+  for (let index = 0; index < merged.length; index += 2) {
+    pairs.push({ start: merged[index], end: merged[index + 1] });
+  }
+  pairs.sort((a, b) => a.start - b.start);
+
+  const result = [];
+  for (const pair of pairs) {
+    if (result.length === 0 || pair.start > result[result.length - 1]) {
+      result.push(pair.start, pair.end);
+    } else {
+      result[result.length - 1] = Math.max(result[result.length - 1], pair.end);
+    }
+  }
+
+  return result;
+}
+
+function markAsteroidVisibilityExploredFromMask(exploredRecord, visibility, bounds) {
+  const tileSize = visibility.tileSize;
+  for (let tileY = bounds.minTileY; tileY <= bounds.maxTileY; tileY += 1) {
+    for (let tileX = bounds.minTileX; tileX <= bounds.maxTileX; tileX += 1) {
+      const index = tileY * visibility.width + tileX;
+      if (isSolidTile(visibility.asteroid.tiles[index])) {
+        continue;
+      }
+
+      if (asteroidVisibilityTileCurrentlyVisible(visibility, tileX, tileY)) {
+        markAsteroidVisibilityExplored(exploredRecord, index);
+      }
+    }
+  }
+}
+
+function asteroidVisibilityTileCurrentlyVisible(visibility, tileX, tileY) {
+  if (!visibility || tileX < 0 || tileY < 0 || tileX >= visibility.width || tileY >= visibility.height) {
+    return false;
+  }
+
+  const tileSize = visibility.tileSize;
+  const left = tileX * tileSize - visibility.cameraX;
+  const top = tileY * tileSize - visibility.cameraY;
+  const right = left + tileSize;
+  const bottom = top + tileSize;
+  return asteroidVisibilityRectTouchesCurrent(visibility, left, top, right, bottom);
+}
+
+function asteroidVisibilityRectTouchesCurrent(visibility, left, top, right, bottom) {
+  const startRow = Math.floor(top) - visibility.spans.offsetY;
+  const endRow = Math.ceil(bottom) - visibility.spans.offsetY;
+  const startX = Math.floor(left);
+  const endX = Math.ceil(right);
+  for (let rowIndex = startRow; rowIndex < endRow; rowIndex += 1) {
+    const spans = visibility.spans.rows[rowIndex];
+    if (!spans) {
+      continue;
+    }
+
+    for (let index = 0; index < spans.length; index += 2) {
+      if (spans[index] < endX && spans[index + 1] > startX) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function asteroidVisibilityScreenPointVisible(visibility, screenX, screenY) {
+  const rowIndex = Math.floor(screenY) - visibility.spans.offsetY;
+  const spans = visibility.spans.rows[rowIndex];
+  if (!spans) {
+    return false;
+  }
+
+  const x = Math.floor(screenX);
+  for (let index = 0; index < spans.length; index += 2) {
+    if (x >= spans[index] && x < spans[index + 1]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function asteroidVisibilityPaintsBackground(visibility, tileX, tileY) {
+  if (!visibility || tileX < 0 || tileY < 0 || tileX >= visibility.width || tileY >= visibility.height) {
+    return false;
+  }
+
+  const index = tileY * visibility.width + tileX;
+  return asteroidVisibilityTileCurrentlyVisible(visibility, tileX, tileY) ||
+    visibility.explored?.[index] === 1;
+}
+
+function asteroidVisibilityRendersShell(visibility, tileX, tileY) {
+  return asteroidVisibilityTileCurrentlyVisible(visibility, tileX, tileY);
+}
+
+function asteroidVisibilityCornerMaskAt() {
+  return ASTEROID_VISIBILITY_ALL_CORNERS;
+}
+
+function asteroidVisibilityCornerMaskIncludes(mask, corner) {
+  return (mask & corner) !== 0;
+}
+
+function asteroidVisibilityPointPaintsBackground(visibility, worldX, worldY) {
+  if (!visibility) {
+    return true;
+  }
+
+  return asteroidVisibilityScreenPointVisible(
+    visibility,
+    worldX - visibility.cameraX,
+    worldY - visibility.cameraY
+  );
+}
+
+function createAsteroidVisibilityWorldMask(visibility) {
+  return {
+    allows(screenX, screenY) {
+      return asteroidVisibilityScreenPointVisible(visibility, screenX, screenY);
+    }
+  };
+}
+
+function playerTouchesAsteroidVisibility(visibility, player) {
+  if (!visibility || !player || player.alive === false) {
+    return false;
+  }
+
+  if (visibility.playerId && player.id === visibility.playerId) {
+    return true;
+  }
+
+  const radius = Math.max(1, Number(player.radius || ENGINE.ship.radius || 1));
+  const screenX = player.x - visibility.cameraX;
+  const screenY = player.y - visibility.cameraY;
+  return asteroidVisibilityScreenPointVisible(visibility, screenX, screenY) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX - radius, screenY) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX + radius, screenY) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX, screenY - radius) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX, screenY + radius) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX - radius * 0.7, screenY - radius * 0.7) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX + radius * 0.7, screenY - radius * 0.7) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX + radius * 0.7, screenY + radius * 0.7) ||
+    asteroidVisibilityScreenPointVisible(visibility, screenX - radius * 0.7, screenY + radius * 0.7);
 }
 
 function drawBuildPreview(ctx, asteroid, player, players, camera, build, colors) {
@@ -3708,17 +4849,15 @@ function drawRockFill(ctx, x, y, size, colors) {
   ctx.fillRect(x, y, size, size);
 }
 
-function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
-  ctx.fillStyle = colors.foreground;
-
-  const north = isRockTileAt(asteroid, tileX, tileY - 1);
-  const east = isRockTileAt(asteroid, tileX + 1, tileY);
-  const south = isRockTileAt(asteroid, tileX, tileY + 1);
-  const west = isRockTileAt(asteroid, tileX - 1, tileY);
-  const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
-  const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
-  const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
-  const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
+function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
+  const north = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
+  const east = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
+  const south = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY + 1);
+  const west = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY);
+  const northWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY - 1);
+  const northEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY - 1);
+  const southEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY + 1);
+  const southWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY + 1);
   const right = x + size - 1;
   const bottom = y + size - 1;
   const topOpen = !north;
@@ -3729,32 +4868,70 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
   const outerTopRight = topOpen && rightOpen;
   const outerBottomRight = bottomOpen && rightOpen;
   const outerBottomLeft = bottomOpen && leftOpen;
-  const topTrimLeft = outerTopLeft
+  let topTrimLeft = outerTopLeft
     ? ROCK_OUTER_CORNER_RADIUS
     : topOpen && west && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
-  const topTrimRight = outerTopRight
+  let topTrimRight = outerTopRight
     ? ROCK_OUTER_CORNER_RADIUS
     : topOpen && east && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
-  const rightTrimTop = outerTopRight
+  let rightTrimTop = outerTopRight
     ? ROCK_OUTER_CORNER_RADIUS
     : rightOpen && north && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
-  const rightTrimBottom = outerBottomRight
+  let rightTrimBottom = outerBottomRight
     ? ROCK_OUTER_CORNER_RADIUS
     : rightOpen && south && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
-  const bottomTrimRight = outerBottomRight
+  let bottomTrimRight = outerBottomRight
     ? ROCK_OUTER_CORNER_RADIUS
     : bottomOpen && east && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
-  const bottomTrimLeft = outerBottomLeft
+  let bottomTrimLeft = outerBottomLeft
     ? ROCK_OUTER_CORNER_RADIUS
     : bottomOpen && west && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
-  const leftTrimBottom = outerBottomLeft
+  let leftTrimBottom = outerBottomLeft
     ? ROCK_OUTER_CORNER_RADIUS
     : leftOpen && south && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
-  const leftTrimTop = outerTopLeft
+  let leftTrimTop = outerTopLeft
     ? ROCK_OUTER_CORNER_RADIUS
     : leftOpen && north && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const cornerMask = visibility
+    ? asteroidVisibilityCornerMaskAt(visibility, tileX, tileY)
+    : ASTEROID_VISIBILITY_ALL_CORNERS;
+  const cornerTopLeft = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.topLeft);
+  const cornerTopRight = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.topRight);
+  const cornerBottomRight = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.bottomRight);
+  const cornerBottomLeft = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.bottomLeft);
+  const visibilityTrim = Math.ceil(size * 0.5);
 
-  if (topOpen) {
+  if (visibility) {
+    if (!cornerTopLeft) {
+      topTrimLeft = Math.max(topTrimLeft, visibilityTrim);
+      leftTrimTop = Math.max(leftTrimTop, visibilityTrim);
+    }
+    if (!cornerTopRight) {
+      topTrimRight = Math.max(topTrimRight, visibilityTrim);
+      rightTrimTop = Math.max(rightTrimTop, visibilityTrim);
+    }
+    if (!cornerBottomRight) {
+      bottomTrimRight = Math.max(bottomTrimRight, visibilityTrim);
+      rightTrimBottom = Math.max(rightTrimBottom, visibilityTrim);
+    }
+    if (!cornerBottomLeft) {
+      bottomTrimLeft = Math.max(bottomTrimLeft, visibilityTrim);
+      leftTrimBottom = Math.max(leftTrimBottom, visibilityTrim);
+    }
+  }
+
+  const visibleCorners = {
+    outerTopLeft: outerTopLeft && cornerTopLeft,
+    outerTopRight: outerTopRight && cornerTopRight,
+    outerBottomRight: outerBottomRight && cornerBottomRight,
+    outerBottomLeft: outerBottomLeft && cornerBottomLeft
+  };
+  if (visibility) {
+    drawOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, visibleCorners);
+  }
+  ctx.fillStyle = colors.foreground;
+
+  if (topOpen && x + topTrimLeft <= right - topTrimRight) {
     drawPixelLine(
       ctx,
       x + topTrimLeft,
@@ -3764,7 +4941,7 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
     );
   }
 
-  if (rightOpen) {
+  if (rightOpen && y + rightTrimTop <= bottom - rightTrimBottom) {
     drawPixelLine(
       ctx,
       right,
@@ -3774,7 +4951,7 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
     );
   }
 
-  if (bottomOpen) {
+  if (bottomOpen && x + bottomTrimLeft <= right - bottomTrimRight) {
     drawPixelLine(
       ctx,
       right - bottomTrimRight,
@@ -3784,7 +4961,7 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
     );
   }
 
-  if (leftOpen) {
+  if (leftOpen && y + leftTrimTop <= bottom - leftTrimBottom) {
     drawPixelLine(
       ctx,
       x,
@@ -3794,12 +4971,39 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
     );
   }
 
-  drawOuterRockCorners(ctx, x, y, right, bottom, {
-    outerTopLeft,
-    outerTopRight,
-    outerBottomRight,
-    outerBottomLeft
-  });
+  drawOuterRockCorners(ctx, x, y, right, bottom, visibleCorners);
+}
+
+function drawOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, corners) {
+  ctx.fillStyle = colors.background;
+  if (corners.outerTopLeft) {
+    drawRockOuterCornerBackground(ctx, x + ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, -1);
+  }
+
+  if (corners.outerTopRight) {
+    drawRockOuterCornerBackground(ctx, right - ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, -1);
+  }
+
+  if (corners.outerBottomRight) {
+    drawRockOuterCornerBackground(ctx, right - ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, 1);
+  }
+
+  if (corners.outerBottomLeft) {
+    drawRockOuterCornerBackground(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, 1);
+  }
+}
+
+function drawRockOuterCornerBackground(ctx, centerX, centerY, radius, signX, signY) {
+  const radiusSq = radius * radius;
+  for (let offsetY = 0; offsetY <= radius; offsetY += 1) {
+    for (let offsetX = 0; offsetX <= radius; offsetX += 1) {
+      if (offsetX * offsetX + offsetY * offsetY <= radiusSq) {
+        continue;
+      }
+
+      ctx.fillRect(centerX + signX * offsetX, centerY + signY * offsetY, 1, 1);
+    }
+  }
 }
 
 function drawOuterRockCorners(ctx, x, y, right, bottom, corners) {
@@ -3841,17 +5045,17 @@ function drawRockArcPixel(ctx, drawn, x, y) {
   ctx.fillRect(px, py, 1, 1);
 }
 
-function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
+function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
   ctx.fillStyle = colors.foreground;
 
-  const north = isWallTileAt(asteroid, tileX, tileY - 1);
-  const east = isWallTileAt(asteroid, tileX + 1, tileY);
-  const south = isWallTileAt(asteroid, tileX, tileY + 1);
-  const west = isWallTileAt(asteroid, tileX - 1, tileY);
-  const northWest = isWallTileAt(asteroid, tileX - 1, tileY - 1);
-  const northEast = isWallTileAt(asteroid, tileX + 1, tileY - 1);
-  const southEast = isWallTileAt(asteroid, tileX + 1, tileY + 1);
-  const southWest = isWallTileAt(asteroid, tileX - 1, tileY + 1);
+  const north = wallTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
+  const east = wallTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
+  const south = wallTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY + 1);
+  const west = wallTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY);
+  const northWest = wallTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY - 1);
+  const northEast = wallTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY - 1);
+  const southEast = wallTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY + 1);
+  const southWest = wallTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY + 1);
   const left = x + (west ? 0 : 1);
   const right = x + size - 1 - (east ? 0 : 1);
   const top = y + (north ? 0 : 1);
@@ -3894,11 +5098,14 @@ function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors) {
   }
 }
 
-function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors) {
+function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility = null) {
   ctx.fillStyle = colors.foreground;
 
   for (let tileY = minTileY - 1; tileY <= maxTileY + 1; tileY += 1) {
     for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
+      if (visibility && !asteroidVisibilityPaintsBackground(visibility, tileX, tileY)) {
+        continue;
+      }
       if (isRockTileAt(asteroid, tileX, tileY)) {
         continue;
       }
@@ -3911,14 +5118,14 @@ function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX
       const bottomEdge = y + tileSize;
       const rightInside = rightEdge - 1;
       const bottomInside = bottomEdge - 1;
-      const north = isRockTileAt(asteroid, tileX, tileY - 1);
-      const east = isRockTileAt(asteroid, tileX + 1, tileY);
-      const south = isRockTileAt(asteroid, tileX, tileY + 1);
-      const west = isRockTileAt(asteroid, tileX - 1, tileY);
-      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
-      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
-      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
-      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
+      const north = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
+      const east = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
+      const south = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY + 1);
+      const west = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY);
+      const northWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY - 1);
+      const northEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY - 1);
+      const southEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY + 1);
+      const southWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY + 1);
 
       if (north && west && northWest) {
         drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS);
@@ -4413,12 +5620,36 @@ function isRockTileAt(asteroid, tileX, tileY) {
   return isRockTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX]);
 }
 
+function rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY) {
+  if (!visibility) {
+    return isRockTileAt(asteroid, tileX, tileY);
+  }
+
+  if (!asteroidVisibilityPaintsBackground(visibility, tileX, tileY)) {
+    return true;
+  }
+
+  return isRockTileAt(asteroid, tileX, tileY);
+}
+
 function isWallTileAt(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
     return false;
   }
 
   return isWallTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX]);
+}
+
+function wallTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY) {
+  if (!visibility) {
+    return isWallTileAt(asteroid, tileX, tileY);
+  }
+
+  if (!asteroidVisibilityPaintsBackground(visibility, tileX, tileY)) {
+    return true;
+  }
+
+  return isWallTileAt(asteroid, tileX, tileY);
 }
 
 function amountAt(asteroid, index) {
@@ -4506,12 +5737,12 @@ function positiveModulo(value, divisor) {
   return ((value % divisor) + divisor) % divisor;
 }
 
-function drawStars(ctx, snapshot, camera) {
+function drawStars(ctx, snapshot, camera, visibility = null) {
   drawStarLayer(ctx, snapshot.arenaId, {
     x: camera.x * STAR_PARALLAX,
     y: camera.y * STAR_PARALLAX,
     lensSourcePadding: cameraCullPadding(camera)
-  });
+  }, visibility, camera);
 }
 
 function drawMenuStars(ctx, timeSeconds) {
@@ -4522,7 +5753,7 @@ function drawMenuStars(ctx, timeSeconds) {
   });
 }
 
-function drawStarLayer(ctx, seed, starCamera) {
+function drawStarLayer(ctx, seed, starCamera, visibility = null, worldCamera = null) {
   const padding = starCamera.lensSourcePadding || 0;
   const minCellX = Math.floor((starCamera.x - padding) / STAR_CELL_SIZE) - 1;
   const maxCellX = Math.ceil((starCamera.x + ctx.width + padding) / STAR_CELL_SIZE) + 1;
@@ -4544,6 +5775,9 @@ function drawStarLayer(ctx, seed, starCamera) {
       ) {
         continue;
       }
+      if (visibility && !starVisibleInAsteroidMask(visibility, worldCamera, screen.x, screen.y)) {
+        continue;
+      }
 
       if (hash % 181 === 0) {
         drawLargeStar(ctx, screen.x, screen.y);
@@ -4554,6 +5788,14 @@ function drawStarLayer(ctx, seed, starCamera) {
       }
     }
   }
+}
+
+function starVisibleInAsteroidMask(visibility, camera, screenX, screenY) {
+  if (!visibility || !camera) {
+    return true;
+  }
+
+  return asteroidVisibilityPointPaintsBackground(visibility, camera.x + screenX, camera.y + screenY);
 }
 
 function drawLargeStar(ctx, x, y) {

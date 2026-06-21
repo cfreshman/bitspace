@@ -52,6 +52,13 @@ body.mapgen-active #minimap {
   display: none;
 }
 
+html.controller-pointer-hidden,
+html.controller-pointer-hidden body,
+html.controller-pointer-hidden #scene,
+html.controller-pointer-hidden #minimap {
+  cursor: none;
+}
+
 .mapgen-panel {
   min-height: 100%;
   box-sizing: border-box;

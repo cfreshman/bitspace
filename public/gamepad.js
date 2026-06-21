@@ -14,6 +14,7 @@ export function createGamepadControls() {
         previousButtons = defaultButtons();
         return {
           connected: false,
+          active: false,
           leftStick: { x: 0, y: 0 },
           dpad: { x: 0, y: 0 },
           move: { x: 0, y: 0 },
@@ -25,6 +26,7 @@ export function createGamepadControls() {
       }
       boundGamepadIndex = gamepad.index;
 
+      const active = gamepadHasInput(gamepad);
       const leftStick = axisPair(gamepad, 0, 1);
       const rightStick = axisPair(gamepad, 2, 3);
       const dpad = dpadVector(gamepad);
@@ -50,6 +52,7 @@ export function createGamepadControls() {
 
       return {
         connected: true,
+        active,
         id: gamepad.id,
         leftStick,
         dpad,

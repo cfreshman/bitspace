@@ -726,6 +726,7 @@ talkInput.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("pointermove", (event) => {
+  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
@@ -747,6 +748,7 @@ window.addEventListener("pointerout", (event) => {
 });
 
 window.addEventListener("pointerdown", (event) => {
+  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
@@ -786,6 +788,7 @@ window.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("pointerup", (event) => {
+  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
@@ -796,6 +799,7 @@ window.addEventListener("pointerup", (event) => {
 });
 
 window.addEventListener("pointercancel", (event) => {
+  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
@@ -815,6 +819,32 @@ window.addEventListener("contextmenu", (event) => {
 
 function shouldIgnorePagePointerEvent() {
   return document.body.classList.contains("mapgen-active");
+}
+
+function revealMousePointer() {
+  setMousePointerHidden(false);
+}
+
+function updateMousePointerForControllerInput(input) {
+  if (!input.connected) {
+    setMousePointerHidden(false);
+    return;
+  }
+
+  if (input.active) {
+    setMousePointerHidden(true);
+  }
+}
+
+function setMousePointerHidden(hidden) {
+  const nextHidden = hidden === true;
+  if (state.controller.mousePointerHidden === nextHidden) {
+    return;
+  }
+
+  state.controller.mousePointerHidden = nextHidden;
+  document.documentElement.classList.toggle("controller-pointer-hidden", nextHidden);
+  document.body.classList.toggle("controller-pointer-hidden", nextHidden);
 }
 
 function clearPagePointerHover() {
@@ -969,6 +999,7 @@ function draw(now = 0) {
 
 function updateControllerState(timeSeconds) {
   const input = gamepadControls.update();
+  updateMousePointerForControllerInput(input);
   const previousVisible = state.controller.cursor.visible;
   const previousTime = state.controller.lastTimeSeconds || timeSeconds;
   const dtSeconds = clamp(timeSeconds - previousTime, 0, 1 / 15) || 1 / ENGINE.tickRate;
@@ -1593,6 +1624,7 @@ function createControllerState() {
     buildPressed: false,
     upgradesPressed: false,
     mapPressed: false,
+    mousePointerHidden: false,
     lastTimeSeconds: 0,
     upgradeNavDirection: 0,
     upgradeNavRepeatSeconds: 0,
@@ -3498,8 +3530,8 @@ function menuControlHintRows() {
     return [
       { input: "L STICK", action: "MOVE" },
       { input: "R STICK", action: "AIM" },
-      { input: "R TRIG", action: "MINING RAY" },
-      { input: "L TRIG", action: "HUCK ROCK" }
+      { input: "R TRIGGER", action: "MINING RAY" },
+      { input: "L TRIGGER", action: "HUCK ROCK" }
     ];
   }
 
