@@ -1266,11 +1266,6 @@ function miningDisabledFlashActive() {
     return false;
   }
 
-  if (state.room?.state === "waiting") {
-    const player = predictedLocalPlayer() || localPlayerFromSnapshot();
-    return miningRayHitsAsteroid(player?.miningRay);
-  }
-
   if (state.room?.state === "menu" && state.menu.room === MENU_ROOMS.theme) {
     return miningRayHitsAsteroid(state.menu.player?.miningRay);
   }
@@ -4171,7 +4166,7 @@ function closeUpgrades() {
 }
 
 function toggleBuildMode() {
-  if (isInputBlocked() || state.room?.state !== "active") {
+  if (isInputBlocked() || !roomAllowsBuilding()) {
     return;
   }
 
@@ -6826,7 +6821,7 @@ function updateHeldBuild(target, timeSeconds) {
 }
 
 function buildHoldActive() {
-  if (!state.build.active || state.chat.active || state.upgrades.active || state.room?.state !== "active") {
+  if (!state.build.active || state.chat.active || state.upgrades.active || !roomAllowsBuilding()) {
     return false;
   }
 
@@ -6843,7 +6838,7 @@ function buildWallAtMouse(options = {}) {
   const player = predictedLocalPlayer() || localPlayerFromSnapshot();
   if (
     state.build.active &&
-    state.room?.state === "active" &&
+    roomAllowsBuilding() &&
     (player?.resources?.rock || 0) < ENGINE.build.wallCostRock
   ) {
     flashRockHud();
@@ -6891,7 +6886,7 @@ function buildTargetKey(tileX, tileY) {
 function buildTargetFromMouse() {
   if (
     !state.build.active ||
-    state.room?.state !== "active" ||
+    !roomAllowsBuilding() ||
     !state.asteroid ||
     !state.snapshot
   ) {
@@ -7008,6 +7003,10 @@ function tileOverlapsVisiblePlayer(tileX, tileY, tileSize) {
 
 function localPlayerFromSnapshot() {
   return state.snapshot?.players.find((candidate) => candidate.id === state.playerId) || null;
+}
+
+function roomAllowsBuilding() {
+  return state.room?.state === "active" || state.room?.state === "waiting";
 }
 
 function audioPlayerForRender(snapshot, cameraPlayerId) {

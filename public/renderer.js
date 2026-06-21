@@ -4019,14 +4019,14 @@ function drawAsteroidVisibilityGhostInnerRockCornerConnectors(
       const bottomEdge = y + tileSize;
       const rightInside = rightEdge - 1;
       const bottomInside = bottomEdge - 1;
-      const north = rockTileBlocksVisibleOutline(asteroid, null, tileX, tileY - 1);
-      const east = rockTileBlocksVisibleOutline(asteroid, null, tileX + 1, tileY);
-      const south = rockTileBlocksVisibleOutline(asteroid, null, tileX, tileY + 1);
-      const west = rockTileBlocksVisibleOutline(asteroid, null, tileX - 1, tileY);
-      const northWest = rockTileBlocksVisibleOutline(asteroid, null, tileX - 1, tileY - 1);
-      const northEast = rockTileBlocksVisibleOutline(asteroid, null, tileX + 1, tileY - 1);
-      const southEast = rockTileBlocksVisibleOutline(asteroid, null, tileX + 1, tileY + 1);
-      const southWest = rockTileBlocksVisibleOutline(asteroid, null, tileX - 1, tileY + 1);
+      const north = isRockTileAt(asteroid, tileX, tileY - 1);
+      const east = isRockTileAt(asteroid, tileX + 1, tileY);
+      const south = isRockTileAt(asteroid, tileX, tileY + 1);
+      const west = isRockTileAt(asteroid, tileX - 1, tileY);
+      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
+      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
+      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
+      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
 
       if (north && west && northWest) {
         drawAsteroidVisibilityCheckerLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS, x, y, colors);
@@ -5345,14 +5345,14 @@ function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX
       const bottomEdge = y + tileSize;
       const rightInside = rightEdge - 1;
       const bottomInside = bottomEdge - 1;
-      const north = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
-      const east = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
-      const south = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY + 1);
-      const west = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY);
-      const northWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY - 1);
-      const northEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY - 1);
-      const southEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY + 1);
-      const southWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY + 1);
+      const north = isRockTileAt(asteroid, tileX, tileY - 1);
+      const east = isRockTileAt(asteroid, tileX + 1, tileY);
+      const south = isRockTileAt(asteroid, tileX, tileY + 1);
+      const west = isRockTileAt(asteroid, tileX - 1, tileY);
+      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
+      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
+      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
+      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
 
       if (north && west && northWest) {
         drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS);

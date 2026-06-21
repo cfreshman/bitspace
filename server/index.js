@@ -116,13 +116,7 @@ io.on("connection", (socket) => {
     }
 
     if (room.state === ROOM_STATES.waiting || room.state === ROOM_STATES.active) {
-      setPlayerInput(
-        room.arena,
-        clientId,
-        room.state === ROOM_STATES.waiting
-          ? { ...payload, mining: false }
-          : payload
-      );
+      setPlayerInput(room.arena, clientId, payload);
     }
   });
 
@@ -183,7 +177,7 @@ io.on("connection", (socket) => {
     }
 
     const room = roomManager.clientRoom(clientId);
-    const result = room?.state === ROOM_STATES.active && room?.arena
+    const result = (room?.state === ROOM_STATES.active || room?.state === ROOM_STATES.waiting) && room?.arena
       ? buildPlayerWall(room.arena, clientId, payload)
       : { ok: false, reason: "no_active_room" };
     if (!result.ok) {

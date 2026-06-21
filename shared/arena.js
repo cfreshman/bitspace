@@ -49,6 +49,7 @@ export function createArena(options = {}) {
     playerCount: options.playerCount
   });
   const playerDamage = options.playerDamage ?? true;
+  const asteroidMining = options.asteroidMining ?? true;
   const stormEnabled = options.storm ?? playerDamage;
 
   return {
@@ -62,7 +63,8 @@ export function createArena(options = {}) {
     storm: stormEnabled ? createStormState(asteroid, seed) : null,
     stormUpdates: [],
     rules: {
-      playerDamage
+      playerDamage,
+      asteroidMining
     },
     // Extension channels are intentionally empty until the game design is explicit.
     entities: new Map(),
@@ -1356,7 +1358,7 @@ function processPlayerMining(arena, player, dtSeconds) {
       }
     }
 
-    if (!arena.rules.playerDamage || playerHit || entityHit || !hit.mineable) {
+    if (!arena.rules.asteroidMining || playerHit || entityHit || !hit.mineable) {
       continue;
     }
 
