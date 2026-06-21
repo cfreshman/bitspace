@@ -21,6 +21,8 @@ import {
 import { aggregateUpgradeEffects, canAffordUpgrade, nextUpgradeCost } from "./upgrades.js";
 
 const BOT_ATTACK_DISTANCE = 210;
+const BOT_ENEMY_VISIBILITY_RADIUS_SCALE = 0.9;
+const BOT_ENEMY_VISIBILITY_RAY_MARGIN = 0.5;
 const BOT_ATTACK_STANDOFF_RAY_SCALE = 0.88;
 const BOT_ATTACK_STANDOFF_TOLERANCE = 3;
 const BOT_ATTACK_STANDOFF_HIT_MARGIN = 2;
@@ -903,25 +905,63 @@ function nearestVisibleEnemyImpl(arena, bot) {
     }
 
     const distance = distanceBetween(bot, enemy);
-    if (distance > visibleRadius) {
+    if (distance > visibleRadius + (enemy.radius || ENGINE.ship.radius)) {
+      continue;
+    }
+
+    const visibility = botEnemyVisibility(arena, bot, enemy, visibleRadius, distance);
+    if (!visibility.visible) {
       continue;
     }
 
     if (!selected || distance < selected.distance) {
-      selected = { enemy, distance, clear: false };
+      selected = { enemy, distance, clear: visibility.clear };
     }
   }
 
-  if (selected) {
-    selected.clear = lineOfSight(
-      arena,
-      bot,
-      selected.enemy,
-      selected.distance - (selected.enemy.radius || ENGINE.ship.radius)
-    );
+  return selected;
+}
+
+function botEnemyVisibility(arena, bot, enemy, visibleRadius, centerDistance = distanceBetween(bot, enemy)) {
+  const radius = enemy.radius || ENGINE.ship.radius;
+  const centerInRange = centerDistance <= visibleRadius;
+  const centerClear = centerInRange && lineOfSight(
+    arena,
+    bot,
+    enemy,
+    Math.max(0, centerDistance - radius)
+  );
+  if (centerClear) {
+    return { visible: true, clear: true };
   }
 
-  return selected;
+  const samples = botEnemyVisibilitySamplePoints(enemy, radius);
+  for (const sample of samples) {
+    const sampleDistance = distanceBetween(bot, sample);
+    if (sampleDistance > visibleRadius) {
+      continue;
+    }
+    if (lineOfSight(arena, bot, sample, Math.max(0, sampleDistance - BOT_ENEMY_VISIBILITY_RAY_MARGIN))) {
+      return { visible: true, clear: false };
+    }
+  }
+
+  return { visible: false, clear: false };
+}
+
+function botEnemyVisibilitySamplePoints(enemy, radius) {
+  const wide = Math.max(1, radius * BOT_ENEMY_VISIBILITY_RADIUS_SCALE);
+  const diagonal = wide * Math.SQRT1_2;
+  return [
+    { x: enemy.x - diagonal, y: enemy.y - diagonal },
+    { x: enemy.x + diagonal, y: enemy.y - diagonal },
+    { x: enemy.x + diagonal, y: enemy.y + diagonal },
+    { x: enemy.x - diagonal, y: enemy.y + diagonal },
+    { x: enemy.x - wide, y: enemy.y },
+    { x: enemy.x + wide, y: enemy.y },
+    { x: enemy.x, y: enemy.y - wide },
+    { x: enemy.x, y: enemy.y + wide }
+  ];
 }
 
 function botAttackStandoffDistance(bot, enemy, effects) {
