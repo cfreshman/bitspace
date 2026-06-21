@@ -9001,7 +9001,7 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
     const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
     const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
-    drawSphere(ctx, orbX, orbY, smallOrbRadius, player.angle, colors, [mainOccluder]);
+    drawTruncatedRearSphere(ctx, orbX, orbY, smallOrbRadius, rear, colors, [mainOccluder]);
   }
 
   drawSphere(ctx, x, y, mainRadius, player.angle, colors);
@@ -9009,7 +9009,7 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "front")) {
     const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
     const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
-    drawSphere(ctx, orbX, orbY, smallOrbRadius, player.angle, colors);
+    drawTruncatedRearSphere(ctx, orbX, orbY, smallOrbRadius, rear, colors);
   }
 
   drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim);
@@ -10023,6 +10023,15 @@ function drawSphere(ctx, cx, cy, radius, angle, colors, occluders = []) {
   drawCircle(ctx, cx, cy, radius, occluders);
 }
 
+function drawTruncatedRearSphere(ctx, cx, cy, radius, rear, colors, occluders = []) {
+  const clipDistance = Math.max(0, radius - 1);
+  ctx.fillStyle = colors.background;
+  fillTruncatedDisk(ctx, cx, cy, radius, rear, clipDistance, occluders);
+  ctx.fillStyle = colors.foreground;
+  drawTruncatedCircle(ctx, cx, cy, radius, rear, clipDistance, occluders);
+  drawTruncatedSphereEnd(ctx, cx, cy, radius, rear, clipDistance, occluders);
+}
+
 function fillDisk(ctx, cx, cy, radius, occluders = []) {
   const radiusSq = radius * radius;
   const minX = Math.floor(cx - radius);
@@ -10039,6 +10048,71 @@ function fillDisk(ctx, cx, cy, radius, occluders = []) {
       }
     }
   }
+}
+
+function fillTruncatedDisk(ctx, cx, cy, radius, clipDirection, clipDistance, occluders = []) {
+  const radiusSq = radius * radius;
+  const minX = Math.floor(cx - radius);
+  const maxX = Math.ceil(cx + radius);
+  const minY = Math.floor(cy - radius);
+  const maxY = Math.ceil(cy + radius);
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const projection = dx * clipDirection.x + dy * clipDirection.y;
+      if (
+        dx * dx + dy * dy <= radiusSq &&
+        projection <= clipDistance &&
+        !isOccluded(px, py, occluders)
+      ) {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+}
+
+function drawTruncatedCircle(ctx, cx, cy, radius, clipDirection, clipDistance, occluders = []) {
+  const minX = Math.floor(cx - radius - 1);
+  const maxX = Math.ceil(cx + radius + 1);
+  const minY = Math.floor(cy - radius - 1);
+  const maxY = Math.ceil(cy + radius + 1);
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const projection = dx * clipDirection.x + dy * clipDirection.y;
+      if (
+        projection <= clipDistance &&
+        Math.abs(Math.hypot(dx, dy) - radius) <= 0.5
+      ) {
+        drawPoint(ctx, px, py, occluders);
+      }
+    }
+  }
+}
+
+function drawTruncatedSphereEnd(ctx, cx, cy, radius, clipDirection, clipDistance, occluders = []) {
+  const halfLength = Math.sqrt(Math.max(0, radius * radius - clipDistance * clipDistance));
+  const tangent = {
+    x: -clipDirection.y,
+    y: clipDirection.x
+  };
+  const center = {
+    x: cx + clipDirection.x * clipDistance,
+    y: cy + clipDirection.y * clipDistance
+  };
+
+  drawPixelLine(
+    ctx,
+    Math.round(center.x - tangent.x * halfLength),
+    Math.round(center.y - tangent.y * halfLength),
+    Math.round(center.x + tangent.x * halfLength),
+    Math.round(center.y + tangent.y * halfLength),
+    occluders
+  );
 }
 
 function fillSolidDisk(ctx, cx, cy, radius) {
