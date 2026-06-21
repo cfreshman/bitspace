@@ -178,6 +178,8 @@ const BOT_RESOURCE_ROUTE_SECONDS_PENALTY = 14;
 const BOT_AIM_ERROR_MIN_RADIANS = 0.012;
 const BOT_AIM_ERROR_MAX_RADIANS = 0.18;
 const BOT_AIM_NOISE_TICKS = 14;
+const BOT_COMBAT_AIM_SAMPLE_RADIUS = RENDER.tileSize;
+const BOT_COMBAT_AIM_SAMPLE_TICKS = ENGINE.tickRate;
 const BOT_UPGRADE_PLANS = Object.freeze([
   Object.freeze({
     id: "duelist",
@@ -293,6 +295,9 @@ export function createPilotBotBrain(id, options = {}) {
   const random = seededRandom(seed, options.randomState);
   const upgradePlan = botUpgradePlan(options.upgradePlan, random);
   const keepExploreState = botExploreStateCompatible(options);
+  const fleeWhenLow = typeof options.fleeWhenLow === "boolean"
+    ? options.fleeWhenLow
+    : stableUnitNoise(`${seed}:fleeWhenLow`) < 0.5;
   return {
     id,
     seed,
@@ -306,6 +311,7 @@ export function createPilotBotBrain(id, options = {}) {
     chaseMemory: sanitizeChaseMemory(options.chaseMemory),
     upgradePlan: upgradePlan.id,
     aimScore: botAimScoreForSeed(seed, options.aimScore ?? options.aimSkill),
+    fleeWhenLow,
     exploreCellTiles: BOT_EXPLORE_CELL_TILES,
     exploreChunkPixels: BOT_EXPLORE_CHUNK_PIXELS,
     exploredCells: keepExploreState ? sanitizeExploredCells(options.exploredCells) : new Map(),
@@ -361,6 +367,7 @@ export function snapshotPilotBotBrain(brain) {
     chaseMemory: sanitizeChaseMemory(brain.chaseMemory),
     upgradePlan: brain.upgradePlan || BOT_UPGRADE_PLANS[0].id,
     aimScore: botAimScoreForSeed(brain.seed || brain.id || "bot", brain.aimScore),
+    fleeWhenLow: brain.fleeWhenLow === true,
     exploreCellTiles: BOT_EXPLORE_CELL_TILES,
     exploreChunkPixels: BOT_EXPLORE_CHUNK_PIXELS,
     exploredCells: Array.from(brain.exploredCells || []),
@@ -404,7 +411,7 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
   const nearestThreat = nearestVisibleEnemy(arena, bot);
   const incomingRock = incomingRockThreat(arena, bot);
   const healthRatio = botHealthRatio(bot);
-  const shouldFleeThreat = nearestThreat && botInFleeHealth(bot);
+  const shouldFleeThreat = nearestThreat && botShouldFleeLowHealth(bot, brain);
   if (nearestThreat) {
     rememberBotThreatSector(arena, brain, nearestThreat.enemy);
     rememberBotChaseMemory(arena, bot, brain, nearestThreat.enemy);
@@ -448,13 +455,13 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
     }
     if (botCanRayThreat(bot, nearestThreat, effects)) {
       mining = true;
-      aimAngle = botCombatAimAngle(bot, brain, nearestThreat.enemy, "flee-ray");
+      aimAngle = botCombatAimAngle(arena, bot, brain, nearestThreat.enemy, "flee-ray");
       holdBotCombatRay(arena, brain, nearestThreat.enemy);
     }
     huckRockTarget = botFleeHuckRockTarget(arena, bot, brain, nearestThreat, rayReach);
     huckRock = huckRockTarget !== null;
   } else if (nearestThreat) {
-    aimAngle = botCombatAimAngle(bot, brain, nearestThreat.enemy, "attack-ray");
+    aimAngle = botCombatAimAngle(arena, bot, brain, nearestThreat.enemy, "attack-ray");
     const attackDistance = botAttackStandoffDistance(bot, nearestThreat.enemy, effects);
     const attackHitDistance = botMiningHitDistance(bot, nearestThreat.enemy, effects);
     const attackTolerance = botAttackStandoffTolerance(bot);
@@ -503,17 +510,17 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
     }
     if (botCanRayThreat(bot, nearestThreat, effects)) {
       mining = true;
-      aimAngle = botCombatAimAngle(bot, brain, nearestThreat.enemy, "attack-ray");
+      aimAngle = botCombatAimAngle(arena, bot, brain, nearestThreat.enemy, "attack-ray");
       holdBotCombatRay(arena, brain, nearestThreat.enemy);
     }
-    const attackRockTarget = botAimedCombatTarget(bot, brain, nearestThreat.enemy, "attack-rock");
+    const attackRockTarget = botAimedCombatTarget(arena, bot, brain, nearestThreat.enemy, "attack-rock");
     huckRock = bot.resources.rock > 0 &&
       nearestThreat.distance > rayReach * 0.8 &&
       nearestThreat.distance < BOT_ATTACK_DISTANCE &&
       botCanHuckRockAtTarget(arena, bot, attackRockTarget);
     huckRockTarget = huckRock ? attackRockTarget : null;
   } else {
-    const rememberedThreat = healthRatio <= BOT_FLEE_HEALTH_RATIO
+    const rememberedThreat = botShouldFleeLowHealth(bot, brain)
       ? botRememberedThreatPoint(arena, brain)
       : null;
     if (rememberedThreat) {
@@ -535,7 +542,7 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
       }
     } else {
       const chaseTarget = botChaseMemoryTarget(arena, bot, brain);
-      if (chaseTarget && !botInFleeHealth(bot)) {
+      if (chaseTarget && !botShouldFleeLowHealth(bot, brain)) {
         const toward = directionBetween(bot, chaseTarget);
         debugMode = "chase";
         debugTarget = chaseTarget;
@@ -659,6 +666,7 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
       healthRatio: roundBotDebugNumber(healthRatio),
       rayReach: roundBotDebugNumber(rayReach),
       aimScore: roundBotDebugNumber(brain.aimScore),
+      fleeWhenLow: brain.fleeWhenLow === true,
       effects: botDebugEffects(effects),
       input: botDebugInput(input),
       huckRockTarget: botDebugTarget(huckRockTarget),
@@ -721,10 +729,11 @@ function updatePilotBotLocalPlannerImpl(arena, bot, brain) {
   if (heldCombatRay) {
     mining = true;
     aimAngle = botCombatAimAngle(
+      arena,
       bot,
       brain,
       heldCombatRay.enemy,
-      botHealthRatio(bot) <= BOT_FLEE_HEALTH_RATIO ? "flee-ray" : "attack-ray"
+      botShouldFleeLowHealth(bot, brain) ? "flee-ray" : "attack-ray"
     );
   }
 
@@ -847,6 +856,10 @@ function botHealthRatio(player) {
 
 function botInFleeHealth(bot) {
   return botHealthRatio(bot) <= BOT_FLEE_HEALTH_RATIO;
+}
+
+function botShouldFleeLowHealth(bot, brain) {
+  return brain?.fleeWhenLow === true && botInFleeHealth(bot);
 }
 
 function botDebugEffects(effects) {
@@ -1050,18 +1063,32 @@ function heldBotCombatRay(arena, bot, brain, effects) {
   return { enemy, distance };
 }
 
-function botCombatAimAngle(bot, brain, target, kind) {
-  return Math.atan2(target.y - bot.y, target.x - bot.x) +
-    botCombatAimErrorRadians(bot, brain, target, kind);
+function botCombatAimAngle(arena, bot, brain, target, kind) {
+  void kind;
+  const aimTarget = botCombatAimPoint(arena, bot, brain, target);
+  return Math.atan2(aimTarget.y - bot.y, aimTarget.x - bot.x);
 }
 
-function botAimedCombatTarget(bot, brain, target, kind) {
-  const distance = Math.max(1, distanceBetween(bot, target));
-  const angle = botCombatAimAngle(bot, brain, target, kind);
+function botAimedCombatTarget(arena, bot, brain, target, kind) {
+  void kind;
+  return botCombatAimPoint(arena, bot, brain, target);
+}
+
+function botCombatAimPoint(arena, bot, brain, target) {
+  if (!target) {
+    return { x: bot.x, y: bot.y };
+  }
+
+  const tick = Number.isFinite(arena?.tick) ? arena.tick : Number(brain?.seq || 0);
+  const bucket = Math.floor(tick / BOT_COMBAT_AIM_SAMPLE_TICKS);
+  const targetKey = target.id || `${Math.round(Number(target.x || 0))},${Math.round(Number(target.y || 0))}`;
+  const seed = `${brain?.seed || brain?.id || bot?.id || "bot"}:combat-aim:${targetKey}:${bucket}`;
+  const radius = Math.sqrt(stableUnitNoise(`${seed}:radius`)) * BOT_COMBAT_AIM_SAMPLE_RADIUS;
+  const angle = stableUnitNoise(`${seed}:angle`) * Math.PI * 2;
   return {
     ...target,
-    x: bot.x + Math.cos(angle) * distance,
-    y: bot.y + Math.sin(angle) * distance
+    x: target.x + Math.cos(angle) * radius,
+    y: target.y + Math.sin(angle) * radius
   };
 }
 
@@ -1233,7 +1260,7 @@ function botFleeHuckRockTarget(arena, bot, brain, threat, rayReach) {
     return null;
   }
 
-  const aimedTarget = botAimedCombatTarget(bot, brain, enemy, "flee-rock");
+  const aimedTarget = botAimedCombatTarget(arena, bot, brain, enemy, "flee-rock");
   const shot = botHuckRockShot(arena, bot, aimedTarget);
   if (!shot?.clear) {
     return null;
