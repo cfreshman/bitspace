@@ -40,6 +40,7 @@ import {
   updatePilotBotBrain,
   updatePilotBotLocalPlanner
 } from "/shared/bots.js";
+import { bitspaceCoreStats, resetBitspaceCoreStats } from "/shared/core/bitspace-core.js";
 import {
   miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
@@ -65,6 +66,7 @@ const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
+const PERF_DEBUG_STORAGE_KEY = "bitspace.debugPerf";
 const PLAYER_MAP_STORAGE_KEY = "bitspace.playerMap";
 const PLAYER_MAP_STORAGE_VERSION = 2;
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
@@ -126,6 +128,7 @@ const MENU_BUTTON_GAP = 24;
 const MENU_ESRB_SUBTITLE = "online interactions not rated by the ESRB";
 const MENU_MINING_RAY_MIN_COUNT = 1;
 const MENU_MINING_RAY_MAX_COUNT = 3;
+const PERF_DEBUG_PANEL_INTERVAL_MS = 250;
 const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 76;
 const THEME_ASTEROID_GAP = 24;
@@ -171,6 +174,7 @@ const TERMINAL_LEAVE_ACTION = Object.freeze({
 });
 const canvas = document.querySelector("#scene");
 const minimapCanvas = document.querySelector("#minimap");
+const perfDebugPanel = document.querySelector("#perf-debug-panel");
 const renderer = createRenderer(canvas, minimapCanvas);
 const gamepadControls = createGamepadControls();
 const talkInput = createTalkInput();
@@ -231,6 +235,16 @@ const state = {
     lastAtSeconds: 0
   },
   botDebugOverlay: loadBotDebugOverlay(),
+  perfDebug: {
+    enabled: loadPerfDebug(),
+    lastNowMs: 0,
+    fps: 0,
+    frameMs: 0,
+    renderMs: 0,
+    panelLastUpdateMs: 0,
+    panelLastText: "",
+    panelLastColor: ""
+  },
   entitySmoothing: {
     byId: new Map()
   },
@@ -511,6 +525,7 @@ socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
 function setClientAsteroid(asteroid) {
   state.asteroid = {
     ...asteroid,
+    revision: 0,
     tiles: asteroid.tiles.split(""),
     amounts: asteroid.amounts.split(""),
     storm: asteroid.storm ? asteroid.storm.split("") : null,
@@ -547,6 +562,7 @@ function applyClientAsteroidUpdates(updates) {
     state.asteroid.tiles[update.index] = update.tile;
     state.asteroid.amounts[update.index] = update.amount;
   }
+  state.asteroid.revision = (Number(state.asteroid.revision) || 0) + 1;
 }
 
 function applyStormWarnings(asteroid, warnings) {
@@ -940,6 +956,9 @@ function emitHeartbeat() {
 }
 
 function draw(now = 0) {
+  if (state.perfDebug.enabled) {
+    updatePerfFrameMetrics(now);
+  }
   const timeSeconds = now / 1000;
   const loadingRoom = isLoadingRoom();
   const readyMenu = isReadyMenu();
@@ -978,6 +997,7 @@ function draw(now = 0) {
     ? menuPlayer
     : audioPlayerForRender(snapshot, cameraPlayerId);
   updateLocalShipAudio(audioPlayer, timeSeconds);
+  const renderStart = state.perfDebug.enabled ? performance.now() : 0;
   renderer.draw(snapshot, {
     playerId,
     cameraPlayerId: readyMenu ? MENU_PLAYER_ID : cameraPlayerId,
@@ -1014,6 +1034,10 @@ function draw(now = 0) {
 	    theme: state.theme,
 	    timeSeconds
 	  });
+  if (state.perfDebug.enabled) {
+    updatePerfRenderMetrics(performance.now() - renderStart);
+    updatePerfDebugPanel(now);
+  }
   requestAnimationFrame(draw);
 }
 
@@ -3753,12 +3777,30 @@ function loadBotDebugOverlay() {
   return window.localStorage.getItem(BOT_DEBUG_OVERLAY_STORAGE_KEY) === "1";
 }
 
+function loadPerfDebug() {
+  return window.localStorage.getItem(PERF_DEBUG_STORAGE_KEY) === "1";
+}
+
 function setBotDebugOverlay(enabled) {
   state.botDebugOverlay = Boolean(enabled);
   setBotDebugEnabled(state.botDebugOverlay);
   window.localStorage.setItem(BOT_DEBUG_OVERLAY_STORAGE_KEY, state.botDebugOverlay ? "1" : "0");
   console.log(`BITSPACE bot debug overlay ${state.botDebugOverlay ? "on" : "off"}`);
   return state.botDebugOverlay;
+}
+
+function setPerfDebug(enabled) {
+  state.perfDebug.enabled = Boolean(enabled);
+  window.localStorage.setItem(PERF_DEBUG_STORAGE_KEY, state.perfDebug.enabled ? "1" : "0");
+  state.perfDebug.lastNowMs = 0;
+  state.perfDebug.fps = 0;
+  state.perfDebug.frameMs = 0;
+  state.perfDebug.renderMs = 0;
+  state.perfDebug.panelLastUpdateMs = 0;
+  state.perfDebug.panelLastText = "";
+  updatePerfDebugPanel(performance.now(), true);
+  console.log(`BITSPACE perf debug ${state.perfDebug.enabled ? "on" : "off"}`);
+  return state.perfDebug.enabled;
 }
 
 function setPlayerMapFeatureEnabled(enabled) {
@@ -3779,6 +3821,9 @@ function installControlHandles() {
   );
   handles.debugMap = (enabled = null) => setPlayerMapFeatureEnabled(
     typeof enabled === "boolean" ? enabled : !DEBUG_FEATURES.playerMap
+  );
+  handles.debugPerf = (enabled = null) => setPerfDebug(
+    typeof enabled === "boolean" ? enabled : !state.perfDebug.enabled
   );
   handles.profileBots = (seconds = 5) => {
     const durationSeconds = clamp(Number(seconds) || 5, 0.5, 60);
@@ -3805,7 +3850,109 @@ function installControlHandles() {
     console.table(snapshot.entries);
     return snapshot;
   };
+  handles.coreStats = () => {
+    const snapshot = bitspaceCoreStats();
+    console.table([snapshot]);
+    return snapshot;
+  };
+  handles.resetCoreStats = () => {
+    const snapshot = resetBitspaceCoreStats();
+    console.table([snapshot]);
+    return snapshot;
+  };
   window.controls = handles;
+}
+
+function updatePerfFrameMetrics(nowMs) {
+  if (!Number.isFinite(nowMs) || nowMs <= 0) {
+    return;
+  }
+  const previous = state.perfDebug.lastNowMs;
+  state.perfDebug.lastNowMs = nowMs;
+  if (!previous) {
+    return;
+  }
+
+  const frameMs = clamp(nowMs - previous, 0, 1000);
+  const fps = frameMs > 0 ? 1000 / frameMs : 0;
+  const alpha = 0.12;
+  state.perfDebug.frameMs = state.perfDebug.frameMs
+    ? state.perfDebug.frameMs * (1 - alpha) + frameMs * alpha
+    : frameMs;
+  state.perfDebug.fps = state.perfDebug.fps
+    ? state.perfDebug.fps * (1 - alpha) + fps * alpha
+    : fps;
+}
+
+function updatePerfRenderMetrics(renderMs) {
+  if (!Number.isFinite(renderMs)) {
+    return;
+  }
+  const alpha = 0.12;
+  state.perfDebug.renderMs = state.perfDebug.renderMs
+    ? state.perfDebug.renderMs * (1 - alpha) + renderMs * alpha
+    : renderMs;
+}
+
+function perfDebugRenderState() {
+  const core = bitspaceCoreStats();
+  return {
+    fps: state.perfDebug.fps,
+    frameMs: state.perfDebug.frameMs,
+    renderMs: state.perfDebug.renderMs,
+    core
+  };
+}
+
+function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
+  if (!perfDebugPanel) {
+    return;
+  }
+  if (!state.perfDebug.enabled) {
+    perfDebugPanel.hidden = true;
+    state.perfDebug.panelLastText = "";
+    return;
+  }
+  if (
+    !force &&
+    state.perfDebug.panelLastUpdateMs &&
+    nowMs - state.perfDebug.panelLastUpdateMs < PERF_DEBUG_PANEL_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  const perf = perfDebugRenderState();
+  const core = perf.core || {};
+  state.perfDebug.panelLastUpdateMs = nowMs;
+  perfDebugPanel.hidden = false;
+  const color = state.theme.foreground || RENDER.foreground;
+  if (state.perfDebug.panelLastColor !== color) {
+    state.perfDebug.panelLastColor = color;
+    perfDebugPanel.style.color = color;
+    perfDebugPanel.style.borderColor = color;
+  }
+  const text = [
+    "BITSPACE PERF",
+    `FPS        ${formatPerfNumber(perf.fps, 1)}`,
+    `FRAME MS   ${formatPerfNumber(perf.frameMs, 2)}`,
+    `RENDER MS  ${formatPerfNumber(perf.renderMs, 2)}`,
+    `CORE       ${core.ready ? "WASM" : "JS"}`,
+    `VIS CALLS  ${core.visibilityNativeCalls || 0}/${core.visibilityCalls || 0}`,
+    `VIS AVG    ${formatPerfNumber(core.visibilityAvgMs, 3)}MS`,
+    `VIS SEGS   ${core.visibilityMaxSegments || 0}`,
+    `STORM AVG  ${formatPerfNumber(core.stormAvgMs, 3)}MS`,
+    `PATH AVG   ${formatPerfNumber(core.pathAvgMs, 3)}MS`,
+    `TRAJ AVG   ${formatPerfNumber(core.avgMs, 3)}MS`
+  ].join("\n");
+  if (state.perfDebug.panelLastText !== text) {
+    state.perfDebug.panelLastText = text;
+    perfDebugPanel.textContent = text;
+  }
+}
+
+function formatPerfNumber(value, digits = 1) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "-";
 }
 
 function resetTheme() {

@@ -18,6 +18,7 @@ import {
   miningRayLanesForPlayer,
   miningRaySideStartProbe
 } from "./mining.js";
+import { findPathNative, planTrajectoryNative } from "./core/bitspace-core.js";
 import { aggregateUpgradeEffects, canAffordUpgrade, nextUpgradeCost } from "./upgrades.js";
 
 const BOT_ATTACK_DISTANCE = 210;
@@ -6158,6 +6159,11 @@ function findBotPath(arena, startIndex, goalIndex, options = {}) {
 function findBotPathImpl(arena, startIndex, goalIndex, options = {}) {
   const asteroid = arena.asteroid;
   const searchOptions = botPreparePathSearchOptions(asteroid, options, startIndex);
+  const nativePath = findPathNative(arena, startIndex, goalIndex, searchOptions);
+  if (nativePath) {
+    return nativePath;
+  }
+
   const stateCount = asteroid.tiles.length * BOT_PATH_DIRECTION_COUNT;
   const previous = new Int32Array(stateCount);
   const costs = new Float32Array(stateCount);
@@ -7117,6 +7123,56 @@ function botTrajectoryStateMoves(state) {
   return reversed;
 }
 
+function botPlanNativeTrajectorySequence(arena, bot, desired, radius, acceleration, friction, dt, trajectoryContext) {
+  if (!trajectoryContext?.blockers) {
+    return null;
+  }
+
+  const plan = planTrajectoryNative({
+    x: bot.x,
+    y: bot.y,
+    vx: bot.vx,
+    vy: bot.vy,
+    desiredX: desired.x,
+    desiredY: desired.y,
+    radius,
+    acceleration,
+    friction,
+    dt,
+    steps: BOT_TRAJECTORY_SOLVER_STEPS,
+    beamWidth: BOT_TRAJECTORY_BEAM_WIDTH,
+    scanPixels: BOT_TRAJECTORY_CLEARANCE_SCAN_PIXELS,
+    softClearancePixels: BOT_TRAJECTORY_SOFT_CLEARANCE_PIXELS,
+    progressWeight: BOT_TRAJECTORY_PROGRESS_WEIGHT,
+    alignmentWeight: BOT_TRAJECTORY_ALIGNMENT_WEIGHT,
+    clearanceWeight: BOT_TRAJECTORY_CLEARANCE_WEIGHT,
+    lateHitWeight: BOT_TRAJECTORY_LATE_HIT_WEIGHT,
+    maxOvershootSpeed: BOT_PATH_MAX_OVERSHOOT_DOT
+  }, trajectoryContext.blockers);
+
+  if (!plan?.safe || !Array.isArray(plan.moves) || plan.moves.length <= 0) {
+    return null;
+  }
+
+  let previous = null;
+  let firstMove = null;
+  for (const move of plan.moves) {
+    const node = {
+      moveX: Number(move.x || 0),
+      moveY: Number(move.y || 0),
+      firstMove: firstMove || { x: Number(move.x || 0), y: Number(move.y || 0) },
+      previous,
+      safe: true,
+      score: plan.score,
+      minClearance: plan.minClearance
+    };
+    firstMove ||= node.firstMove;
+    previous = node;
+  }
+
+  return previous;
+}
+
 function botTrajectoryCandidateControls(desired, bot) {
   const baseAngle = Math.atan2(desired.y, desired.x);
   const fineOffsets = [
@@ -7186,8 +7242,22 @@ function botPlanTrajectorySequenceImpl(arena, bot, desired) {
   const friction = Math.pow(ENGINE.ship.friction, dt / (1 / ENGINE.tickRate));
   const acceleration = ENGINE.ship.thrust * Math.max(0.1, Number(effects.thrustMultiplier || 1));
   const radius = Math.max(1, Number(bot.radius || ENGINE.ship.radius)) + BOT_TRAJECTORY_HARD_RADIUS_MARGIN;
-  const controls = botTrajectoryCandidateControls(desired, bot);
   const trajectoryContext = botTrajectoryContext(arena, bot, radius, acceleration, dt);
+  const nativePlan = botPlanNativeTrajectorySequence(
+    arena,
+    bot,
+    desired,
+    radius,
+    acceleration,
+    friction,
+    dt,
+    trajectoryContext
+  );
+  if (nativePlan) {
+    return nativePlan;
+  }
+
+  const controls = botTrajectoryCandidateControls(desired, bot);
   const initialClearance = botTrajectoryClearance(arena, bot.x, bot.y, radius, trajectoryContext);
   let beam = [{
     x: Number(bot.x || 0),

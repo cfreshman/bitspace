@@ -5,9 +5,11 @@
   "type": "module",
   "description": "BITSPACE 1-bit socket arena scaffold.",
   "scripts": {
+    "build:core": "bash scripts/build-core-wasm.sh",
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "check": "for file in server/*.js shared/*.js public/*.js scripts/*.mjs; do node --check \"$file\"; done",
+    "check": "for file in server/*.js shared/*.js shared/core/*.js public/*.js scripts/*.mjs; do node --check \"$file\"; done",
+    "smoke:core": "node scripts/smoke-core.mjs",
     "smoke:socket": "node scripts/smoke-socket.mjs"
   },
   "engines": {

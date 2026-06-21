@@ -16,6 +16,11 @@ import {
   UPGRADE_DEFINITIONS,
   upgradeLevel
 } from "/shared/upgrades.js";
+import {
+  stormPatternRowsNative,
+  visibilitySpansFromGridNative,
+  visibilitySpansNative
+} from "/shared/core/bitspace-core.js";
 
 const ENTITY_PIXEL_SIZE = 1;
 const CANVAS_EDGE_PADDING_EM = 1;
@@ -3578,6 +3583,18 @@ function stormPatternRows(asteroid, tileX, tileY, size, timeSeconds, threshold) 
   }
 
   const sampleTimeSeconds = frame / STORM_PATTERN_FPS;
+  const nativeRows = stormPatternRowsNative(asteroid, tileX, tileY, size, sampleTimeSeconds, threshold, {
+    fps: STORM_PATTERN_FPS,
+    scale: STORM_NOISE_SCALE,
+    speedX: STORM_NOISE_SPEED_X,
+    speedY: STORM_NOISE_SPEED_Y,
+    speedZ: STORM_NOISE_SPEED_Z
+  });
+  if (nativeRows) {
+    stormPatternCache.set(cacheKey, nativeRows);
+    return nativeRows;
+  }
+
   const worldLeft = tileX * size;
   const worldTop = tileY * size;
   const rows = new Uint32Array(size);
@@ -3756,9 +3773,20 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
     x: player.x - camera.x,
     y: player.y - camera.y
   };
-  const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds);
-  const polygon = buildAsteroidVisibilityPolygon(origin, radius, segments);
-  const spans = rasterizeAsteroidVisibilityPolygon(polygon);
+  const visibilityOptions = {
+    baseRays: ASTEROID_VISIBILITY_BASE_RAYS,
+    angleEpsilon: ASTEROID_VISIBILITY_ANGLE_EPSILON,
+    dilatePixels: ASTEROID_VISIBILITY_DILATE_PIXELS,
+    outerBevel: ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS,
+    innerCorner: ROCK_INNER_CORNER_RADIUS,
+    edgeOverlap: ASTEROID_VISIBILITY_DILATE_PIXELS
+  };
+  let spans = visibilitySpansFromGridNative(asteroid, player, camera, radius, bounds, visibilityOptions);
+  if (!spans) {
+    const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds);
+    spans = visibilitySpansNative(origin, radius, segments, visibilityOptions) ||
+      rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, segments));
+  }
   return {
     asteroid,
     width,
@@ -5851,7 +5879,13 @@ function drawStormBoundaryHorizontal(ctx, asteroid, x, y, length, worldX, worldY
 }
 
 function stormBoundaryMaskOn(asteroid, worldX, worldY, timeSeconds) {
-  return stormNoiseAt(asteroid, worldX, worldY, timeSeconds) >= STORM_BOUNDARY_NOISE_THRESHOLD;
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const tileX = Math.floor(worldX / tileSize);
+  const tileY = Math.floor(worldY / tileSize);
+  const localX = positiveModulo(Math.floor(worldX), tileSize);
+  const localY = positiveModulo(Math.floor(worldY), tileSize);
+  const rows = stormPatternRows(asteroid, tileX, tileY, tileSize, timeSeconds, STORM_BOUNDARY_NOISE_THRESHOLD);
+  return ((rows[localY] || 0) & (1 << localX)) !== 0;
 }
 
 function drawAsteroidBoundary(ctx, asteroid, camera, colors, visibility = null) {
