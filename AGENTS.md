@@ -40,6 +40,7 @@ LLM instructions
 - if i tell you to change something, you dont have to remark that the thing is currently doing it a different way. no fucking shit it is
 - you keep simply misinterpreting me. stop. i want it done the way the makes sense, not ur fucking retarded misguess
 - if you truly think there are multiple ways to interpret something and ur not sure, ASK. DO NOT BLINDLY START IN UR 'BEST GUESS', BECAUSE YOU ARE LITERALLY ALWAYS WRONG
+- do not overcorrect
 
 ## LLM ERRATA
 

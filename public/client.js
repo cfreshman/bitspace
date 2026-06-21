@@ -34,6 +34,7 @@ import {
   botProfileSnapshot,
   createPilotBotBrain,
   resetBotProfile,
+  setBotDebugEnabled,
   setBotProfileEnabled,
   snapshotPilotBotBrain,
   updatePilotBotBrain,
@@ -112,6 +113,7 @@ const LOCAL_BOT_COUNT = 7;
 const LOCAL_BOT_SAVE_VERSION = 2;
 const LOCAL_BOT_SAVE_INTERVAL_SECONDS = 1;
 const LOCAL_BOT_PLAN_INTERVAL_TICKS = 12;
+const LOCAL_BOT_MAX_STEPS_PER_FRAME = 4;
 const BOT_DEBUG_CHUNK_TILES = 16;
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
@@ -186,12 +188,19 @@ const audio = {
   context: null,
   unlocked: false,
   pendingBeeps: 0,
+  pendingMelodies: [],
   ship: null,
   lastHealth: null,
   lastShake: 0,
   lastClunkAtSeconds: 0,
   lastRockThumpAtSeconds: 0,
   pendingDamage: 0,
+  lastDamagePlayerId: "",
+  huckRockAudioPlayerId: "",
+  lastHuckRockCooldownSeconds: 0,
+  endSoundKey: "",
+  defeatSoundKey: "",
+  lastDefeatAtSeconds: -Infinity,
   huckRockBuffer: null,
   rockThumpBuffer: null
 };
@@ -288,6 +297,7 @@ const state = {
   resumeFallbackTimer: null
 };
 
+setBotDebugEnabled(state.botDebugOverlay);
 installControlHandles();
 
 const mapGenMode = isMapGenMode();
@@ -429,6 +439,9 @@ function applyServerRoom(room) {
   if (room?.state === "menu") {
     state.menu.readySent = false;
   }
+  if (room?.state === "ended" && previousState && previousState !== "ended") {
+    handleRoomEndAudio(room, state.snapshot, performance.now() / 1000);
+  }
 }
 
 function roomActiveMatchKey(room) {
@@ -470,6 +483,7 @@ socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
   updateLocalDamageAudio(snapshot, receivedAtSeconds);
   recordEliminations(snapshot, receivedAtSeconds);
   state.snapshot = snapshot;
+  handleRoomEndAudio(state.room, snapshot, receivedAtSeconds);
   if (state.asteroid) {
     state.asteroid.tick = snapshot.tick;
   }
@@ -956,7 +970,7 @@ function draw(now = 0) {
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
     ? menuPlayer
-    : predictedLocalPlayer() || localPlayerFromSnapshot();
+    : audioPlayerForRender(snapshot, cameraPlayerId);
   updateLocalShipAudio(audioPlayer, timeSeconds);
   renderer.draw(snapshot, {
     playerId,
@@ -2762,7 +2776,7 @@ function updateLocalBotGameImpl(timeSeconds) {
 
   const stepSeconds = 1 / ENGINE.tickRate;
   let steps = 0;
-  while (localGame.accumulatorSeconds >= stepSeconds && steps < 8) {
+  while (localGame.accumulatorSeconds >= stepSeconds && steps < LOCAL_BOT_MAX_STEPS_PER_FRAME) {
     if (botProfileActive()) {
       botProfileMeasure("stepLocalBotArena", () => stepLocalBotArena(stepSeconds));
     } else {
@@ -2772,14 +2786,16 @@ function updateLocalBotGameImpl(timeSeconds) {
     steps += 1;
   }
 
-  if (steps >= 8) {
+  if (steps >= LOCAL_BOT_MAX_STEPS_PER_FRAME) {
     localGame.accumulatorSeconds = 0;
   }
 
-  if (botProfileActive()) {
-    botProfileMeasure("syncLocalArenaSnapshot", () => syncLocalArenaSnapshot(timeSeconds));
-  } else {
-    syncLocalArenaSnapshot(timeSeconds);
+  if (steps > 0 || !state.snapshot || state.snapshot.arenaId !== arena.id) {
+    if (botProfileActive()) {
+      botProfileMeasure("syncLocalArenaSnapshot", () => syncLocalArenaSnapshot(timeSeconds));
+    } else {
+      syncLocalArenaSnapshot(timeSeconds);
+    }
   }
 }
 
@@ -2818,7 +2834,10 @@ function stepLocalBotArena(stepSeconds) {
   } else {
     stepArena(arena, stepSeconds, stepOptions);
   }
-  applyClientAsteroidUpdates(takeAsteroidUpdates(arena));
+  const updates = takeAsteroidUpdates(arena);
+  if (updates.length > 0) {
+    applyClientAsteroidUpdates(updates);
+  }
   updateLocalRoomEndState(arena);
 }
 
@@ -2905,6 +2924,9 @@ function syncLocalArenaSnapshot(timeSeconds, options = {}) {
     recordEliminations(snapshot, timeSeconds);
   }
   state.snapshot = snapshot;
+  if (!options.skipEliminations) {
+    handleRoomEndAudio(state.room, snapshot, timeSeconds);
+  }
   if (state.asteroid) {
     state.asteroid.tick = snapshot.tick;
   }
@@ -3679,6 +3701,7 @@ function loadBotDebugOverlay() {
 
 function setBotDebugOverlay(enabled) {
   state.botDebugOverlay = Boolean(enabled);
+  setBotDebugEnabled(state.botDebugOverlay);
   window.localStorage.setItem(BOT_DEBUG_OVERLAY_STORAGE_KEY, state.botDebugOverlay ? "1" : "0");
   console.log(`BITSPACE bot debug overlay ${state.botDebugOverlay ? "on" : "off"}`);
   return state.botDebugOverlay;
@@ -4272,10 +4295,10 @@ function unlockAudio() {
   audio.context = context;
   if (context.state === "suspended") {
     context.resume()
-      .then(flushPendingBeeps)
+      .then(flushPendingAudio)
       .catch(() => {});
   } else {
-    flushPendingBeeps();
+    flushPendingAudio();
   }
   audio.unlocked = true;
 }
@@ -4299,12 +4322,17 @@ function requestMechanicalBeep() {
   if (context.state === "suspended") {
     audio.pendingBeeps = Math.min(audio.pendingBeeps + 1, 3);
     context.resume()
-      .then(flushPendingBeeps)
+      .then(flushPendingAudio)
       .catch(() => {});
     return;
   }
 
   playMechanicalBeep(context);
+}
+
+function flushPendingAudio() {
+  flushPendingBeeps();
+  flushPendingMelodies();
 }
 
 function flushPendingBeeps() {
@@ -4318,6 +4346,144 @@ function flushPendingBeeps() {
   for (let index = 0; index < beeps; index += 1) {
     playMechanicalBeep(context, index * 0.18);
   }
+}
+
+function requestEndFanfare(matchKey) {
+  const key = String(matchKey || "");
+  if (!key || audio.endSoundKey === key) {
+    return false;
+  }
+
+  audio.endSoundKey = key;
+  requestMelody("fanfare");
+  return true;
+}
+
+function requestDefeatMotif(matchKey, timeSeconds = performance.now() / 1000) {
+  const key = String(matchKey || "");
+  if (!key || audio.defeatSoundKey === key) {
+    return false;
+  }
+
+  audio.defeatSoundKey = key;
+  audio.lastDefeatAtSeconds = timeSeconds;
+  audio.pendingMelodies = audio.pendingMelodies.filter((kind) => kind !== "fanfare");
+  requestMelody("defeat");
+  return true;
+}
+
+function requestMelody(kind) {
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    queuePendingMelody(kind);
+    context.resume()
+      .then(flushPendingAudio)
+      .catch(() => {});
+    return;
+  }
+
+  playMelody(context, kind);
+}
+
+function queuePendingMelody(kind) {
+  if (kind === "defeat") {
+    audio.pendingMelodies = audio.pendingMelodies.filter((pending) => pending !== "fanfare");
+  }
+  audio.pendingMelodies = audio.pendingMelodies
+    .filter((pending) => pending !== kind)
+    .slice(-2);
+  audio.pendingMelodies.push(kind);
+}
+
+function flushPendingMelodies() {
+  const context = audio.context;
+  if (!context || context.state !== "running" || audio.pendingMelodies.length <= 0) {
+    return;
+  }
+
+  const melodies = audio.pendingMelodies.slice();
+  audio.pendingMelodies = [];
+  melodies.forEach((kind, index) => {
+    playMelody(context, kind, index * 0.32);
+  });
+}
+
+function playMelody(context, kind, delay = 0) {
+  if (kind === "defeat") {
+    playDefeatMotif(context, delay);
+    return;
+  }
+  playEndFanfare(context, delay);
+}
+
+function playEndFanfare(context, delay = 0) {
+  const start = context.currentTime + 0.018 + delay;
+  playTrumpetTone(context, 523.25, start, 0.16, 0.032);
+  playTrumpetTone(context, 659.25, start + 0.18, 0.16, 0.033);
+  playTrumpetTone(context, 783.99, start + 0.36, 0.26, 0.036);
+}
+
+function playDefeatMotif(context, delay = 0) {
+  const start = context.currentTime + 0.018 + delay;
+  playDefeatTone(context, 329.63, start, 0.22, 0.028);
+  playDefeatTone(context, 246.94, start + 0.28, 0.34, 0.031);
+}
+
+function playTrumpetTone(context, frequency, start, duration, volume) {
+  const oscillator = context.createOscillator();
+  const overtone = context.createOscillator();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+
+  oscillator.type = "sawtooth";
+  overtone.type = "square";
+  oscillator.frequency.setValueAtTime(frequency, start);
+  overtone.frequency.setValueAtTime(frequency * 2.01, start);
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(frequency * 2.4, start);
+  filter.Q.value = 3.5;
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.018);
+  gain.gain.exponentialRampToValueAtTime(volume * 0.62, start + duration * 0.62);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+  oscillator.connect(filter);
+  overtone.connect(filter);
+  filter.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(start);
+  overtone.start(start);
+  oscillator.stop(start + duration + 0.03);
+  overtone.stop(start + duration + 0.03);
+}
+
+function playDefeatTone(context, frequency, start, duration, volume) {
+  const oscillator = context.createOscillator();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+
+  oscillator.type = "triangle";
+  oscillator.frequency.setValueAtTime(frequency, start);
+  oscillator.frequency.exponentialRampToValueAtTime(Math.max(40, frequency * 0.82), start + duration);
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(620, start);
+  filter.frequency.exponentialRampToValueAtTime(260, start + duration);
+  filter.Q.value = 0.6;
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.025);
+  gain.gain.exponentialRampToValueAtTime(volume * 0.45, start + duration * 0.62);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+  oscillator.connect(filter);
+  filter.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.03);
 }
 
 function playMechanicalBeep(context, delay = 0) {
@@ -4403,10 +4569,11 @@ function updateLocalShipAudio(player, timeSeconds) {
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
   const inputLevel = alive ? playerThrustInputLevel(player) : 0;
-  const miningActive = state.room?.state !== "ended" && alive && player.mining === true;
+  const miningActive = state.room?.state !== "ended" && alive && playerMiningAudioActive(player);
 
   updateEngineAudio(context, inputLevel, timeSeconds);
   updateMiningAudio(context, miningActive, timeSeconds);
+  updateFocusedHuckRockAudio(player, timeSeconds);
   flushPendingDamageClunk(timeSeconds);
 }
 
@@ -4425,9 +4592,61 @@ function playerThrustInputLevel(player) {
   return player?.thrusting ? 1 : 0;
 }
 
-function updateLocalDamageAudio(snapshot, timeSeconds) {
-  const player = snapshot.players.find((candidate) => candidate.id === state.playerId);
+function playerMiningAudioActive(player) {
   if (!player) {
+    return false;
+  }
+
+  if (player.mining === true) {
+    return true;
+  }
+
+  if (player.miningRay) {
+    return true;
+  }
+
+  return Number(player.rayExtension || 0) > 0.01;
+}
+
+function updateFocusedHuckRockAudio(player, timeSeconds) {
+  const playerId = player?.id || "";
+  const cooldownSeconds = Math.max(0, Number(player?.huckRockCooldownSeconds || 0));
+  if (isReadyMenu() || playerId === state.playerId) {
+    audio.huckRockAudioPlayerId = playerId;
+    audio.lastHuckRockCooldownSeconds = cooldownSeconds;
+    return;
+  }
+
+  if (!playerId || playerId !== audio.huckRockAudioPlayerId) {
+    audio.huckRockAudioPlayerId = playerId;
+    audio.lastHuckRockCooldownSeconds = cooldownSeconds;
+    return;
+  }
+
+  if (
+    playerId !== state.playerId &&
+    player?.alive !== false &&
+    cooldownSeconds > audio.lastHuckRockCooldownSeconds + 0.08
+  ) {
+    requestHuckRockThunk();
+  }
+
+  audio.lastHuckRockCooldownSeconds = cooldownSeconds;
+}
+
+function updateLocalDamageAudio(snapshot, timeSeconds) {
+  const focusPlayerId = audioFocusPlayerIdForSnapshot(snapshot);
+  const player = snapshot.players.find((candidate) => candidate.id === focusPlayerId);
+  if (!player) {
+    audio.lastDamagePlayerId = "";
+    return;
+  }
+
+  if (audio.lastDamagePlayerId !== player.id) {
+    audio.lastDamagePlayerId = player.id;
+    audio.lastHealth = player.health;
+    audio.lastShake = player.shake || 0;
+    audio.pendingDamage = 0;
     return;
   }
 
@@ -4462,6 +4681,7 @@ function flushPendingDamageClunk(timeSeconds = performance.now() / 1000) {
 }
 
 function resetLocalDamageAudioState() {
+  audio.lastDamagePlayerId = "";
   audio.lastHealth = null;
   audio.lastShake = 0;
   audio.pendingDamage = 0;
@@ -6008,6 +6228,9 @@ function recordEliminations(snapshot, timeSeconds) {
   for (const player of snapshot.players || []) {
     const wasAlive = state.playerAliveById.get(player.id);
     if (wasAlive === true && player.alive === false) {
+      if (player.id === state.playerId) {
+        requestDefeatMotif(roomEndAudioKey(state.room), timeSeconds);
+      }
       state.eliminationNotices.push({
         id: `${player.id}:${player.eliminatedAtTick ?? snapshot.tick}:${timeSeconds}`,
         text: "A PLAYER HAS BEEN ELIMINATED",
@@ -6019,6 +6242,49 @@ function recordEliminations(snapshot, timeSeconds) {
 
     state.playerAliveById.set(player.id, player.alive === true);
   }
+}
+
+function handleRoomEndAudio(room, snapshot, timeSeconds = performance.now() / 1000) {
+  if (room?.state !== "ended") {
+    return;
+  }
+
+  const key = roomEndAudioKey(room);
+  if (!key || audio.endSoundKey === key) {
+    return;
+  }
+
+  const defeatJustPlayed = audio.defeatSoundKey === key &&
+    timeSeconds - audio.lastDefeatAtSeconds < 1.5;
+  if (defeatJustPlayed) {
+    audio.endSoundKey = key;
+    return;
+  }
+
+  const localPlayer = localEndAudioPlayer(snapshot);
+  if (localPlayer && localPlayer.alive !== false && room.winnerId && room.winnerId !== localPlayer.id) {
+    return;
+  }
+
+  requestEndFanfare(key);
+}
+
+function localEndAudioPlayer(snapshot) {
+  if (!state.playerId) {
+    return null;
+  }
+
+  return (snapshot?.players || []).find((candidate) => candidate.id === state.playerId) || null;
+}
+
+function roomEndAudioKey(room) {
+  return state.lastActiveMatchKey ||
+    [
+      room?.roomId || LOCAL_BOT_ROOM_ID,
+      room?.seed || "",
+      room?.startedAtMs || "",
+      room?.winnerId || ""
+    ].join(":");
 }
 
 function pruneEliminationNotices(timeSeconds) {
@@ -6744,6 +7010,46 @@ function localPlayerFromSnapshot() {
   return state.snapshot?.players.find((candidate) => candidate.id === state.playerId) || null;
 }
 
+function audioPlayerForRender(snapshot, cameraPlayerId) {
+  if (!snapshot) {
+    return null;
+  }
+
+  if (cameraPlayerId === state.playerId) {
+    return predictedLocalPlayer() || snapshot.players?.find((candidate) => candidate.id === state.playerId) || null;
+  }
+
+  return snapshot.players?.find((candidate) => candidate.id === cameraPlayerId) ||
+    snapshot.players?.find((candidate) => candidate.id === audioFocusPlayerIdForSnapshot(snapshot)) ||
+    null;
+}
+
+function audioFocusPlayerIdForSnapshot(snapshot) {
+  const players = snapshot?.players || [];
+  const local = players.find((candidate) => candidate.id === state.playerId);
+  if (local && local.alive !== false) {
+    return local.id;
+  }
+
+  if (state.room?.state === "ended" && state.room.winnerId) {
+    return state.room.winnerId;
+  }
+
+  const spectator = players.find((candidate) => candidate.id === state.spectatorTargetId && candidate.alive === true);
+  if (spectator) {
+    return spectator.id;
+  }
+
+  const killer = local?.killedById
+    ? players.find((candidate) => candidate.id === local.killedById && candidate.alive === true)
+    : null;
+  if (killer) {
+    return killer.id;
+  }
+
+  return players.find((candidate) => candidate.alive === true)?.id || local?.id || state.playerId;
+}
+
 function cameraPlayerIdForRoom() {
   const room = state.room;
   const player = localPlayerFromSnapshot();
@@ -7409,6 +7715,12 @@ function spectatedBotDebugDetails(cameraPlayerId) {
 }
 
 function logSpectatedBotDebug(cameraPlayerId, timeSeconds) {
+  if (!state.botDebugOverlay) {
+    state.botDebugLog.lastId = "";
+    state.botDebugLog.lastAtSeconds = 0;
+    return;
+  }
+
   const details = spectatedBotDebugDetails(cameraPlayerId);
   if (!details) {
     state.botDebugLog.lastId = "";

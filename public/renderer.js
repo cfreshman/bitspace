@@ -3564,7 +3564,6 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
   if (
     !ASTEROID_VISIBILITY_EXPERIMENT ||
     options.playerMapLarge ||
-    options.room?.state !== "active" ||
     !asteroid ||
     !player ||
     player.alive === false
@@ -4770,7 +4769,7 @@ function createAsteroidVisibilityWorldMask(visibility) {
 }
 
 function playerTouchesAsteroidVisibility(visibility, player) {
-  if (!visibility || !player || player.alive === false) {
+  if (!visibility || !player) {
     return false;
   }
 

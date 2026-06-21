@@ -40,6 +40,7 @@ const DEFAULT_ARENA_ID = "main";
 const INITIAL_SPAWN_ANGLE = Math.PI / 4;
 const KILL_DROP_SINGLE_DIAMOND_CHANCE = 2 / 3;
 const KILL_DROP_NOTICE_TICKS = ENGINE.tickRate * 3;
+const RANDOM_DIAMOND_SPAWN_TICKS = ENGINE.tickRate * 15;
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
@@ -312,6 +313,7 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
 export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) {
   arena.tick += 1;
   stepStorm(arena);
+  spawnRandomDiamond(arena);
 
   for (const player of arena.players.values()) {
     if (player.alive) {
@@ -347,21 +349,31 @@ export function snapshotAsteroid(arena) {
 }
 
 function snapshotAsteroidMining(arena) {
-  return Array.from(arena.asteroidMining.entries()).flatMap(([index, state]) => {
+  if (arena.asteroidMining.size <= 0) {
+    return [];
+  }
+
+  const mining = [];
+  for (const [index, state] of arena.asteroidMining.entries()) {
     const target = miningTargetForTile(arena.asteroid, index);
     if (!target || target.phase !== state.phase) {
-      return [];
+      continue;
     }
 
-    return {
+    mining.push({
       index,
       phase: state.phase,
       progress: roundForSnapshot(clamp(state.progress / target.seconds, 0, 1))
-    };
-  });
+    });
+  }
+  return mining;
 }
 
 export function takeAsteroidUpdates(arena) {
+  if (arena.asteroidUpdates.length <= 0 && arena.stormUpdates.length <= 0) {
+    return [];
+  }
+
   const updates = arena.asteroidUpdates.concat(arena.stormUpdates);
   arena.asteroidUpdates = [];
   arena.stormUpdates = [];
@@ -2085,6 +2097,51 @@ function setAsteroidTile(arena, index, tile, amount) {
     tile,
     amount
   });
+}
+
+function spawnRandomDiamond(arena) {
+  if (
+    !arena?.rules?.playerDamage ||
+    !arena.asteroid ||
+    !arena.storm ||
+    arena.tick <= 0 ||
+    arena.tick % RANDOM_DIAMOND_SPAWN_TICKS !== 0
+  ) {
+    return false;
+  }
+
+  const index = randomSafeRockIndex(arena, `${arena.seed}:random-diamond:${arena.tick}`);
+  if (index === null) {
+    return false;
+  }
+
+  clearMiningProgress(arena, index);
+  setAsteroidTile(arena, index, ASTEROID_TILE.diamond, 1);
+  return true;
+}
+
+function randomSafeRockIndex(arena, seed) {
+  const asteroid = arena.asteroid;
+  const random = createSeededRandom(seed);
+  let selectedIndex = null;
+  let candidateCount = 0;
+
+  for (let index = 0; index < asteroid.tiles.length; index += 1) {
+    if (
+      asteroid.tiles[index] !== ASTEROID_TILE.rock ||
+      !isPlayableCell(asteroid, index) ||
+      stormStateAt(arena, index) !== STORM_STATE.safe
+    ) {
+      continue;
+    }
+
+    candidateCount += 1;
+    if (random() < 1 / candidateCount) {
+      selectedIndex = index;
+    }
+  }
+
+  return selectedIndex;
 }
 
 function addMiningProgress(arena, index, target, dtSeconds) {

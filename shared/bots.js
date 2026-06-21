@@ -59,7 +59,7 @@ const BOT_PATH_REPLAN_TICKS = 12;
 const BOT_THETA_MAX_VISITED = 6000;
 const BOT_PATH_COST_MAX_VISITED = 2600;
 const BOT_FLEE_PATH_COST_MAX_VISITED = 7000;
-const BOT_FLEE_TARGET_REPLAN_TICKS = 30;
+const BOT_FLEE_TARGET_REPLAN_TICKS = 60;
 const BOT_PATH_DIRECTION_COUNT = 5;
 const BOT_PATH_START_DIRECTION = 4;
 const BOT_PATH_CONTRACT_MAX_NODES = 48;
@@ -86,7 +86,7 @@ const BOT_TRAJECTORY_SOLVER_STEPS = 12;
 const BOT_TRAJECTORY_SOLVER_DT_SECONDS = 1 / ENGINE.tickRate;
 const BOT_TRAJECTORY_BEAM_WIDTH = 10;
 const BOT_TRAJECTORY_CACHE_MAX_TICKS = 12;
-const BOT_TRAJECTORY_CACHE_DIRECTION_DOT = 0.992;
+const BOT_TRAJECTORY_CACHE_DIRECTION_DOT = 0.965;
 const BOT_TRAJECTORY_HARD_RADIUS_MARGIN = 0;
 const BOT_TRAJECTORY_SOFT_CLEARANCE_PIXELS = 1.1;
 const BOT_TRAJECTORY_CLEARANCE_SCAN_PIXELS = 4;
@@ -200,6 +200,7 @@ const BOT_UPGRADE_PLANS = Object.freeze([
   })
 ]);
 const BOT_PROFILE_GLOBAL_KEY = "__BITSPACE_BOT_PROFILE";
+const BOT_DEBUG_GLOBAL_KEY = "__BITSPACE_BOT_DEBUG";
 
 export function setBotProfileEnabled(enabled = true) {
   const profile = botProfileState();
@@ -260,6 +261,15 @@ function botProfileState() {
 
 export function botProfileActive() {
   return globalThis[BOT_PROFILE_GLOBAL_KEY]?.enabled === true;
+}
+
+export function setBotDebugEnabled(enabled = true) {
+  globalThis[BOT_DEBUG_GLOBAL_KEY] = Boolean(enabled);
+  return botDebugEnabled();
+}
+
+export function botDebugEnabled() {
+  return globalThis[BOT_DEBUG_GLOBAL_KEY] === true;
 }
 
 function botProfileNow() {
@@ -443,61 +453,52 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
     huckRockTarget = botFleeHuckRockTarget(arena, bot, brain, nearestThreat, rayReach);
     huckRock = huckRockTarget !== null;
   } else if (nearestThreat) {
-    const toward = directionBetween(bot, nearestThreat.enemy);
     aimAngle = botCombatAimAngle(bot, brain, nearestThreat.enemy, "attack-ray");
     const attackDistance = botAttackStandoffDistance(bot, nearestThreat.enemy, effects);
     const attackHitDistance = botMiningHitDistance(bot, nearestThreat.enemy, effects);
     const attackTolerance = botAttackStandoffTolerance(bot);
     const attackMaxStandoffDistance = botAttackMaxStandoffDistance(attackDistance, attackTolerance, attackHitDistance);
-    const chaseTarget = !nearestThreat.clear
-      ? botChaseMemoryTarget(arena, bot, brain)
-      : null;
-    const attackTarget = chaseTarget || nearestThreat.enemy;
-    debugMode = "attack-path";
-    debugTarget = attackTarget;
-    const nav = botNavigateToPoint(arena, bot, brain, attackTarget, {
-      arriveDistance: attackDistance,
-      allowMining: true,
-      ...botAttackPathOptions(),
-      key: `enemy:${nearestThreat.enemy.id}:attack-path:${attackTarget.cellKey ?? attackTarget.index ?? ""}`,
-      rayReach
-    });
-    debugNav = botDebugNav(nav);
-    move = addVector(move, nav.move);
-    aimAngle = nav.aimAngle ?? aimAngle;
-    mining = nav.mining;
-    if (!mining && Math.hypot(nav.move.x, nav.move.y) < 0.05) {
-      const fallback = nearestThreat.distance <= attackMaxStandoffDistance && nearestThreat.clear
-        ? {
-            move: botAttackStandoffMove(
-              bot,
-              brain,
-              nearestThreat.enemy,
-              nearestThreat.distance,
-              attackDistance,
-              attackHitDistance
-            ),
-            mining: false,
-            aimAngle: null
-          }
-        : botAttackFallbackNavigation(arena, bot, brain, nearestThreat, attackDistance, rayReach);
-      if (fallback && (fallback.mining || Math.hypot(fallback.move.x, fallback.move.y) > 0.05)) {
-        debugMode = "attack-path";
-        debugNav = botDebugNav(fallback);
-        move = addVector(move, fallback.move);
-        mining = fallback.mining;
-        aimAngle = fallback.aimAngle ?? aimAngle;
-      }
-    }
-    if (!mining && Math.hypot(move.x, move.y) < 0.05 && nearestThreat.distance <= attackMaxStandoffDistance && nearestThreat.clear) {
-      move = addVector(move, botAttackStandoffMove(
+    if (nearestThreat.clear && nearestThreat.distance <= attackMaxStandoffDistance) {
+      const standoffMove = botAttackStandoffMove(
         bot,
         brain,
         nearestThreat.enemy,
         nearestThreat.distance,
         attackDistance,
         attackHitDistance
-      ));
+      );
+      debugMode = "attack-standoff";
+      debugTarget = nearestThreat.enemy;
+      debugNav = botDebugNav({ move: standoffMove, mining: false, aimAngle: null });
+      move = addVector(move, standoffMove);
+    } else {
+      const chaseTarget = !nearestThreat.clear
+        ? botChaseMemoryTarget(arena, bot, brain)
+        : null;
+      const attackTarget = chaseTarget || nearestThreat.enemy;
+      debugMode = "attack-path";
+      debugTarget = attackTarget;
+      const nav = botNavigateToPoint(arena, bot, brain, attackTarget, {
+        arriveDistance: attackDistance,
+        allowMining: true,
+        ...botAttackPathOptions(),
+        key: `enemy:${nearestThreat.enemy.id}:attack-path:${attackTarget.cellKey ?? attackTarget.index ?? ""}`,
+        rayReach
+      });
+      debugNav = botDebugNav(nav);
+      move = addVector(move, nav.move);
+      aimAngle = nav.aimAngle ?? aimAngle;
+      mining = nav.mining;
+      if (!mining && Math.hypot(nav.move.x, nav.move.y) < 0.05) {
+        const fallback = botAttackFallbackNavigation(arena, bot, brain, nearestThreat, attackDistance, rayReach);
+        if (fallback && (fallback.mining || Math.hypot(fallback.move.x, fallback.move.y) > 0.05)) {
+          debugMode = "attack-path";
+          debugNav = botDebugNav(fallback);
+          move = addVector(move, fallback.move);
+          mining = fallback.mining;
+          aimAngle = fallback.aimAngle ?? aimAngle;
+        }
+      }
     }
     if (botCanRayThreat(bot, nearestThreat, effects)) {
       mining = true;
@@ -646,26 +647,30 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
   });
   brain.input = input;
   brain.lastPlanTick = arena.tick;
-  brain.debug = {
-    tick: arena.tick,
-    mode: debugMode,
-    target: botDebugTarget(debugTarget),
-    nav: debugNav,
-    threat: botDebugThreat(nearestThreat),
-    stormPressure: null,
-    healthRatio: roundBotDebugNumber(healthRatio),
-    rayReach: roundBotDebugNumber(rayReach),
-    aimScore: roundBotDebugNumber(brain.aimScore),
-    effects: botDebugEffects(effects),
-    input: botDebugInput(input),
-    huckRockTarget: botDebugTarget(huckRockTarget),
-    stuckTicks: brain.stuckTicks || 0,
-    navGoalKey: brain.navGoalKey || "",
-    navPathCursor: brain.navPathCursor || 0,
-    navAttachIndex: brain.navAttachIndex ?? brain.navPathCursor ?? 0,
-    navPathLength: Array.isArray(brain.navPath) ? brain.navPath.length : 0,
-    navNextIndex: Array.isArray(brain.navPath) ? brain.navPath[(brain.navPathCursor || 0) + 1] ?? null : null
-  };
+  if (botDebugEnabled()) {
+    brain.debug = {
+      tick: arena.tick,
+      mode: debugMode,
+      target: botDebugTarget(debugTarget),
+      nav: debugNav,
+      threat: botDebugThreat(nearestThreat),
+      stormPressure: null,
+      healthRatio: roundBotDebugNumber(healthRatio),
+      rayReach: roundBotDebugNumber(rayReach),
+      aimScore: roundBotDebugNumber(brain.aimScore),
+      effects: botDebugEffects(effects),
+      input: botDebugInput(input),
+      huckRockTarget: botDebugTarget(huckRockTarget),
+      stuckTicks: brain.stuckTicks || 0,
+      navGoalKey: brain.navGoalKey || "",
+      navPathCursor: brain.navPathCursor || 0,
+      navAttachIndex: brain.navAttachIndex ?? brain.navPathCursor ?? 0,
+      navPathLength: Array.isArray(brain.navPath) ? brain.navPath.length : 0,
+      navNextIndex: Array.isArray(brain.navPath) ? brain.navPath[(brain.navPathCursor || 0) + 1] ?? null : null
+    };
+  } else {
+    brain.debug = null;
+  }
   return {
     input,
     upgradeId: botUpgradeChoice(bot, brain)
@@ -737,17 +742,21 @@ function updatePilotBotLocalPlannerImpl(arena, bot, brain) {
     build: false
   });
   brain.input = input;
-  brain.debug = {
-    ...(brain.debug || {}),
-    tick: arena.tick,
-    input: botDebugInput(input),
-    nav: navigation ? botDebugNav({ ...navigation, move }) : brain.debug?.nav ?? null,
-    stuckTicks: brain.stuckTicks || 0,
-    navPathCursor: brain.navPathCursor || 0,
-    navAttachIndex: brain.navAttachIndex ?? brain.navPathCursor ?? 0,
-    navPathLength: Array.isArray(brain.navPath) ? brain.navPath.length : 0,
-    navNextIndex: Array.isArray(brain.navPath) ? brain.navPath[(brain.navPathCursor || 0) + 1] ?? null : null
-  };
+  if (botDebugEnabled()) {
+    brain.debug = {
+      ...(brain.debug || {}),
+      tick: arena.tick,
+      input: botDebugInput(input),
+      nav: navigation ? botDebugNav({ ...navigation, move }) : brain.debug?.nav ?? null,
+      stuckTicks: brain.stuckTicks || 0,
+      navPathCursor: brain.navPathCursor || 0,
+      navAttachIndex: brain.navAttachIndex ?? brain.navPathCursor ?? 0,
+      navPathLength: Array.isArray(brain.navPath) ? brain.navPath.length : 0,
+      navNextIndex: Array.isArray(brain.navPath) ? brain.navPath[(brain.navPathCursor || 0) + 1] ?? null : null
+    };
+  } else {
+    brain.debug = null;
+  }
   return {
     input,
     upgradeId: null
@@ -924,44 +933,49 @@ function nearestVisibleEnemyImpl(arena, bot) {
 
 function botEnemyVisibility(arena, bot, enemy, visibleRadius, centerDistance = distanceBetween(bot, enemy)) {
   const radius = enemy.radius || ENGINE.ship.radius;
-  const centerInRange = centerDistance <= visibleRadius;
-  const centerClear = centerInRange && lineOfSight(
-    arena,
-    bot,
-    enemy,
-    Math.max(0, centerDistance - radius)
-  );
-  if (centerClear) {
+  if (botEnemyCenterLineClear(arena, bot, enemy, centerDistance, visibleRadius)) {
     return { visible: true, clear: true };
   }
 
-  const samples = botEnemyVisibilitySamplePoints(enemy, radius);
-  for (const sample of samples) {
-    const sampleDistance = distanceBetween(bot, sample);
-    if (sampleDistance > visibleRadius) {
-      continue;
-    }
-    if (lineOfSight(arena, bot, sample, Math.max(0, sampleDistance - BOT_ENEMY_VISIBILITY_RAY_MARGIN))) {
-      return { visible: true, clear: false };
-    }
+  const wide = Math.max(1, radius * BOT_ENEMY_VISIBILITY_RADIUS_SCALE);
+  const diagonal = wide * Math.SQRT1_2;
+  if (
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x - diagonal, enemy.y - diagonal, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x + diagonal, enemy.y - diagonal, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x + diagonal, enemy.y + diagonal, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x - diagonal, enemy.y + diagonal, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x - wide, enemy.y, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x + wide, enemy.y, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x, enemy.y - wide, visibleRadius) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x, enemy.y + wide, visibleRadius)
+  ) {
+    return { visible: true, clear: false };
   }
 
   return { visible: false, clear: false };
 }
 
-function botEnemyVisibilitySamplePoints(enemy, radius) {
-  const wide = Math.max(1, radius * BOT_ENEMY_VISIBILITY_RADIUS_SCALE);
-  const diagonal = wide * Math.SQRT1_2;
-  return [
-    { x: enemy.x - diagonal, y: enemy.y - diagonal },
-    { x: enemy.x + diagonal, y: enemy.y - diagonal },
-    { x: enemy.x + diagonal, y: enemy.y + diagonal },
-    { x: enemy.x - diagonal, y: enemy.y + diagonal },
-    { x: enemy.x - wide, y: enemy.y },
-    { x: enemy.x + wide, y: enemy.y },
-    { x: enemy.x, y: enemy.y - wide },
-    { x: enemy.x, y: enemy.y + wide }
-  ];
+function botEnemyCenterLineClear(arena, bot, enemy, centerDistance = distanceBetween(bot, enemy), visibleRadius = botHumanVisibleRadius()) {
+  const radius = enemy.radius || ENGINE.ship.radius;
+  return centerDistance <= visibleRadius &&
+    lineOfSight(arena, bot, enemy, Math.max(0, centerDistance - radius));
+}
+
+function botEnemyVisibilitySampleClear(arena, bot, sampleX, sampleY, visibleRadius) {
+  const dx = sampleX - bot.x;
+  const dy = sampleY - bot.y;
+  const distanceSq = dx * dx + dy * dy;
+  if (distanceSq > visibleRadius * visibleRadius) {
+    return false;
+  }
+
+  const distance = Math.sqrt(distanceSq);
+  return lineOfSight(
+    arena,
+    bot,
+    { x: sampleX, y: sampleY },
+    Math.max(0, distance - BOT_ENEMY_VISIBILITY_RAY_MARGIN)
+  );
 }
 
 function botAttackStandoffDistance(bot, enemy, effects) {
@@ -1026,6 +1040,9 @@ function heldBotCombatRay(arena, bot, brain, effects) {
 
   const distance = distanceBetween(bot, enemy);
   if (distance > botMiningHitDistance(bot, enemy, effects)) {
+    return null;
+  }
+  if (!botEnemyCenterLineClear(arena, bot, enemy, distance)) {
     return null;
   }
 
@@ -2302,15 +2319,15 @@ function resourceBlockerForTarget(arena, bot, resource) {
 
 function botExploreTarget(arena, bot, brain) {
   const pathOptions = botExplorePathOptions(arena, bot, brain);
-  const search = findBotPathCostsFromBot(arena, bot, pathOptions);
-  const currentTarget = botCommittedExploreTarget(arena, bot, brain, search);
   const stormInteriorTarget = botStormInteriorTarget(arena, bot);
   const urgentStormTarget = botExploreStormTargetUrgent(arena, bot, stormInteriorTarget);
+  const currentTarget = botCommittedExploreTarget(arena, bot, brain, null);
 
   if (currentTarget && !urgentStormTarget) {
     return currentTarget;
   }
 
+  const search = findBotPathCostsFromBot(arena, bot, pathOptions);
   if (stormInteriorTarget && (urgentStormTarget || !currentTarget)) {
     const routedStormTarget = botRouteScoredExploreTarget(arena, bot, stormInteriorTarget, search);
     if (routedStormTarget) {
@@ -2464,6 +2481,10 @@ function botCommittedExploreTarget(arena, bot, brain, search) {
   }
   if (botExploreTargetReached(arena, bot, brain, target)) {
     return null;
+  }
+
+  if (!search) {
+    return target;
   }
 
   const routed = botRouteScoredExploreTarget(arena, bot, target, search);
@@ -3279,10 +3300,8 @@ function botFleeTargetImpl(arena, bot, brain, threat) {
         continue;
       }
 
-      candidates.push({
-        ...target,
-        preScore: botFleePreScore(bot, brain, threat, target)
-      });
+      target.preScore = botFleePreScore(bot, brain, threat, target);
+      botPushTopFleeCandidate(candidates, target, BOT_FLEE_PATH_CANDIDATES);
     }
   }
 
@@ -3346,6 +3365,27 @@ function botFleeTargetImpl(arena, bot, brain, threat) {
 
   brain.fleeTarget = botFleeTargetMemory(brain, selected, threatKey, arena.tick);
   return brain.fleeTarget;
+}
+
+function botPushTopFleeCandidate(candidates, candidate, limit) {
+  if (candidates.length < limit) {
+    candidates.push(candidate);
+    return;
+  }
+
+  let worstIndex = 0;
+  let worstScore = Number(candidates[0]?.preScore || 0);
+  for (let index = 1; index < candidates.length; index += 1) {
+    const score = Number(candidates[index]?.preScore || 0);
+    if (score < worstScore) {
+      worstScore = score;
+      worstIndex = index;
+    }
+  }
+
+  if (Number(candidate?.preScore || 0) > worstScore) {
+    candidates[worstIndex] = candidate;
+  }
 }
 
 function botCommittedFleeTarget(arena, bot, brain, threat, threatKey) {
@@ -5515,7 +5555,7 @@ function findBotThetaPath(arena, bot, startIndex, goalIndex, options = {}) {
   }
 
   const parent = new Int32Array(nodeCount);
-  const costs = new Float64Array(nodeCount);
+  const costs = new Float32Array(nodeCount);
   const closed = new Uint8Array(nodeCount);
   parent.fill(-2);
   costs.fill(Number.POSITIVE_INFINITY);
@@ -6078,7 +6118,7 @@ function botPreparePathSearchOptions(asteroid, options = {}, startIndex = null) 
     ...options,
     startIndex,
     pathAllowedCache: new Int8Array(asteroid.tiles.length),
-    pathTileCostCache: new Float64Array(asteroid.tiles.length)
+    pathTileCostCache: new Float32Array(asteroid.tiles.length)
   };
 }
 
@@ -6120,7 +6160,7 @@ function findBotPathImpl(arena, startIndex, goalIndex, options = {}) {
   const searchOptions = botPreparePathSearchOptions(asteroid, options, startIndex);
   const stateCount = asteroid.tiles.length * BOT_PATH_DIRECTION_COUNT;
   const previous = new Int32Array(stateCount);
-  const costs = new Float64Array(stateCount);
+  const costs = new Float32Array(stateCount);
   const closed = new Uint8Array(stateCount);
   previous.fill(-2);
   costs.fill(Number.POSITIVE_INFINITY);
@@ -6178,7 +6218,7 @@ function findBotPathCosts(arena, startIndex, options = {}) {
   const searchOptions = botPreparePathSearchOptions(asteroid, options, startIndex);
   const stateCount = asteroid.tiles.length * BOT_PATH_DIRECTION_COUNT;
   const previous = new Int32Array(stateCount);
-  const costs = new Float64Array(stateCount);
+  const costs = new Float32Array(stateCount);
   const closed = new Uint8Array(stateCount);
   const minedCounts = new Uint16Array(stateCount);
   const closedStates = [];
