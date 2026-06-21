@@ -116,6 +116,7 @@ const LOCAL_BOT_COUNT = 7;
 const LOCAL_BOT_SAVE_VERSION = 2;
 const LOCAL_BOT_SAVE_INTERVAL_SECONDS = 1;
 const LOCAL_BOT_PLAN_INTERVAL_TICKS = 12;
+const LOCAL_BOT_INPUT_INTERVAL_TICKS = 2;
 const LOCAL_BOT_MAX_STEPS_PER_FRAME = 4;
 const BOT_DEBUG_CHUNK_TILES = 16;
 const MENU_ROOMS = Object.freeze({
@@ -129,6 +130,7 @@ const MENU_BUTTON_GAP = 24;
 const MENU_ESRB_SUBTITLE = "online interactions not rated by the ESRB";
 const MENU_MINING_RAY_MIN_COUNT = 1;
 const MENU_MINING_RAY_MAX_COUNT = 3;
+const MENU_SPEED_UPGRADE_ID = "speed";
 const PERF_DEBUG_PANEL_INTERVAL_MS = 250;
 const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 76;
@@ -260,6 +262,7 @@ const state = {
     stormGpuReady: false,
     frameGpuReady: false,
     frameStormReady: false,
+    frameCheckerReady: false,
     buckets: {},
     panelLastUpdateMs: 0,
     panelLastText: "",
@@ -924,6 +927,12 @@ function handleMenuRayCountKey(event) {
     return false;
   }
 
+  if (event.code === "Digit4" || event.code === "Numpad4") {
+    event.preventDefault();
+    cycleMenuSpeedUpgrade();
+    return true;
+  }
+
   const countByCode = {
     Digit1: 1,
     Numpad1: 1,
@@ -943,6 +952,21 @@ function handleMenuRayCountKey(event) {
     state.menu.player.prototypeMiningRayCount = state.menu.rayCount;
   }
   return true;
+}
+
+function cycleMenuSpeedUpgrade() {
+  const player = state.menu.player;
+  if (!player) {
+    return;
+  }
+
+  const definition = UPGRADE_DEFINITIONS.find((upgrade) => upgrade.id === MENU_SPEED_UPGRADE_ID);
+  const maxLevel = Math.max(0, Number(definition?.maxLevel || 0));
+  const currentLevel = clamp(Math.floor(Number(player.upgrades?.[MENU_SPEED_UPGRADE_ID] || 0)), 0, maxLevel);
+  player.upgrades = {
+    ...(player.upgrades || {}),
+    [MENU_SPEED_UPGRADE_ID]: (currentLevel + 1) % (maxLevel + 1)
+  };
 }
 
 setInterval(() => {
@@ -986,39 +1010,54 @@ function draw(now = 0) {
   const readyMenu = isReadyMenu();
   const localBotGame = isLocalBotGame();
 
-  updateControllerState(timeSeconds);
-  syncThemeFromCss();
-  pruneEliminationNotices(timeSeconds);
-  if (loadingRoom) {
-    state.mouse.down = false;
-  } else if (localBotGame) {
-    updateLocalBotGame(timeSeconds);
-  } else if (readyMenu) {
-    updateMenuSimulation(timeSeconds);
-  } else {
-    updatePrediction(timeSeconds);
-    updateAimFromSnapshot();
-  }
+  measureUpdateBucket("updateInputMs", () => {
+    updateControllerState(timeSeconds);
+    syncThemeFromCss();
+    pruneEliminationNotices(timeSeconds);
+  });
+  measureUpdateBucket("updateGameMs", () => {
+    if (loadingRoom) {
+      state.mouse.down = false;
+    } else if (localBotGame) {
+      updateLocalBotGame(timeSeconds);
+    } else if (readyMenu) {
+      updateMenuSimulation(timeSeconds);
+    } else {
+      updatePrediction(timeSeconds);
+      updateAimFromSnapshot();
+    }
+  });
   const cameraPlayerId = cameraPlayerIdForRoom();
-  logSpectatedBotDebug(cameraPlayerId, timeSeconds);
-  const botDebugOverlay = botDebugOverlayRenderState(cameraPlayerId);
-  const screenPointer = screenPointerPoint();
-  state.uiHoverId = screenRoomButtonAtPoint(screenPointer.x, screenPointer.y);
-  const buildTarget = buildTargetFromMouse();
-  updateHeldBuild(buildTarget, timeSeconds);
-  const snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
-  const mapAllowed = playerMapAllowed();
-  if (!mapAllowed && state.playerMap.large) {
-    state.playerMap.large = false;
-  }
-  const playerMap = mapAllowed ? playerMapRenderState(snapshot, cameraPlayerId) : null;
+  let botDebugOverlay = null;
+  let buildTarget = null;
+  measureUpdateBucket("updateUiMs", () => {
+    logSpectatedBotDebug(cameraPlayerId, timeSeconds);
+    botDebugOverlay = botDebugOverlayRenderState(cameraPlayerId);
+    const screenPointer = screenPointerPoint();
+    state.uiHoverId = screenRoomButtonAtPoint(screenPointer.x, screenPointer.y);
+    buildTarget = buildTargetFromMouse();
+    updateHeldBuild(buildTarget, timeSeconds);
+  });
+  let snapshot = null;
+  measureUpdateBucket("snapshotMs", () => {
+    snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
+  });
+  let mapAllowed = false;
+  let playerMap = null;
+  measureUpdateBucket("mapStateMs", () => {
+    mapAllowed = playerMapAllowed();
+    if (!mapAllowed && state.playerMap.large) {
+      state.playerMap.large = false;
+    }
+    playerMap = mapAllowed ? playerMapRenderState(snapshot, cameraPlayerId) : null;
+  });
   const playerMapVisible = mapAllowed && Boolean(playerMap);
   const playerId = readyMenu ? MENU_PLAYER_ID : state.playerId;
   const menuPlayer = readyMenu ? state.menu.player : null;
   const audioPlayer = readyMenu
     ? menuPlayer
     : audioPlayerForRender(snapshot, cameraPlayerId);
-  updateLocalShipAudio(audioPlayer, timeSeconds);
+  measureUpdateBucket("audioMs", () => updateLocalShipAudio(audioPlayer, timeSeconds));
   if (state.perfDebug.enabled) {
     updatePerfUpdateMetrics(performance.now() - updateStart);
   }
@@ -2883,10 +2922,11 @@ function updateLocalBotGameImpl(timeSeconds) {
   const stepSeconds = 1 / ENGINE.tickRate;
   let steps = 0;
   while (localGame.accumulatorSeconds >= stepSeconds && steps < LOCAL_BOT_MAX_STEPS_PER_FRAME) {
+    const stepOptions = { updateBotInputs: steps === 0 };
     if (botProfileActive()) {
-      botProfileMeasure("stepLocalBotArena", () => stepLocalBotArena(stepSeconds));
+      botProfileMeasure("stepLocalBotArena", () => stepLocalBotArena(stepSeconds, stepOptions));
     } else {
-      stepLocalBotArena(stepSeconds);
+      stepLocalBotArena(stepSeconds, stepOptions);
     }
     localGame.accumulatorSeconds -= stepSeconds;
     steps += 1;
@@ -2905,25 +2945,30 @@ function updateLocalBotGameImpl(timeSeconds) {
   }
 }
 
-function stepLocalBotArena(stepSeconds) {
+function stepLocalBotArena(stepSeconds, options = {}) {
   const arena = state.localGame.arena;
   if (!arena) {
     return;
   }
 
   setPlayerInput(arena, LOCAL_BOT_PLAYER_ID, readLocalPlayerInput());
-  for (const [botId, brain] of state.localGame.bots.entries()) {
-    const bot = arena.players.get(botId);
-    if (!bot?.alive) {
-      continue;
-    }
+  if (options.updateBotInputs !== false) {
+    for (const [botId, brain] of state.localGame.bots.entries()) {
+      const bot = arena.players.get(botId);
+      if (!bot?.alive) {
+        continue;
+      }
+      if (!shouldUpdateLocalBotInput(arena, botId, brain)) {
+        continue;
+      }
 
-    const decision = shouldUpdateLocalBotBrain(arena, botId, brain)
-      ? updatePilotBotBrain(arena, bot, brain)
-      : updatePilotBotLocalPlanner(arena, bot, brain);
-    setPlayerInput(arena, botId, decision.input);
-    if (decision.upgradeId) {
-      purchasePlayerUpgrade(arena, botId, decision.upgradeId);
+      const decision = shouldUpdateLocalBotBrain(arena, botId, brain)
+        ? updatePilotBotBrain(arena, bot, brain)
+        : updatePilotBotLocalPlanner(arena, bot, brain);
+      setPlayerInput(arena, botId, decision.input);
+      if (decision.upgradeId) {
+        purchasePlayerUpgrade(arena, botId, decision.upgradeId);
+      }
     }
   }
 
@@ -2958,6 +3003,20 @@ function shouldUpdateLocalBotBrain(arena, botId, brain) {
   }
 
   return arena.tick % LOCAL_BOT_PLAN_INTERVAL_TICKS === localBotPlanPhase(botId);
+}
+
+function shouldUpdateLocalBotInput(arena, botId, brain) {
+  if (!brain?.input) {
+    return true;
+  }
+
+  return arena.tick % LOCAL_BOT_INPUT_INTERVAL_TICKS === localBotInputPhase(botId);
+}
+
+function localBotInputPhase(botId) {
+  const match = /(\d+)$/.exec(String(botId || ""));
+  const number = match ? Number(match[1]) : stableTextHash(botId);
+  return Math.abs(Math.floor(number)) % LOCAL_BOT_INPUT_INTERVAL_TICKS;
 }
 
 function localBotPlanPhase(botId) {
@@ -3839,6 +3898,7 @@ function setPerfDebug(enabled) {
   state.perfDebug.stormGpuReady = false;
   state.perfDebug.frameGpuReady = false;
   state.perfDebug.frameStormReady = false;
+  state.perfDebug.frameCheckerReady = false;
   state.perfDebug.buckets = {};
   state.perfDebug.panelLastUpdateMs = 0;
   state.perfDebug.panelLastText = "";
@@ -3958,11 +4018,25 @@ function updatePerfRenderMetrics(renderMs, renderPerf = null) {
   state.perfDebug.stormGpuReady = Boolean(renderPerf?.stormGpuReady);
   state.perfDebug.frameGpuReady = Boolean(renderPerf?.frameGpuReady);
   state.perfDebug.frameStormReady = Boolean(renderPerf?.frameStormReady);
+  state.perfDebug.frameCheckerReady = Boolean(renderPerf?.frameCheckerReady);
   updatePerfBuckets(renderPerf?.buckets, alpha);
 }
 
 function updatePerfUpdateMetrics(updateMs) {
   updatePerfMetric("updateMs", updateMs, 0.12);
+}
+
+function measureUpdateBucket(key, callback) {
+  if (!state.perfDebug.enabled) {
+    return callback();
+  }
+
+  const start = performance.now();
+  try {
+    return callback();
+  } finally {
+    updatePerfBucket(key, performance.now() - start, 0.12);
+  }
 }
 
 function updatePerfMetric(key, value, alpha) {
@@ -3971,6 +4045,17 @@ function updatePerfMetric(key, value, alpha) {
   }
   state.perfDebug[key] = state.perfDebug[key]
     ? state.perfDebug[key] * (1 - alpha) + value * alpha
+    : value;
+}
+
+function updatePerfBucket(key, value, alpha) {
+  if (!Number.isFinite(value)) {
+    return;
+  }
+
+  const buckets = state.perfDebug.buckets;
+  buckets[key] = buckets[key]
+    ? buckets[key] * (1 - alpha) + value * alpha
     : value;
 }
 
@@ -4012,6 +4097,7 @@ function perfDebugRenderState() {
     stormGpuReady: state.perfDebug.stormGpuReady,
     frameGpuReady: state.perfDebug.frameGpuReady,
     frameStormReady: state.perfDebug.frameStormReady,
+    frameCheckerReady: state.perfDebug.frameCheckerReady,
     buckets: state.perfDebug.buckets,
     core
   };
@@ -4062,11 +4148,18 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     `FPS        ${formatPerfNumber(perf.fps, 1)}`,
     `FRAME MS   ${formatPerfNumber(perf.frameMs, 2)}`,
     `UPDATE MS  ${formatPerfNumber(perf.updateMs, 2)}`,
+    `U INPUT    ${formatPerfNumber(buckets.updateInputMs, 2)}`,
+    `U GAME     ${formatPerfNumber(buckets.updateGameMs, 2)}`,
+    `U UI       ${formatPerfNumber(buckets.updateUiMs, 2)}`,
+    `U SNAP     ${formatPerfNumber(buckets.snapshotMs, 2)}`,
+    `U MAP      ${formatPerfNumber(buckets.mapStateMs, 2)}`,
+    `U AUDIO    ${formatPerfNumber(buckets.audioMs, 2)}`,
     `RENDER MS  ${formatPerfNumber(perf.renderMs, 2)}`,
     `DRAW MS    ${formatPerfNumber(perf.drawMs, 2)}`,
     `PRESENT MS ${formatPerfNumber(perf.presentMs, 2)}`,
     `FRAME GPU  ${perf.frameGpuReady ? "ON" : "OFF"}`,
     `FRAME STORM ${perf.frameStormReady ? "ON" : "OFF"}`,
+    `FRAME CHECK ${perf.frameCheckerReady ? "ON" : "OFF"}`,
     `MINIMAP MS ${formatPerfNumber(perf.minimapMs, 2)}`,
     `STORM GPU  ${perf.stormGpuReady ? `${perf.stormGpuRequests || 0}->${perf.stormGpuCalls || 0}/${formatPerfNumber(perf.stormGpuMs, 3)}MS` : "OFF"}`,
     `GPU READ   ${formatPerfNumber(perf.stormGpuReadMs, 3)}MS`,
@@ -4074,6 +4167,9 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     `VIS READ   ${formatPerfNumber(perf.visibilityGpuReadMs, 3)}MS`,
     `R VIS      ${formatPerfNumber(buckets.visibilityMs, 2)}`,
     `R GHOST    ${formatPerfNumber(buckets.ghostMs, 2)}`,
+    `R GCHK     ${formatPerfNumber(buckets.ghostCheckerMs, 2)}`,
+    `R GOUT     ${formatPerfNumber(buckets.ghostOutlineMs, 2)}`,
+    `R GSTORM   ${formatPerfNumber(buckets.ghostStormMs, 2)}`,
     `R BG       ${formatPerfNumber(buckets.backgroundMs, 2)}`,
     `R STARS    ${formatPerfNumber(buckets.starsMs, 2)}`,
     `R AST      ${formatPerfNumber(buckets.asteroidMs, 2)}`,

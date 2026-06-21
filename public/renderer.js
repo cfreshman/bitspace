@@ -89,7 +89,27 @@ const REAR_ORBS = Object.freeze([
   { rear: 7, side: 5, layer: "back" },
   { rear: 9, side: 0, layer: "front" }
 ]);
+const SHIP_SPHERE_DITHER = Object.freeze([
+  0, 8, 2, 10,
+  12, 4, 14, 6,
+  3, 11, 1, 9,
+  15, 7, 13, 5
+]);
+const SHIP_SPHERE_LIGHT = Object.freeze(normalize3d(-0.42, -0.58, 0.7));
 const THRUSTER_PARTICLE_RATE = 140;
+const THRUSTER_ENGINE_UPGRADE_ID = "speed";
+const THRUSTER_ENGINE_MAX_LEVEL =
+  UPGRADE_DEFINITIONS.find((upgrade) => upgrade.id === THRUSTER_ENGINE_UPGRADE_ID)?.maxLevel || 5;
+const THRUSTER_ENGINE_RAMP = Object.freeze({
+  rateMin: 0.38,
+  rateMax: 1.34,
+  plumeSpeedMin: 0.82,
+  plumeSpeedMax: 1.22,
+  lifeMin: 0.72,
+  lifeMax: 1.18,
+  nozzleMin: 0.82,
+  nozzleMax: 1.08
+});
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
 const MINING_RAY_SIDE_WAVE_AMPLITUDE = 0.5;
@@ -517,7 +537,8 @@ export function createRenderer(canvas, minimapCanvas = null) {
         timeSeconds,
         dtSeconds,
         gpuStormRenderer,
-        gpuFrameStormReady: framePresenter?.supportsStorm === true
+        gpuFrameStormReady: framePresenter?.supportsStorm === true,
+        gpuFrameCheckerReady: framePresenter?.supportsChecker === true
       };
       const frameParticleState = {
         particles,
@@ -545,6 +566,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
           stormGpuReady: Boolean(gpuStormRenderer),
           frameGpuReady: Boolean(framePresenter),
           frameStormReady: framePresenter?.supportsStorm === true,
+          frameCheckerReady: framePresenter?.supportsChecker === true,
           buckets: null
         }
         : null;
@@ -676,6 +698,7 @@ function createPixelSurface(canvasContext, width, height) {
   let activeLens = null;
   let activeWorldMask = null;
   let queuedGpuStormLayers = [];
+  let queuedGpuCheckerLayer = null;
 
   function circleSpansForInset(inset) {
     const key = Math.max(0, Math.floor(inset));
@@ -854,6 +877,36 @@ function createPixelSurface(canvasContext, width, height) {
     }
   }
 
+  function forWorldMaskRanges(y, start, end, callback) {
+    if (start >= end) {
+      return true;
+    }
+
+    if (!activeWorldMask) {
+      callback(start, end);
+      return true;
+    }
+
+    const rows = activeWorldMask.spans?.rows;
+    if (!Array.isArray(rows)) {
+      return false;
+    }
+
+    const spans = rows[y - (activeWorldMask.spans.offsetY || 0)];
+    if (!Array.isArray(spans)) {
+      return true;
+    }
+
+    for (let spanIndex = 0; spanIndex < spans.length; spanIndex += 2) {
+      const rangeStart = Math.max(start, spans[spanIndex]);
+      const rangeEnd = Math.min(end, spans[spanIndex + 1]);
+      if (rangeStart < rangeEnd) {
+        callback(rangeStart, rangeEnd);
+      }
+    }
+    return true;
+  }
+
   return {
     width,
     height,
@@ -893,6 +946,7 @@ function createPixelSurface(canvasContext, width, height) {
     },
     clear() {
       queuedGpuStormLayers = [];
+      queuedGpuCheckerLayer = null;
       pixels.fill(0);
     },
     getImageData() {
@@ -903,6 +957,13 @@ function createPixelSurface(canvasContext, width, height) {
         return false;
       }
       queuedGpuStormLayers.push(layer);
+      return true;
+    },
+    queueGpuCheckerLayer(layer) {
+      if (!layer) {
+        return false;
+      }
+      queuedGpuCheckerLayer = layer;
       return true;
     },
     drawCircleBorder(color, thickness = 1, inset = 0) {
@@ -952,10 +1013,37 @@ function createPixelSurface(canvasContext, width, height) {
         const isThinStroke = (x1 - x0 === 1 && y1 - y0 > 1) ||
           (y1 - y0 === 1 && x1 - x0 > 1);
         if (isThinStroke) {
+          const isVerticalStroke = x1 - x0 === 1;
           let previous = null;
           for (let py = y0; py < y1; py += 1) {
+            let wroteMaskedRange = false;
+            if (forWorldMaskRanges(py, x0, x1, (rangeStart, rangeEnd) => {
+              for (let px = rangeStart; px < rangeEnd; px += 1) {
+                const index = lensProjectionIndex(activeLens, px, py);
+                const projected = lensProjectedPoint(activeLens, index);
+                if (!writeProjectedPixel(projected)) {
+                  previous = null;
+                  continue;
+                }
+
+                if (previous) {
+                  writeProjectedBridge(previous, projected);
+                }
+                previous = projected;
+              }
+              wroteMaskedRange = true;
+              if (!isVerticalStroke) {
+                previous = null;
+              }
+            })) {
+              if (!wroteMaskedRange) {
+                previous = null;
+              }
+              continue;
+            }
+
             for (let px = x0; px < x1; px += 1) {
-              if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+              if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
                 previous = null;
                 continue;
               }
@@ -976,11 +1064,18 @@ function createPixelSurface(canvasContext, width, height) {
         }
 
         for (let py = y0; py < y1; py += 1) {
-          for (let px = x0; px < x1; px += 1) {
-            if (activeWorldMask && !activeWorldMask.allows(px, py)) {
-              continue;
+          if (forWorldMaskRanges(py, x0, x1, (rangeStart, rangeEnd) => {
+            for (let px = rangeStart; px < rangeEnd; px += 1) {
+              writeMappedProjectedPoint(activeLens, lensProjectionIndex(activeLens, px, py));
             }
-            writeMappedProjectedPoint(activeLens, lensProjectionIndex(activeLens, px, py));
+          })) {
+            continue;
+          }
+
+          for (let px = x0; px < x1; px += 1) {
+            if (!activeWorldMask?.allows || activeWorldMask.allows(px, py)) {
+              writeMappedProjectedPoint(activeLens, lensProjectionIndex(activeLens, px, py));
+            }
           }
         }
         return;
@@ -1004,8 +1099,16 @@ function createPixelSurface(canvasContext, width, height) {
           }
 
           const row = py * width;
+          if (forWorldMaskRanges(py, start, end, (rangeStart, rangeEnd) => {
+            for (let px = rangeStart; px < rangeEnd; px += 1) {
+              pixels[row + px] = currentColor;
+            }
+          })) {
+            continue;
+          }
+
           for (let px = start; px < end; px += 1) {
-            if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+            if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
               continue;
             }
             pixels[row + px] = currentColor;
@@ -1021,8 +1124,14 @@ function createPixelSurface(canvasContext, width, height) {
 
       for (let py = y0; py < y1; py += 1) {
         const row = py * width;
+        if (forWorldMaskRanges(py, x0, x1, (rangeStart, rangeEnd) => {
+          pixels.fill(currentColor, row + rangeStart, row + rangeEnd);
+        })) {
+          continue;
+        }
+
         for (let px = x0; px < x1; px += 1) {
-          if (activeWorldMask && !activeWorldMask.allows(px, py)) {
+          if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
             continue;
           }
           pixels[row + px] = currentColor;
@@ -1283,14 +1392,16 @@ function createPixelSurface(canvasContext, width, height) {
     },
     present(presenter = null, overlaySurfaces = null) {
       const stormLayers = queuedGpuStormLayers;
+      const checkerLayer = queuedGpuCheckerLayer;
       queuedGpuStormLayers = [];
+      queuedGpuCheckerLayer = null;
       const overlayList = Array.isArray(overlaySurfaces)
         ? overlaySurfaces
         : overlaySurfaces ? [overlaySurfaces] : [];
       const overlayImageDatas = overlayList
         .map((overlaySurface) => overlaySurface?.getImageData?.() || null)
         .filter(Boolean);
-      if (presenter?.present?.(imageData, { stormLayers, overlays: overlayImageDatas })) {
+      if (presenter?.present?.(imageData, { checkerLayer, stormLayers, overlays: overlayImageDatas })) {
         return;
       }
 
@@ -1329,12 +1440,14 @@ function createGpuFramePresenter(canvas, width, height) {
 
     const program = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_FRAME_FRAGMENT_SHADER, "GPU frame");
     const overlayProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_FRAME_OVERLAY_FRAGMENT_SHADER, "GPU frame overlay");
+    const checkerProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_FRAME_CHECKER_FRAGMENT_SHADER, "GPU frame checker");
     const stormProgram = createGpuProgram(gl, GPU_STORM_VERTEX_SHADER, GPU_STORM_FRAGMENT_SHADER, "GPU frame storm");
     const compositeProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_FRAME_STORM_FRAGMENT_SHADER, "GPU frame storm composite");
     const stormOverlayProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_STORM_OVER_FRAGMENT_SHADER, "GPU frame storm overlay");
     if (!program || !overlayProgram) {
       return null;
     }
+    const supportsChecker = Boolean(checkerProgram);
     const supportsStorm = Boolean(stormProgram && compositeProgram && stormOverlayProgram);
 
     const positionBuffer = gl.createBuffer();
@@ -1403,6 +1516,27 @@ function createGpuFramePresenter(canvas, width, height) {
       position: gl.getAttribLocation(overlayProgram, "a_position"),
       overlay: gl.getUniformLocation(overlayProgram, "u_overlay")
     };
+    const checkerLocations = supportsChecker
+      ? {
+        position: gl.getAttribLocation(checkerProgram, "a_position"),
+        frame: gl.getUniformLocation(checkerProgram, "u_frame"),
+        grid: gl.getUniformLocation(checkerProgram, "u_grid"),
+        resolution: gl.getUniformLocation(checkerProgram, "u_resolution"),
+        camera: gl.getUniformLocation(checkerProgram, "u_camera"),
+        mapSize: gl.getUniformLocation(checkerProgram, "u_mapSize"),
+        tileSize: gl.getUniformLocation(checkerProgram, "u_tileSize"),
+        cameraPixelOffset: gl.getUniformLocation(checkerProgram, "u_cameraPixelOffset"),
+        checkerSize: gl.getUniformLocation(checkerProgram, "u_checkerSize"),
+        lensEdgeScale: gl.getUniformLocation(checkerProgram, "u_lensEdgeScale"),
+        lensPower: gl.getUniformLocation(checkerProgram, "u_lensPower"),
+        lensNoiseRadial: gl.getUniformLocation(checkerProgram, "u_lensNoiseRadial"),
+        lensNoiseTangential: gl.getUniformLocation(checkerProgram, "u_lensNoiseTangential"),
+        lensDefectDensity: gl.getUniformLocation(checkerProgram, "u_lensDefectDensity"),
+        rockCornerRadius: gl.getUniformLocation(checkerProgram, "u_rockCornerRadius"),
+        backgroundColor: gl.getUniformLocation(checkerProgram, "u_backgroundColor"),
+        backingColor: gl.getUniformLocation(checkerProgram, "u_backingColor")
+      }
+      : null;
     const compositeLocations = supportsStorm
       ? {
         position: gl.getAttribLocation(compositeProgram, "a_position"),
@@ -1685,6 +1819,47 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    function drawFrameWithChecker(layer) {
+      const asteroid = layer?.asteroid;
+      if (!supportsChecker || !uploadStormGrid(asteroid)) {
+        drawFrameOnly();
+        return false;
+      }
+
+      const palette = layer.palette || {};
+      const background = rgbFloatsForHex(palette.background || RENDER.background);
+      const backing = rgbFloatsForHex(palette.backing || "#000000");
+      const camera = layer.camera || {};
+      gl.useProgram(checkerProgram);
+      bindFullscreenAttributes(checkerLocations);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(checkerLocations.frame, 0);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, gridTexture);
+      gl.uniform1i(checkerLocations.grid, 2);
+      gl.uniform2f(checkerLocations.resolution, width, height);
+      gl.uniform2f(checkerLocations.camera, Number(camera.x || 0), Number(camera.y || 0));
+      gl.uniform2f(checkerLocations.mapSize, gridWidth, gridHeight);
+      gl.uniform1f(checkerLocations.tileSize, asteroid.tileSize || RENDER.tileSize);
+      gl.uniform2f(
+        checkerLocations.cameraPixelOffset,
+        renderedCameraPixelOffset(camera.x || 0),
+        renderedCameraPixelOffset(camera.y || 0)
+      );
+      gl.uniform1f(checkerLocations.checkerSize, ASTEROID_VISIBILITY_CHECKER_SIZE);
+      gl.uniform1f(checkerLocations.lensEdgeScale, WORLD_LENS_EDGE_SCALE);
+      gl.uniform1f(checkerLocations.lensPower, WORLD_LENS_POWER);
+      gl.uniform1f(checkerLocations.lensNoiseRadial, WORLD_LENS_NOISE_RADIAL);
+      gl.uniform1f(checkerLocations.lensNoiseTangential, WORLD_LENS_NOISE_TANGENTIAL);
+      gl.uniform1f(checkerLocations.lensDefectDensity, WORLD_LENS_DEFECT_DENSITY);
+      gl.uniform1f(checkerLocations.rockCornerRadius, ROCK_OUTER_CORNER_RADIUS);
+      gl.uniform3f(checkerLocations.backgroundColor, background[0], background[1], background[2]);
+      gl.uniform3f(checkerLocations.backingColor, backing[0], backing[1], backing[2]);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      return true;
+    }
+
     function drawFrameWithStorm(layer) {
       const palette = layer.palette || {};
       const background = rgbFloatsForHex(palette.background || RENDER.background);
@@ -1732,6 +1907,7 @@ function createGpuFramePresenter(canvas, width, height) {
     }
 
     return {
+      supportsChecker,
       supportsStorm,
       present(imageData, options = {}) {
         if (!imageData || imageData.width !== width || imageData.height !== height) {
@@ -1745,10 +1921,14 @@ function createGpuFramePresenter(canvas, width, height) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
+        const checkerLayer = options.checkerLayer || null;
         const stormLayers = Array.isArray(options.stormLayers)
           ? options.stormLayers
           : options.stormLayer ? [options.stormLayer] : [];
         let drewFrame = false;
+        if (checkerLayer) {
+          drewFrame = drawFrameWithChecker(checkerLayer);
+        }
         for (const stormLayer of stormLayers) {
           if (!renderStormTexture(stormLayer)) {
             continue;
@@ -2223,6 +2403,216 @@ varying vec2 v_texCoord;
 
 void main() {
   gl_FragColor = texture2D(u_frame, v_texCoord);
+}
+`;
+
+const GPU_FRAME_CHECKER_FRAGMENT_SHADER = `
+precision highp float;
+
+uniform sampler2D u_frame;
+uniform sampler2D u_grid;
+uniform vec2 u_resolution;
+uniform vec2 u_camera;
+uniform vec2 u_mapSize;
+uniform float u_tileSize;
+uniform vec2 u_cameraPixelOffset;
+uniform float u_checkerSize;
+uniform float u_lensEdgeScale;
+uniform float u_lensPower;
+uniform float u_lensNoiseRadial;
+uniform float u_lensNoiseTangential;
+uniform float u_lensDefectDensity;
+uniform float u_rockCornerRadius;
+uniform vec3 u_backgroundColor;
+uniform vec3 u_backingColor;
+varying vec2 v_texCoord;
+
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+float lensNoiseUnit(vec2 p, float salt) {
+  vec2 q = floor(p);
+  return hash13(vec3(q.x * 0.071, q.y * 0.097, salt));
+}
+
+float lensNoiseSigned(vec2 p, float salt) {
+  return lensNoiseUnit(p, salt) * 2.0 - 1.0;
+}
+
+vec2 inverseLensSource(vec2 screen) {
+  if (u_lensEdgeScale <= 1.0001) {
+    return screen;
+  }
+
+  vec2 center = u_resolution * 0.5;
+  vec2 delta = screen + vec2(0.5) - center;
+  float screenRadius = length(delta);
+  if (screenRadius <= 0.0001) {
+    return screen;
+  }
+
+  float radius = min(u_resolution.x, u_resolution.y) * 0.5;
+  float maxSourceRadius = radius * u_lensEdgeScale;
+  float lo = screenRadius;
+  float hi = maxSourceRadius;
+  for (int i = 0; i < 8; i += 1) {
+    float mid = (lo + hi) * 0.5;
+    float t = clamp(mid / maxSourceRadius, 0.0, 1.0);
+    float scale = 1.0 + (u_lensEdgeScale - 1.0) * pow(t, max(1.0, u_lensPower));
+    float projected = mid / scale;
+    if (projected < screenRadius) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  float sourceRadius = hi;
+  vec2 unit = delta / screenRadius;
+  vec2 source = center + unit * sourceRadius - vec2(0.5);
+  float t = clamp(sourceRadius / maxSourceRadius, 0.0, 1.0);
+  float scale = 1.0 + (u_lensEdgeScale - 1.0) * pow(t, max(1.0, u_lensPower));
+  float falloff = (scale - 1.0) / max(0.0001, u_lensEdgeScale - 1.0);
+  float defectDensity = clamp(falloff * u_lensDefectDensity, 0.0, 1.0);
+  if (lensNoiseUnit(source, 73.31) <= defectDensity) {
+    vec2 tangent = vec2(-unit.y, unit.x);
+    source += unit * lensNoiseSigned(source, 17.91) * u_lensNoiseRadial;
+    source += tangent * lensNoiseSigned(source, 41.27) * u_lensNoiseTangential;
+  }
+  return source;
+}
+
+bool frameIsBacking(vec4 frame) {
+  return distance(frame.rgb, u_backingColor) < 0.004;
+}
+
+bool solidTileAt(vec2 tile) {
+  if (tile.x >= 0.0 && tile.y >= 0.0 && tile.x < u_mapSize.x && tile.y < u_mapSize.y) {
+    vec4 grid = texture2D(u_grid, (tile + vec2(0.5)) / u_mapSize);
+    return grid.g > 0.5 && grid.b > 0.5;
+  }
+  return false;
+}
+
+bool ghostCheckerShapeAllows(vec2 tile, vec2 local) {
+  if (!solidTileAt(tile)) {
+    return true;
+  }
+
+  bool north = solidTileAt(tile + vec2(0.0, -1.0));
+  bool east = solidTileAt(tile + vec2(1.0, 0.0));
+  bool south = solidTileAt(tile + vec2(0.0, 1.0));
+  bool west = solidTileAt(tile + vec2(-1.0, 0.0));
+  bool topOpen = !north;
+  bool rightOpen = !east;
+  bool bottomOpen = !south;
+  bool leftOpen = !west;
+  float r = max(1.0, u_rockCornerRadius);
+  float edge = u_tileSize - 1.0;
+  float lineEpsilon = 0.5;
+  float arcEpsilon = 0.75;
+
+  if (topOpen && local.y < lineEpsilon) {
+    float trimLeft = leftOpen ? r : 0.0;
+    float trimRight = rightOpen ? r : 0.0;
+    if (local.x >= trimLeft && local.x <= edge - trimRight) {
+      return true;
+    }
+  }
+  if (rightOpen && local.x >= edge - lineEpsilon) {
+    float trimTop = topOpen ? r : 0.0;
+    float trimBottom = bottomOpen ? r : 0.0;
+    if (local.y >= trimTop && local.y <= edge - trimBottom) {
+      return true;
+    }
+  }
+  if (bottomOpen && local.y >= edge - lineEpsilon) {
+    float trimLeft = leftOpen ? r : 0.0;
+    float trimRight = rightOpen ? r : 0.0;
+    if (local.x >= trimLeft && local.x <= edge - trimRight) {
+      return true;
+    }
+  }
+  if (leftOpen && local.x < lineEpsilon) {
+    float trimTop = topOpen ? r : 0.0;
+    float trimBottom = bottomOpen ? r : 0.0;
+    if (local.y >= trimTop && local.y <= edge - trimBottom) {
+      return true;
+    }
+  }
+
+  if (topOpen && leftOpen) {
+    vec2 delta = local - vec2(r, r);
+    if (delta.x <= 0.0 && delta.y <= 0.0) {
+      float dist = length(delta);
+      if (dist >= r - arcEpsilon) {
+        return true;
+      }
+    }
+  }
+  if (topOpen && rightOpen) {
+    vec2 delta = local - vec2(edge - r, r);
+    if (delta.x >= 0.0 && delta.y <= 0.0) {
+      float dist = length(delta);
+      if (dist >= r - arcEpsilon) {
+        return true;
+      }
+    }
+  }
+  if (bottomOpen && rightOpen) {
+    vec2 delta = local - vec2(edge - r, edge - r);
+    if (delta.x >= 0.0 && delta.y >= 0.0) {
+      float dist = length(delta);
+      if (dist >= r - arcEpsilon) {
+        return true;
+      }
+    }
+  }
+  if (bottomOpen && leftOpen) {
+    vec2 delta = local - vec2(r, edge - r);
+    if (delta.x <= 0.0 && delta.y >= 0.0) {
+      float dist = length(delta);
+      if (dist >= r - arcEpsilon) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+bool checkerPixelOn(vec2 source) {
+  vec2 world = floor(source + u_cameraPixelOffset);
+  vec2 tile = floor(world / u_tileSize);
+  vec2 local = mod(mod(world, u_tileSize) + u_tileSize, u_tileSize);
+  if (!ghostCheckerShapeAllows(tile, local)) {
+    return false;
+  }
+
+  float cell = floor(local.x / u_checkerSize) + floor(local.y / u_checkerSize);
+  return mod(cell, 2.0) >= 0.5;
+}
+
+void main() {
+  vec4 frame = texture2D(u_frame, v_texCoord);
+  vec2 screen = floor(v_texCoord * u_resolution);
+  vec2 center = u_resolution * 0.5;
+  vec2 delta = screen + vec2(0.5) - center;
+  float radius = min(u_resolution.x, u_resolution.y) * 0.5;
+  if (!frameIsBacking(frame) || dot(delta, delta) > radius * radius) {
+    gl_FragColor = frame;
+    return;
+  }
+
+  vec2 source = inverseLensSource(screen);
+  if (checkerPixelOn(source)) {
+    gl_FragColor = vec4(u_backgroundColor, 1.0);
+  } else {
+    gl_FragColor = frame;
+  }
 }
 `;
 
@@ -2947,6 +3337,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     ? {
       visibilityMs: 0,
       ghostMs: 0,
+      ghostCheckerMs: 0,
+      ghostOutlineMs: 0,
+      ghostStormMs: 0,
       backgroundMs: 0,
       starsMs: 0,
       asteroidMs: 0,
@@ -2972,6 +3365,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   const shouldDrawWorldOverlay = renderPhase === "full" || renderPhase === "world" || renderPhase === "worldOverlay";
   const shouldDrawWorld = shouldDrawWorldBase || shouldDrawWorldOverlay;
   const shouldDrawHud = renderPhase === "full" || renderPhase === "hud";
+  const roomState = options.room?.state || "";
+  const gpuWorldEffectsAllowed = roomState === "active" || roomState === "ended";
 
   ctx.imageSmoothingEnabled = false;
   if (options.transparentBacking && typeof ctx.clear === "function") {
@@ -3073,7 +3468,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           options.timeSeconds ?? snapshot.tick / 60,
           visibility,
           options.gpuStormRenderer,
-          options.gpuFrameStormReady === true && options.room?.state === "active"
+          options.gpuFrameStormReady === true && gpuWorldEffectsAllowed,
+          options.gpuFrameCheckerReady === true && gpuWorldEffectsAllowed,
+          perfBuckets
         ));
         if (typeof ctx.beginWorldMask === "function") {
           ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
@@ -3095,7 +3492,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           visibility,
           options.gpuStormRenderer,
           cameraPlayer,
-          options.gpuFrameStormReady === true && options.room?.state === "active"
+          options.gpuFrameStormReady === true && gpuWorldEffectsAllowed
         ));
       } else {
         measureBucket("asteroidMs", () => drawWorldBounds(ctx, snapshot, camera));
@@ -3164,20 +3561,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
     drawControllerAimCursor(ctx, localPlayer, camera, options.controllerAimCursor, colors);
 
-    measureBucket("particlesMs", () => drawWithoutWorldMask(ctx, () => {
-      drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
-    }));
-
-    measureBucket("raysMs", () => {
-      for (const renderPlayer of worldRenderPlayers) {
-        if (renderPlayer.mining) {
-          drawWithoutWorldMask(ctx, () => {
-            drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
-          });
-        }
-      }
-    });
-
     if (localShipDrawsAfterVisibility) {
       measureBucket("shipsMs", () => drawWithoutWorldMask(ctx, () => {
         drawShip(
@@ -3192,6 +3575,20 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         );
       }));
     }
+
+    measureBucket("particlesMs", () => drawWithoutWorldMask(ctx, () => {
+      drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
+    }));
+
+    measureBucket("raysMs", () => {
+      for (const renderPlayer of worldRenderPlayers) {
+        if (renderPlayer.mining) {
+          drawWithoutWorldMask(ctx, () => {
+            drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+          });
+        }
+      }
+    });
 
     if (options.build?.active && localPlayer?.alive && options.asteroid) {
       drawWithoutWorldMask(ctx, () => {
@@ -6033,11 +6430,21 @@ function drawAsteroidVisibilityGhostMap(
   timeSeconds,
   visibility = null,
   gpuStormRenderer = null,
-  gpuFrameStormReady = false
+  gpuFrameStormReady = false,
+  gpuFrameCheckerReady = false,
+  perfBuckets = null
 ) {
   if (!asteroid) {
     return;
   }
+  const measureGhostBucket = perfBuckets
+    ? (key, callback) => {
+      const start = performance.now();
+      const value = callback();
+      perfBuckets[key] += performance.now() - start;
+      return value;
+    }
+    : (_key, callback) => callback();
 
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
@@ -6055,41 +6462,59 @@ function drawAsteroidVisibilityGhostMap(
     asteroid.heightTiles - 1,
     viewMaxTileY
   );
+  let gpuCheckerQueued = false;
 
-  const nativeCheckerLayer = typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
-    ? visibilityCheckerLayerNative(asteroid, camera, ctx.width, ctx.height, {
-      sourcePadding: padding,
-      lensEdgeScale: WORLD_LENS_EDGE_SCALE,
-      lensPower: WORLD_LENS_POWER,
-      lensNoiseRadial: WORLD_LENS_NOISE_RADIAL,
-      lensNoiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
-      lensDefectDensity: WORLD_LENS_DEFECT_DENSITY
-    })
-    : null;
-  if (nativeCheckerLayer) {
-    ctx.drawCodeLayer(nativeCheckerLayer, {
-      background: colors.background,
-      foreground: colors.foreground,
-      backing: colors.backing || "#000000"
-    });
-  } else {
-    for (let tileY = viewMinTileY; tileY <= viewMaxTileY; tileY += 1) {
-      for (let tileX = viewMinTileX; tileX <= viewMaxTileX; tileX += 1) {
-        if (
-          tileX >= 0 &&
-          tileY >= 0 &&
-          tileX < asteroid.widthTiles &&
-          tileY < asteroid.heightTiles &&
-          isPlayableTile(asteroid, tileX, tileY) &&
-          isSolidTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX])
-        ) {
-          continue;
+  measureGhostBucket("ghostCheckerMs", () => {
+    const queuedGpuChecker = gpuFrameCheckerReady &&
+      typeof ctx.queueGpuCheckerLayer === "function" &&
+      ctx.queueGpuCheckerLayer({
+        asteroid,
+        camera: { x: camera.x, y: camera.y },
+        palette: {
+          background: colors.background,
+          backing: colors.backing || "#000000"
         }
+      });
+    if (queuedGpuChecker) {
+      gpuCheckerQueued = true;
+      return;
+    }
 
-        drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors);
+    const nativeCheckerLayer = typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
+      ? visibilityCheckerLayerNative(asteroid, camera, ctx.width, ctx.height, {
+        sourcePadding: padding,
+        lensEdgeScale: WORLD_LENS_EDGE_SCALE,
+        lensPower: WORLD_LENS_POWER,
+        lensNoiseRadial: WORLD_LENS_NOISE_RADIAL,
+        lensNoiseTangential: WORLD_LENS_NOISE_TANGENTIAL,
+        lensDefectDensity: WORLD_LENS_DEFECT_DENSITY
+      })
+      : null;
+    if (nativeCheckerLayer) {
+      ctx.drawCodeLayer(nativeCheckerLayer, {
+        background: colors.background,
+        foreground: colors.foreground,
+        backing: colors.backing || "#000000"
+      });
+    } else {
+      for (let tileY = viewMinTileY; tileY <= viewMaxTileY; tileY += 1) {
+        for (let tileX = viewMinTileX; tileX <= viewMaxTileX; tileX += 1) {
+          if (
+            tileX >= 0 &&
+            tileY >= 0 &&
+            tileX < asteroid.widthTiles &&
+            tileY < asteroid.heightTiles &&
+            isPlayableTile(asteroid, tileX, tileY) &&
+            isSolidTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX])
+          ) {
+            continue;
+          }
+
+          drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors);
+        }
       }
     }
-  }
+  });
 
   const ghostColors = {
     ...colors,
@@ -6097,61 +6522,69 @@ function drawAsteroidVisibilityGhostMap(
     background: colors.backing || "#000000"
   };
 
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      const index = tileY * asteroid.widthTiles + tileX;
-      const tile = asteroid.tiles[index];
-      if (!isSolidTile(tile)) {
-        continue;
-      }
-
-      const screenX = Math.round(tileX * tileSize - camera.x);
-      const screenY = Math.round(tileY * tileSize - camera.y);
-      if (tile === ASTEROID_TILE.wall) {
-        drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
-      } else {
-        drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
-      }
+  measureGhostBucket("ghostOutlineMs", () => {
+    if (gpuCheckerQueued) {
+      return;
     }
-  }
 
-  drawAsteroidVisibilityGhostInnerRockCornerConnectors(
-    ctx,
-    asteroid,
-    camera,
-    tileSize,
-    minTileX,
-    maxTileX,
-    minTileY,
-    maxTileY,
-    colors
-  );
-  if (asteroid.storm) {
-    const queuedGpuGhostStorm = gpuFrameStormReady &&
-      typeof ctx.queueGpuStormLayer === "function" &&
-      ctx.queueGpuStormLayer({
-        asteroid,
-        camera: { x: camera.x, y: camera.y },
-        timeSeconds,
-        stormFocus: null,
-        sourcePadding: cameraCullPadding(camera),
-        visibilitySpans: visibility?.spans || null,
-        visibilityMaskMode: "exclude",
-        palette: {
-          background: ghostColors.background,
-          foreground: ghostColors.foreground,
-          backing: ghostColors.backing || ghostColors.background || "#000000"
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        const index = tileY * asteroid.widthTiles + tileX;
+        const tile = asteroid.tiles[index];
+        if (!isSolidTile(tile)) {
+          continue;
         }
-      });
-    if (!queuedGpuGhostStorm) {
-      const stormOverlayIncludesBoundary = drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
-      if (!stormOverlayIncludesBoundary) {
-        drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
+
+        const screenX = Math.round(tileX * tileSize - camera.x);
+        const screenY = Math.round(tileY * tileSize - camera.y);
+        if (tile === ASTEROID_TILE.wall) {
+          drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
+        } else {
+          drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
+        }
       }
     }
-  } else {
-    drawAsteroidBoundary(ctx, asteroid, camera, ghostColors);
-  }
+
+    drawAsteroidVisibilityGhostInnerRockCornerConnectors(
+      ctx,
+      asteroid,
+      camera,
+      tileSize,
+      minTileX,
+      maxTileX,
+      minTileY,
+      maxTileY,
+      colors
+    );
+  });
+  measureGhostBucket("ghostStormMs", () => {
+    if (asteroid.storm) {
+      const queuedGpuGhostStorm = gpuFrameStormReady &&
+        typeof ctx.queueGpuStormLayer === "function" &&
+        ctx.queueGpuStormLayer({
+          asteroid,
+          camera: { x: camera.x, y: camera.y },
+          timeSeconds,
+          stormFocus: null,
+          sourcePadding: cameraCullPadding(camera),
+          visibilitySpans: visibility?.spans || null,
+          visibilityMaskMode: "exclude",
+          palette: {
+            background: ghostColors.background,
+            foreground: ghostColors.foreground,
+            backing: ghostColors.backing || ghostColors.background || "#000000"
+          }
+        });
+      if (!queuedGpuGhostStorm) {
+        const stormOverlayIncludesBoundary = drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
+        if (!stormOverlayIncludesBoundary) {
+          drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
+        }
+      }
+    } else {
+      drawAsteroidBoundary(ctx, asteroid, camera, ghostColors);
+    }
+  });
 }
 
 function drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors) {
@@ -9859,23 +10292,32 @@ function emitThrusterParticles(state, player, dtSeconds) {
   const origins = rearEnginePlumeOrigins(player, rear, side);
   const key = player.id || String(player.number);
   const particleMultiplier = effects.thrusterParticleMultiplier;
+  const engineRamp = thrusterEngineRamp(player);
 
   for (let originIndex = 0; originIndex < origins.length; originIndex += 1) {
     const origin = origins[originIndex];
     const originKey = `${key}:thruster:${originIndex}`;
     const carry =
       (state.emitCarry.get(originKey) || 0) +
-      (THRUSTER_PARTICLE_RATE * particleMultiplier * dtSeconds) / origins.length;
+      (THRUSTER_PARTICLE_RATE * particleMultiplier * engineRamp.rate * dtSeconds) / origins.length;
     const count = Math.floor(carry);
     state.emitCarry.set(originKey, carry - count);
 
     for (let index = 0; index < count; index += 1) {
       const seed = state.nextSeed();
-      const sideJitter = (randomUnit(seed, 1) - 0.5) * 2;
-      const rearJitter = (randomUnit(seed, 2) - 0.5) * 2;
-      const speed = (72 + randomUnit(seed, 3) * 110) * Math.sqrt(particleMultiplier);
-      const spread = (randomUnit(seed, 4) - 0.5) * 52 * Math.sqrt(particleMultiplier);
-      const life = 0.22 + randomUnit(seed, 5) * 0.34;
+      const nozzleWidth = Math.max(2, (origin.nozzleWidth || 0) * engineRamp.nozzle);
+      const sideJitter = sampleProjectedNozzleOffset(seed, nozzleWidth * 0.5);
+      const rearJitter = (randomUnit(seed, 2) - 0.5) * 2.2;
+      const speed = (92 + randomUnit(seed, 3) * 90) * Math.sqrt(particleMultiplier) * engineRamp.plumeSpeed;
+      const spread = (randomUnit(seed, 4) - 0.5) * 10 * Math.sqrt(particleMultiplier);
+      const localHeat = 1 - clamp(Math.abs(sideJitter) / (nozzleWidth * 0.5), 0, 1);
+      const medialOffset = (origin.medialOffset || 0) + sideJitter;
+      const medialHeatLinear = 1 - clamp(Math.abs(medialOffset) / Math.max(1, origin.medialRadius || 1), 0, 1);
+      const medialHeat = medialHeatLinear * medialHeatLinear * medialHeatLinear;
+      const centerHeat = localHeat * 0.08 + medialHeat * 0.92;
+      const life =
+        (0.05 + centerHeat * 0.68 + randomUnit(seed, 5) * (0.1 + centerHeat * 0.3)) *
+        engineRamp.life;
 
       state.particles.push({
         x: origin.x + side.x * sideJitter + rear.x * rearJitter,
@@ -9884,8 +10326,6 @@ function emitThrusterParticles(state, player, dtSeconds) {
         vy: (player.vy || 0) + rear.y * speed + side.y * spread,
         age: randomUnit(seed, 6) * 0.025,
         life,
-        heat: 1,
-        heatDecay: 3.8 + randomUnit(seed, 7) * 2.2,
         seed
       });
     }
@@ -9894,6 +10334,28 @@ function emitThrusterParticles(state, player, dtSeconds) {
   if (state.particles.length > MAX_PARTICLES) {
     state.particles.splice(0, state.particles.length - MAX_PARTICLES);
   }
+}
+
+function sampleProjectedNozzleOffset(seed, radius) {
+  const distance = Math.sqrt(randomUnit(seed, 1)) * radius;
+  const angle = randomUnit(seed, 9) * Math.PI * 2;
+  return Math.cos(angle) * distance;
+}
+
+function thrusterEngineRamp(player) {
+  const level = clamp(
+    upgradeLevel(player?.upgrades, THRUSTER_ENGINE_UPGRADE_ID),
+    0,
+    THRUSTER_ENGINE_MAX_LEVEL
+  );
+  const t = THRUSTER_ENGINE_MAX_LEVEL > 0 ? level / THRUSTER_ENGINE_MAX_LEVEL : 0;
+
+  return {
+    rate: lerp(THRUSTER_ENGINE_RAMP.rateMin, THRUSTER_ENGINE_RAMP.rateMax, t),
+    plumeSpeed: lerp(THRUSTER_ENGINE_RAMP.plumeSpeedMin, THRUSTER_ENGINE_RAMP.plumeSpeedMax, t),
+    life: lerp(THRUSTER_ENGINE_RAMP.lifeMin, THRUSTER_ENGINE_RAMP.lifeMax, t),
+    nozzle: lerp(THRUSTER_ENGINE_RAMP.nozzleMin, THRUSTER_ENGINE_RAMP.nozzleMax, t)
+  };
 }
 
 function thrusterParticleBasis(player) {
@@ -9976,10 +10438,17 @@ function rearEnginePlumeOrigins(player, rear, side) {
   const mainRadius = shipMainRadius(player);
   const geometryScale = shipGeometryScaleForRadius(mainRadius);
   const smallOrbRadius = shipSmallOrbRadius(geometryScale);
+  const medialRadius = REAR_ORBS.reduce(
+    (radius, orb) => Math.max(radius, Math.abs(orb.side) * geometryScale + smallOrbRadius),
+    smallOrbRadius
+  );
 
   return REAR_ORBS.map((orb) => ({
     x: player.x + rear.x * (orb.rear * geometryScale + smallOrbRadius + 1) + side.x * orb.side * geometryScale,
-    y: player.y + rear.y * (orb.rear * geometryScale + smallOrbRadius + 1) + side.y * orb.side * geometryScale
+    y: player.y + rear.y * (orb.rear * geometryScale + smallOrbRadius + 1) + side.y * orb.side * geometryScale,
+    nozzleWidth: smallOrbRadius * 1.8,
+    medialOffset: orb.side * geometryScale,
+    medialRadius
   }));
 }
 
@@ -9995,10 +10464,6 @@ function updateParticles(particles, dtSeconds) {
 
     particle.x += particle.vx * dtSeconds;
     particle.y += particle.vy * dtSeconds;
-    if (particle.heat > 0) {
-      particle.heat = Math.max(0, particle.heat - (particle.heatDecay || 4) * dtSeconds);
-    }
-
     const drag = Math.pow(0.55, dtSeconds);
     particle.vx *= drag;
     particle.vy *= drag;
@@ -10015,7 +10480,8 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
     }
 
     const screen = worldToScreen(particle, camera);
-    if ((particle.heat || 0) > 0.05) {
+    const heat = particleHeatFromLife(particle);
+    if (heat > 0.05) {
       drawHotParticle(ctx, screen, particle);
       continue;
     }
@@ -10026,38 +10492,76 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
 }
 
 function drawHotParticle(ctx, screen, particle) {
-  const speed = Math.hypot(particle.vx || 0, particle.vy || 0);
-  if (speed > 0.0001) {
-    const axisX = Math.round((particle.vx || 0) / speed);
-    const axisY = Math.round((particle.vy || 0) / speed);
-    ctx.fillRect(screen.x - axisX, screen.y - axisY, 1, 1);
-    ctx.fillRect(screen.x, screen.y, 1, 1);
-    ctx.fillRect(screen.x + axisX, screen.y + axisY, 1, 1);
-    return;
-  }
+  const heat = particleHeatFromLife(particle);
+  const size = heat > 0.52 ? 3 : heat > 0.18 ? 2 : 1;
+  const offset = size > 1 ? -1 : 0;
+  ctx.fillRect(screen.x + offset, screen.y + offset, size, size);
+}
 
-  ctx.fillRect(screen.x, screen.y, 1, 1);
-  ctx.fillRect(screen.x - 1, screen.y, 1, 1);
-  ctx.fillRect(screen.x + 1, screen.y, 1, 1);
-  ctx.fillRect(screen.x, screen.y - 1, 1, 1);
-  ctx.fillRect(screen.x, screen.y + 1, 1, 1);
+function particleHeatFromLife(particle) {
+  const life = Math.max(0.001, Number(particle.life || 0));
+  return Math.max(0, life - particle.age);
 }
 
 function drawSphere(ctx, cx, cy, radius, angle, colors, occluders = []) {
   void angle;
-  ctx.fillStyle = colors.background;
-  fillDisk(ctx, cx, cy, radius, occluders);
+  fillDitheredSphere(ctx, cx, cy, radius, colors, { occluders });
   ctx.fillStyle = colors.foreground;
   drawCircle(ctx, cx, cy, radius, occluders);
 }
 
 function drawTruncatedRearSphere(ctx, cx, cy, radius, rear, colors, occluders = []) {
   const clipDistance = Math.max(0, radius - 1);
-  ctx.fillStyle = colors.background;
-  fillTruncatedDisk(ctx, cx, cy, radius, rear, clipDistance, occluders);
+  fillDitheredSphere(ctx, cx, cy, radius, colors, {
+    clipDirection: rear,
+    clipDistance,
+    occluders
+  });
   ctx.fillStyle = colors.foreground;
   drawTruncatedCircle(ctx, cx, cy, radius, rear, clipDistance, occluders);
   drawTruncatedSphereEnd(ctx, cx, cy, radius, rear, clipDistance, occluders);
+}
+
+function fillDitheredSphere(ctx, cx, cy, radius, colors, options = {}) {
+  const radiusSq = radius * radius;
+  const minX = Math.floor(cx - radius);
+  const maxX = Math.ceil(cx + radius);
+  const minY = Math.floor(cy - radius);
+  const maxY = Math.ceil(cy + radius);
+  const backing = colors.backing || "#000000";
+  const background = colors.background;
+  const clipDirection = options.clipDirection || null;
+  const clipDistance = Number.isFinite(options.clipDistance) ? options.clipDistance : Infinity;
+  const occluders = options.occluders || [];
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const distanceSq = dx * dx + dy * dy;
+      if (distanceSq > radiusSq || isOccluded(px, py, occluders)) {
+        continue;
+      }
+
+      if (clipDirection) {
+        const projection = dx * clipDirection.x + dy * clipDirection.y;
+        if (projection > clipDistance) {
+          continue;
+        }
+      }
+
+      const inverseRadius = 1 / Math.max(1, radius);
+      const nx = dx * inverseRadius;
+      const ny = dy * inverseRadius;
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const diffuse = clamp(nx * SHIP_SPHERE_LIGHT.x + ny * SHIP_SPHERE_LIGHT.y + nz * SHIP_SPHERE_LIGHT.z, 0, 1);
+      const edgeShadow = clamp(1 - Math.sqrt(distanceSq) * inverseRadius, 0, 1);
+      const backgroundAmount = clamp(0.08 + diffuse * 0.72 + edgeShadow * 0.2, 0, 1);
+      const threshold = (SHIP_SPHERE_DITHER[((py & 3) << 2) | (px & 3)] + 0.5) / 16;
+      ctx.fillStyle = threshold <= backgroundAmount ? background : backing;
+      ctx.fillRect(px, py, 1, 1);
+    }
+  }
 }
 
 function fillDisk(ctx, cx, cy, radius, occluders = []) {
@@ -10684,6 +11188,19 @@ function hashCell(seed, x, y) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function lerp(start, end, amount) {
+  return start + (end - start) * amount;
+}
+
+function normalize3d(x, y, z) {
+  const length = Math.hypot(x, y, z) || 1;
+  return {
+    x: x / length,
+    y: y / length,
+    z: z / length
+  };
 }
 
 function randomUnit(seed, salt) {
