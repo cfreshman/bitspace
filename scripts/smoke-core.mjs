@@ -322,7 +322,7 @@ const stormRuns = stormRunsNative(
 if (!(stormRuns instanceof Int32Array) || stormRuns.length < 4 || stormRuns.length % 4 !== 0) {
   throw new Error("native storm runs smoke failed: missing runs");
 }
-if (!Array.from(stormRuns).some((_value, index) => index % 4 === 3 && (stormRuns[index] === 1 || stormRuns[index] === 2))) {
+if (!Array.from(stormRuns).some((_value, index) => index % 4 === 3 && (stormRuns[index] === 1 || stormRuns[index] === 2 || stormRuns[index] === 3))) {
   throw new Error("native storm runs smoke failed: missing storm run codes");
 }
 

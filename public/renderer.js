@@ -141,6 +141,8 @@ const PLAYER_MAP_CSS_SCALE = 1;
 const PLAYER_MAP_MINI_SHIP_SCALE = 0.6;
 const PLAYER_MAP_MINI_SHIP_OUTLINE = 3;
 const PLAYER_MAP_MARGIN = 8;
+const SCENE_CIRCLE_BORDER_PIXELS = 1;
+const SCENE_CIRCLE_VOID_RING_PIXELS = 2;
 const PLAYER_MAP_CIRCLE_PADDING_TILES = 4;
 const PLAYER_MAP_STORM_NONE = 0;
 const PLAYER_MAP_STORM_BAND = 1;
@@ -595,10 +597,21 @@ function createPixelSurface(canvasContext, width, height) {
   const pixels = new Uint32Array(imageData.data.buffer);
   const colorCache = new Map();
   const circleClip = createCircleClipSpans(width, height);
+  const circleBorderSpanCache = new Map([[0, circleClip]]);
   let currentColor = packColor(RENDER.foreground);
   let activeClip = null;
   let activeLens = null;
   let activeWorldMask = null;
+
+  function circleSpansForInset(inset) {
+    const key = Math.max(0, Math.floor(inset));
+    let spans = circleBorderSpanCache.get(key);
+    if (!spans) {
+      spans = createCircleClipSpans(width, height, key);
+      circleBorderSpanCache.set(key, spans);
+    }
+    return spans;
+  }
 
   function canWriteFinalPixel(x, y) {
     return x >= 0 &&
@@ -699,6 +712,33 @@ function createPixelSurface(canvasContext, width, height) {
     },
     clear() {
       pixels.fill(0);
+    },
+    drawCircleBorder(color, thickness = 1, inset = 0) {
+      const packed = colorFor(color || RENDER.background, colorCache);
+      const line = Math.max(1, Math.floor(thickness));
+      const offset = Math.max(0, Math.floor(inset));
+      const outer = circleSpansForInset(offset);
+      const inner = circleSpansForInset(offset + line);
+      for (let y = 0; y < height; y += 1) {
+        const outerStart = outer.starts[y];
+        const outerEnd = outer.ends[y];
+        if (outerStart >= outerEnd) {
+          continue;
+        }
+
+        const row = y * width;
+        const innerStart = inner.starts[y];
+        const innerEnd = inner.ends[y];
+        const leftEnd = Math.min(outerEnd, innerStart);
+        for (let x = outerStart; x < leftEnd; x += 1) {
+          pixels[row + x] = packed;
+        }
+
+        const rightStart = Math.max(outerStart, innerEnd);
+        for (let x = rightStart; x < outerEnd; x += 1) {
+          pixels[row + x] = packed;
+        }
+      }
     },
     fillRect(x, y, rectWidth, rectHeight) {
       const rawX0 = Math.floor(x);
@@ -1125,6 +1165,10 @@ function createGpuStormRenderer(width, height) {
       speedX: gl.getUniformLocation(program, "u_speedX"),
       speedY: gl.getUniformLocation(program, "u_speedY"),
       speedZ: gl.getUniformLocation(program, "u_speedZ"),
+      cameraPixelOffset: gl.getUniformLocation(program, "u_cameraPixelOffset"),
+      checkerSize: gl.getUniformLocation(program, "u_checkerSize"),
+      playerWorld: gl.getUniformLocation(program, "u_playerWorld"),
+      playerStormBlob: gl.getUniformLocation(program, "u_playerStormBlob"),
       lensEdgeScale: gl.getUniformLocation(program, "u_lensEdgeScale"),
       lensPower: gl.getUniformLocation(program, "u_lensPower"),
       lensNoiseRadial: gl.getUniformLocation(program, "u_lensNoiseRadial"),
@@ -1146,7 +1190,11 @@ function createGpuStormRenderer(width, height) {
       calls: 0,
       totalMs: 0,
       readMs: 0,
-      requests: 0
+      requests: 0,
+      visibilityCalls: 0,
+      visibilityTotalMs: 0,
+      visibilityReadMs: 0,
+      visibilityRequests: 0
     };
 
     function uploadGrid(asteroid) {
@@ -1181,7 +1229,7 @@ function createGpuStormRenderer(width, height) {
           const offset = index * 4;
           gridData[offset] = Number(asteroid.storm[index] || STORM_STATE.safe);
           gridData[offset + 1] = isPlayableTile(asteroid, tileX, tileY) ? 255 : 0;
-          gridData[offset + 2] = 0;
+          gridData[offset + 2] = isSolidTile(asteroid.tiles[index]) ? 255 : 0;
           gridData[offset + 3] = 255;
         }
       }
@@ -1233,7 +1281,11 @@ function createGpuStormRenderer(width, height) {
           calls: 0,
           totalMs: 0,
           readMs: 0,
-          requests: 0
+          requests: 0,
+          visibilityCalls: 0,
+          visibilityTotalMs: 0,
+          visibilityReadMs: 0,
+          visibilityRequests: 0
         };
       },
       frameStats() {
@@ -1241,17 +1293,37 @@ function createGpuStormRenderer(width, height) {
           calls: frameStats.calls,
           totalMs: frameStats.totalMs,
           readMs: frameStats.readMs,
-          requests: frameStats.requests
+          requests: frameStats.requests,
+          visibilityCalls: frameStats.visibilityCalls,
+          visibilityTotalMs: frameStats.visibilityTotalMs,
+          visibilityReadMs: frameStats.visibilityReadMs,
+          visibilityRequests: frameStats.visibilityRequests
         };
       },
-      draw(asteroid, camera, timeSeconds) {
+      drawVisibilityChecker(asteroid, camera, timeSeconds) {
+        void asteroid;
+        void camera;
+        void timeSeconds;
+        frameStats.visibilityRequests += 1;
+        return null;
+      },
+      draw(asteroid, camera, timeSeconds, stormFocus = null) {
         frameStats.requests += 1;
+        const layer = renderCombinedLayer(asteroid, camera, timeSeconds, false, stormFocus);
+        return layer ? { rgba, runs: layerRuns, width, height, cached: layer.cached } : null;
+      }
+    };
+
+    function renderCombinedLayer(asteroid, camera, timeSeconds, countVisibilityStats, stormFocus = null) {
         if (!uploadGrid(asteroid)) {
           return null;
         }
 
         const stableTimeSeconds = Math.floor(Number(timeSeconds || 0) * STORM_PATTERN_FPS) / STORM_PATTERN_FPS;
         uploadPermutation(asteroid.seed);
+        const focusEnabled = stormFocus?.enabled ? 1 : 0;
+        const focusX = focusEnabled ? Number(stormFocus.x || 0) : 0;
+        const focusY = focusEnabled ? Number(stormFocus.y || 0) : 0;
         const nextLayerKey = [
           gridKey,
           permKey,
@@ -1259,10 +1331,13 @@ function createGpuStormRenderer(width, height) {
           height,
           Math.round(Number(camera.x || 0) * 1000),
           Math.round(Number(camera.y || 0) * 1000),
-          Math.round(stableTimeSeconds * STORM_PATTERN_FPS)
+          Math.round(stableTimeSeconds * STORM_PATTERN_FPS),
+          focusEnabled,
+          Math.round(focusX * 1000),
+          Math.round(focusY * 1000)
         ].join(":");
         if (nextLayerKey === layerKey) {
-          return { rgba, runs: layerRuns, width, height, cached: true };
+          return { cached: true };
         }
 
         const startMs = performance.now();
@@ -1292,6 +1367,14 @@ function createGpuStormRenderer(width, height) {
         gl.uniform1f(locations.speedX, STORM_NOISE_SPEED_X);
         gl.uniform1f(locations.speedY, STORM_NOISE_SPEED_Y);
         gl.uniform1f(locations.speedZ, STORM_NOISE_SPEED_Z);
+        gl.uniform2f(locations.playerWorld, focusX, focusY);
+        gl.uniform1f(locations.playerStormBlob, focusEnabled);
+        gl.uniform2f(
+          locations.cameraPixelOffset,
+          renderedCameraPixelOffset(camera?.x || 0),
+          renderedCameraPixelOffset(camera?.y || 0)
+        );
+        gl.uniform1f(locations.checkerSize, ASTEROID_VISIBILITY_CHECKER_SIZE);
         gl.uniform1f(locations.lensEdgeScale, WORLD_LENS_EDGE_SCALE);
         gl.uniform1f(locations.lensPower, WORLD_LENS_POWER);
         gl.uniform1f(locations.lensNoiseRadial, WORLD_LENS_NOISE_RADIAL);
@@ -1300,15 +1383,19 @@ function createGpuStormRenderer(width, height) {
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         const readStartMs = performance.now();
         gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-        layerRuns = gpuStormRunsFromRgba(rgba, width, height);
+        layerRuns = gpuStormRunsFromRgba(rgba, width, height, 0);
         const endMs = performance.now();
         frameStats.calls += 1;
         frameStats.totalMs += endMs - startMs;
         frameStats.readMs += endMs - readStartMs;
+        if (countVisibilityStats) {
+          frameStats.visibilityCalls += 1;
+          frameStats.visibilityTotalMs += endMs - startMs;
+          frameStats.visibilityReadMs += endMs - readStartMs;
+        }
         layerKey = nextLayerKey;
-        return { rgba, runs: layerRuns, width, height };
+        return { cached: false };
       }
-    };
   } catch (error) {
     console.warn("BITSPACE GPU storm renderer unavailable", error);
     return null;
@@ -1347,7 +1434,8 @@ function compileGpuShader(gl, type, source) {
   return shader;
 }
 
-function gpuStormRunsFromRgba(rgba, width, height) {
+function gpuStormRunsFromRgba(rgba, width, height, channel = 0) {
+  const channelIndex = clamp(channel | 0, 0, 3);
   const runs = [];
   for (let y = 0; y < height; y += 1) {
     const sourceY = height - 1 - y;
@@ -1357,7 +1445,7 @@ function gpuStormRunsFromRgba(rgba, width, height) {
 
     for (let x = 0; x < width; x += 1) {
       const offset = sourceRow + x * 4;
-      const code = rgba[offset + 3] === 0 ? 0 : rgba[offset];
+      const code = rgba[offset + channelIndex];
       if (code === runCode) {
         continue;
       }
@@ -1436,6 +1524,10 @@ uniform float u_noiseScale;
 uniform float u_speedX;
 uniform float u_speedY;
 uniform float u_speedZ;
+uniform vec2 u_cameraPixelOffset;
+uniform float u_checkerSize;
+uniform vec2 u_playerWorld;
+uniform float u_playerStormBlob;
 uniform float u_lensEdgeScale;
 uniform float u_lensPower;
 uniform float u_lensNoiseRadial;
@@ -1609,6 +1701,54 @@ vec2 inverseLensSource(vec2 screen) {
   return source;
 }
 
+bool gpuStormSafeTile(vec2 tile) {
+  if (tile.x < 0.0 || tile.y < 0.0 || tile.x >= u_mapSize.x || tile.y >= u_mapSize.y) {
+    return false;
+  }
+
+  vec4 grid = texture2D(u_grid, (tile + vec2(0.5)) / u_mapSize);
+  return grid.g > 0.5 && grid.r * 255.0 < 1.5;
+}
+
+float gpuStormDistanceToSafe(vec2 tile, vec2 world) {
+  float nearest = 99.0;
+  for (int offsetY = -2; offsetY <= 2; offsetY += 1) {
+    for (int offsetX = -2; offsetX <= 2; offsetX += 1) {
+      vec2 candidate = tile + vec2(float(offsetX), float(offsetY));
+      if (!gpuStormSafeTile(candidate)) {
+        continue;
+      }
+
+      vec2 rectMin = candidate * u_tileSize;
+      vec2 rectMax = rectMin + vec2(u_tileSize);
+      vec2 delta = max(max(rectMin - world, world - rectMax), vec2(0.0));
+      nearest = min(nearest, length(delta) / max(1.0, u_tileSize));
+    }
+  }
+  return nearest;
+}
+
+float gpuStormValueAt(vec2 world) {
+  vec2 visualWorld = floor(world);
+  vec3 p = vec3(
+    (visualWorld.x + u_time * u_speedX) * u_noiseScale,
+    (visualWorld.y + u_time * u_speedY) * u_noiseScale,
+    u_time * u_speedZ + u_seed * 11.0
+  );
+  return simplexNoise3D(p);
+}
+
+bool gpuStormBoundaryPixel(vec2 tile, vec2 world) {
+  vec2 pixelWorld = floor(world);
+  vec2 local = pixelWorld - tile * u_tileSize;
+  bool boundary = false;
+  boundary = boundary || (local.x < 1.0 && !gpuStormSafeTile(tile + vec2(-1.0, 0.0)));
+  boundary = boundary || (local.x >= u_tileSize - 1.0 && !gpuStormSafeTile(tile + vec2(1.0, 0.0)));
+  boundary = boundary || (local.y < 1.0 && !gpuStormSafeTile(tile + vec2(0.0, -1.0)));
+  boundary = boundary || (local.y >= u_tileSize - 1.0 && !gpuStormSafeTile(tile + vec2(0.0, 1.0)));
+  return boundary && gpuStormValueAt(world) >= 0.0;
+}
+
 void main() {
   vec2 screen = vec2(gl_FragCoord.x - 0.5, u_resolution.y - gl_FragCoord.y - 0.5);
   vec2 source = inverseLensSource(screen);
@@ -1616,33 +1756,56 @@ void main() {
   vec2 tile = floor(world / max(1.0, u_tileSize));
 
   bool inMap = tile.x >= 0.0 && tile.y >= 0.0 && tile.x < u_mapSize.x && tile.y < u_mapSize.y;
+  float playable = 0.0;
+  float stormState = 2.0;
+  float solid = 0.0;
+  bool safe = false;
   if (inMap) {
     vec4 grid = texture2D(u_grid, (tile + vec2(0.5)) / u_mapSize);
-    float stormState = grid.r * 255.0;
-    float playable = grid.g;
-    if (playable > 0.5 && stormState < 1.5) {
-      discard;
+    stormState = grid.r * 255.0;
+    playable = grid.g;
+    solid = grid.b;
+    safe = playable > 0.5 && stormState < 1.5;
+  }
+
+  float stormCode = 0.0;
+  if (safe) {
+    if (gpuStormBoundaryPixel(tile, world)) {
+      stormCode = 2.0;
+    }
+  } else {
+    float stormDistance = gpuStormDistanceToSafe(tile, world);
+    float playerStormDistance = 99.0;
+    if (u_playerStormBlob > 0.5) {
+      float playerDistance = length(world - u_playerWorld) / max(1.0, u_tileSize);
+      playerStormDistance = max(0.0, playerDistance - 1.0);
+    }
+    float edgeDistance = min(stormDistance, playerStormDistance);
+    float stormValue = gpuStormValueAt(world);
+    float fade = clamp(edgeDistance * 0.5, 0.0, 1.0);
+    float foregroundThreshold = mix(u_threshold, 1.02, fade);
+    float voidThreshold = fade;
+    float normalizedStorm = stormValue * 0.5 + 0.5;
+    if (normalizedStorm >= voidThreshold) {
+      stormCode = stormValue >= foregroundThreshold ? 2.0 : 1.0;
+    } else {
+      stormCode = 3.0;
     }
   }
 
-  vec2 visualWorld = floor(world);
-  vec3 p = vec3(
-    (visualWorld.x + u_time * u_speedX) * u_noiseScale,
-    (visualWorld.y + u_time * u_speedY) * u_noiseScale,
-    u_time * u_speedZ + u_seed * 11.0
-  );
-  float stormValue = simplexNoise3D(p);
-  float code = stormValue >= u_threshold ? 2.0 : 1.0;
-  gl_FragColor = vec4(code / 255.0, 0.0, 0.0, 1.0);
+  if (stormCode <= 0.0) {
+    discard;
+  }
+  gl_FragColor = vec4(stormCode / 255.0, 0.0, 0.0, 1.0);
 }
 `;
 
-function createCircleClipSpans(width, height) {
+function createCircleClipSpans(width, height, inset = 0) {
   const starts = new Int16Array(height);
   const ends = new Int16Array(height);
   const centerX = width / 2;
   const centerY = height / 2;
-  const radius = Math.min(width, height) / 2;
+  const radius = Math.max(0, Math.min(width, height) / 2 - Math.max(0, inset));
   const radiusSquared = radius * radius;
 
   for (let y = 0; y < height; y += 1) {
@@ -1915,6 +2078,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   if (!snapshot) {
     beginWorldViewport(ctx, colors);
     endWorldViewport(ctx);
+    drawSceneCircleBorder(ctx, colors);
     if (options.room || Object.keys(options.roomButtons || {}).length > 0) {
       drawRoomOverlay(ctx, options, null, colors, textRenderer);
     }
@@ -1971,8 +2135,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       if (typeof ctx.beginWorldMask === "function") {
         ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
       }
-      ctx.fillStyle = colors.background;
-      ctx.fillRect(-visibility.sourcePadding, -visibility.sourcePadding, ctx.width + visibility.sourcePadding * 2, ctx.height + visibility.sourcePadding * 2);
+      drawVisibleBackground(ctx, options.asteroid, camera, visibility, colors);
       ctx.fillStyle = colors.foreground;
       drawStars(ctx, snapshot, camera);
     } else {
@@ -1987,7 +2150,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         options.timeSeconds ?? snapshot.tick / 60,
         asteroidMiningTargets,
         visibility,
-        options.gpuStormRenderer
+        options.gpuStormRenderer,
+        cameraPlayer
       );
     } else {
       drawWorldBounds(ctx, snapshot, camera);
@@ -2073,6 +2237,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawBotDebugWorldOverlay(ctx, options.botDebugOverlay, camera);
     endWorldViewport(ctx);
   }
+  drawSceneCircleBorder(ctx, colors);
 
   const leaveConfirmActive = options.leaveConfirm?.active === true;
   if (options.room?.state === "active" && !leaveConfirmActive) {
@@ -2233,6 +2398,56 @@ function beginWorldViewport(ctx, colors, fillBackground = true) {
   }
   ctx.beginLens(createWorldLens(ctx.width, ctx.height));
   ctx.fillStyle = colors.foreground;
+}
+
+function drawVisibleBackground(ctx, asteroid, camera, visibility, colors) {
+  ctx.fillStyle = colors.background;
+  if (!visibility || !asteroid?.storm) {
+    const padding = visibility?.sourcePadding || 0;
+    ctx.fillRect(-padding, -padding, ctx.width + padding * 2, ctx.height + padding * 2);
+    return;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const padding = visibility.sourcePadding || cameraCullPadding(camera);
+  const minTileX = Math.floor((camera.x - padding) / tileSize) - 1;
+  const maxTileX = Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1;
+  const minTileY = Math.floor((camera.y - padding) / tileSize) - 1;
+  const maxTileY = Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1;
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    let runStartTileX = null;
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      const isStorm = stormTileStateAt(asteroid, tileX, tileY) === STORM_STATE.storm;
+      if (!isStorm && runStartTileX === null) {
+        runStartTileX = tileX;
+      }
+
+      if ((isStorm || tileX === maxTileX) && runStartTileX !== null) {
+        const endTileX = isStorm ? tileX : tileX + 1;
+        ctx.fillRect(
+          Math.round(runStartTileX * tileSize - camera.x),
+          Math.round(tileY * tileSize - camera.y),
+          (endTileX - runStartTileX) * tileSize,
+          tileSize
+        );
+        runStartTileX = null;
+      }
+    }
+  }
+}
+
+function drawSceneCircleBorder(ctx, colors) {
+  if (typeof ctx.drawCircleBorder !== "function") {
+    return;
+  }
+
+  ctx.drawCircleBorder(colors.background, SCENE_CIRCLE_BORDER_PIXELS);
+  ctx.drawCircleBorder(
+    colors.backing || "#000000",
+    SCENE_CIRCLE_VOID_RING_PIXELS,
+    SCENE_CIRCLE_BORDER_PIXELS
+  );
 }
 
 function endWorldViewport(ctx) {
@@ -4268,31 +4483,48 @@ function drawAsteroid(
   timeSeconds,
   asteroidMiningTargets,
   visibility = null,
-  gpuStormRenderer = null
+  gpuStormRenderer = null,
+  stormFocusPlayer = null
 ) {
   drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility);
-  drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility, gpuStormRenderer);
+  const stormOverlayIncludesBoundary = drawStormOverlay(
+    ctx,
+    asteroid,
+    camera,
+    colors,
+    timeSeconds,
+    visibility,
+    gpuStormRenderer,
+    stormFocusPlayer
+  );
   if (asteroid.storm) {
-    drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
+    if (!stormOverlayIncludesBoundary) {
+      drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
+    }
   } else {
     drawAsteroidBoundary(ctx, asteroid, camera, colors, visibility);
   }
 }
 
-function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility = null, gpuStormRenderer = null) {
+function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility = null, gpuStormRenderer = null, stormFocusPlayer = null) {
   if (!asteroid.storm) {
-    return;
+    return false;
   }
 
   if (gpuStormRenderer && typeof ctx.drawGpuCodeLayer === "function") {
-    const gpuStorm = gpuStormRenderer.draw(asteroid, camera, timeSeconds);
+    const gpuStorm = gpuStormRenderer.draw(
+      asteroid,
+      camera,
+      timeSeconds,
+      stormFocusForPlayer(asteroid, stormFocusPlayer)
+    );
     if (gpuStorm?.runs && typeof ctx.drawCodeRuns === "function") {
       ctx.drawCodeRuns(gpuStorm.runs, {
         background: colors.background,
         foreground: colors.foreground,
         backing: colors.backing || "#000000"
       });
-      return;
+      return true;
     }
     if (gpuStorm?.rgba) {
       ctx.drawGpuCodeLayer(gpuStorm.rgba, gpuStorm.width, gpuStorm.height, {
@@ -4300,7 +4532,7 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility
         foreground: colors.foreground,
         backing: colors.backing || "#000000"
       }, { flipY: true });
-      return;
+      return true;
     }
   }
 
@@ -4321,7 +4553,7 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility
       foreground: colors.foreground,
       backing: colors.backing || "#000000"
     });
-    return;
+    return false;
   }
   if (nativeStorm?.layer && typeof ctx.drawCodeLayer === "function") {
     ctx.drawCodeLayer(nativeStorm.layer, {
@@ -4329,7 +4561,7 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility
       foreground: colors.foreground,
       backing: colors.backing || "#000000"
     });
-    return;
+    return false;
   }
 
   const minTileX = Math.floor((camera.x - padding) / tileSize) - 1;
@@ -4368,6 +4600,7 @@ function drawStormOverlay(ctx, asteroid, camera, colors, timeSeconds, visibility
     const screenY = Math.round(tile.tileY * tileSize - camera.y);
     drawStormTilePattern(ctx, asteroid, screenX, screenY, tileSize, tile.tileX, tile.tileY, timeSeconds);
   }
+  return false;
 }
 
 function cachedStormOverlayNative(asteroid, camera, width, height, timeSeconds, padding, noLens = false) {
@@ -4879,8 +5112,10 @@ function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSecon
     colors
   );
   if (asteroid.storm) {
-    drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
-    drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
+    const stormOverlayIncludesBoundary = drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
+    if (!stormOverlayIncludesBoundary) {
+      drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
+    }
   } else {
     drawAsteroidBoundary(ctx, asteroid, camera, ghostColors);
   }
@@ -7223,6 +7458,27 @@ function stormTileStateAt(asteroid, tileX, tileY) {
   }
 
   return Number(asteroid.storm[index] || STORM_STATE.safe);
+}
+
+function stormFocusForPlayer(asteroid, player) {
+  if (!asteroid?.storm || !player || player.alive === false) {
+    return null;
+  }
+
+  const x = Number(player.x);
+  const y = Number(player.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const tileX = Math.floor(x / tileSize);
+  const tileY = Math.floor(y / tileSize);
+  if (stormTileStateAt(asteroid, tileX, tileY) !== STORM_STATE.storm) {
+    return null;
+  }
+
+  return { enabled: true, x, y };
 }
 
 function drawWorldBounds(ctx, snapshot, camera) {

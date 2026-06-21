@@ -2726,8 +2726,6 @@ BS_EXPORT int bs_render_storm_layer(
   const int maxSourceX = screenWidth + padding;
   const int maxSourceY = screenHeight + padding;
   const double timeSeconds = static_cast<double>(frame) / fps;
-  const int tilePixels = std::max(1, static_cast<int>(std::round(tileSize)));
-  const uint32_t permHash = stormPermutationHash(perm);
   int written = 0;
   if (!sourceMode) {
     ensureLensProjectionCache(
@@ -2843,6 +2841,53 @@ BS_EXPORT int bs_render_storm_layer(
     return {wrote, entry.baseX, entry.baseY};
   };
 
+  auto safeTile = [&](int tileX, int tileY) {
+    if (tileX < 0 || tileY < 0 || tileX >= mapWidth || tileY >= mapHeight) {
+      return false;
+    }
+    const int index = tileY * mapWidth + tileX;
+    return (!playable || playable[index] != 0) && storm[index] < 2;
+  };
+
+  auto distanceToSafe = [&](int tileX, int tileY, double worldX, double worldY) {
+    double nearest = 99.0;
+    for (int offsetY = -2; offsetY <= 2; ++offsetY) {
+      for (int offsetX = -2; offsetX <= 2; ++offsetX) {
+        const int candidateX = tileX + offsetX;
+        const int candidateY = tileY + offsetY;
+        if (!safeTile(candidateX, candidateY)) {
+          continue;
+        }
+
+        const double rectMinX = static_cast<double>(candidateX) * tileSize;
+        const double rectMinY = static_cast<double>(candidateY) * tileSize;
+        const double rectMaxX = rectMinX + tileSize;
+        const double rectMaxY = rectMinY + tileSize;
+        const double dx = std::max(std::max(rectMinX - worldX, worldX - rectMaxX), 0.0);
+        const double dy = std::max(std::max(rectMinY - worldY, worldY - rectMaxY), 0.0);
+        nearest = std::min(nearest, std::sqrt(dx * dx + dy * dy) / tileSize);
+      }
+    }
+    return nearest;
+  };
+
+  auto stormCodeAt = [&](int tileX, int tileY, double worldX, double worldY) {
+    const double stormValue = simplexNoise3D(
+      perm,
+      (worldX + timeSeconds * speedX) * scale,
+      (worldY + timeSeconds * speedY) * scale,
+      timeSeconds * speedZ
+    );
+    const double fade = clampDouble(distanceToSafe(tileX, tileY, worldX, worldY) * 0.5, 0.0, 1.0);
+    const double foregroundThreshold = threshold + (1.02 - threshold) * fade;
+    const double voidThreshold = fade;
+    const double normalizedStorm = stormValue * 0.5 + 0.5;
+    if (normalizedStorm < voidThreshold) {
+      return static_cast<uint8_t>(3);
+    }
+    return static_cast<uint8_t>(stormValue >= foregroundThreshold ? 2 : 1);
+  };
+
   for (int sy = minSourceY; sy < maxSourceY; ++sy) {
     if (maskRows && maskRowCount > 0) {
       const int row = sy - maskOffsetY;
@@ -2852,14 +2897,9 @@ BS_EXPORT int bs_render_storm_layer(
     }
 
     const double worldY = static_cast<double>(sy) + cameraY;
-    const int worldPixelY = floorInt(worldY);
     const int tileY = static_cast<int>(std::floor(worldY / tileSize));
-    const int localY = positiveModuloInt(worldPixelY, tilePixels);
-    int cachedTileX = std::numeric_limits<int>::min();
-    uint32_t cachedPatternRow = 0;
     StormProjectedPoint previousForeground{false, 0, 0};
     int previousForegroundTileX = std::numeric_limits<int>::min();
-    int previousForegroundLocalY = -1;
     int previousForegroundSourceX = std::numeric_limits<int>::min();
     for (int sx = minSourceX; sx < maxSourceX; ++sx) {
       if (!maskAllows(sx, sy)) {
@@ -2868,9 +2908,7 @@ BS_EXPORT int bs_render_storm_layer(
       }
 
       const double worldX = static_cast<double>(sx) + cameraX;
-      const int worldPixelX = floorInt(worldX);
       const int tileX = static_cast<int>(std::floor(worldX / tileSize));
-      const int localX = positiveModuloInt(worldPixelX, tilePixels);
       const bool outOfBounds = tileX < 0 || tileY < 0 || tileX >= mapWidth || tileY >= mapHeight;
       const int tileIndex = outOfBounds ? -1 : tileY * mapWidth + tileX;
       if (
@@ -2882,38 +2920,18 @@ BS_EXPORT int bs_render_storm_layer(
         continue;
       }
 
-      if (tileX != cachedTileX) {
-        cachedTileX = tileX;
-        cachedPatternRow = stormPatternRowCached(
-          perm,
-          permHash,
-          tileX,
-          tileY,
-          localY,
-          tilePixels,
-          frame,
-          fps,
-          threshold,
-          scale,
-          speedX,
-          speedY,
-          speedZ
-        );
-      }
-      const uint8_t code = (cachedPatternRow & (1U << static_cast<uint32_t>(localX))) != 0 ? 2 : 1;
+      const uint8_t code = stormCodeAt(tileX, tileY, std::floor(worldX), std::floor(worldY));
       StormProjectedPoint projected = projectAndWrite(sx, sy, code);
       if (code == 2 && projected.valid) {
         if (
           previousForeground.valid &&
           previousForegroundTileX == tileX &&
-          previousForegroundLocalY == localY &&
           previousForegroundSourceX + 1 == sx
         ) {
           writeProjectedBridge(previousForeground.x, previousForeground.y, projected.x, projected.y, code);
         }
         previousForeground = projected;
         previousForegroundTileX = tileX;
-        previousForegroundLocalY = localY;
         previousForegroundSourceX = sx;
       } else {
         previousForeground.valid = false;

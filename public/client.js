@@ -249,6 +249,10 @@ const state = {
     stormGpuReadMs: 0,
     stormGpuCalls: 0,
     stormGpuRequests: 0,
+    visibilityGpuMs: 0,
+    visibilityGpuReadMs: 0,
+    visibilityGpuCalls: 0,
+    visibilityGpuRequests: 0,
     stormGpuReady: false,
     panelLastUpdateMs: 0,
     panelLastText: "",
@@ -3818,6 +3822,10 @@ function setPerfDebug(enabled) {
   state.perfDebug.stormGpuReadMs = 0;
   state.perfDebug.stormGpuCalls = 0;
   state.perfDebug.stormGpuRequests = 0;
+  state.perfDebug.visibilityGpuMs = 0;
+  state.perfDebug.visibilityGpuReadMs = 0;
+  state.perfDebug.visibilityGpuCalls = 0;
+  state.perfDebug.visibilityGpuRequests = 0;
   state.perfDebug.stormGpuReady = false;
   state.perfDebug.panelLastUpdateMs = 0;
   state.perfDebug.panelLastText = "";
@@ -3926,6 +3934,14 @@ function updatePerfRenderMetrics(renderMs, renderPerf = null) {
   if (Number.isFinite(renderPerf?.stormGpuRequests)) {
     state.perfDebug.stormGpuRequests = renderPerf.stormGpuRequests;
   }
+  updatePerfMetric("visibilityGpuMs", renderPerf?.visibilityGpuMs, alpha);
+  updatePerfMetric("visibilityGpuReadMs", renderPerf?.visibilityGpuReadMs, alpha);
+  if (Number.isFinite(renderPerf?.visibilityGpuCalls)) {
+    state.perfDebug.visibilityGpuCalls = renderPerf.visibilityGpuCalls;
+  }
+  if (Number.isFinite(renderPerf?.visibilityGpuRequests)) {
+    state.perfDebug.visibilityGpuRequests = renderPerf.visibilityGpuRequests;
+  }
   state.perfDebug.stormGpuReady = Boolean(renderPerf?.stormGpuReady);
 }
 
@@ -3956,6 +3972,10 @@ function perfDebugRenderState() {
     stormGpuReadMs: state.perfDebug.stormGpuReadMs,
     stormGpuCalls: state.perfDebug.stormGpuCalls,
     stormGpuRequests: state.perfDebug.stormGpuRequests,
+    visibilityGpuMs: state.perfDebug.visibilityGpuMs,
+    visibilityGpuReadMs: state.perfDebug.visibilityGpuReadMs,
+    visibilityGpuCalls: state.perfDebug.visibilityGpuCalls,
+    visibilityGpuRequests: state.perfDebug.visibilityGpuRequests,
     stormGpuReady: state.perfDebug.stormGpuReady,
     core
   };
@@ -3999,6 +4019,8 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     `MINIMAP MS ${formatPerfNumber(perf.minimapMs, 2)}`,
     `STORM GPU  ${perf.stormGpuReady ? `${perf.stormGpuRequests || 0}->${perf.stormGpuCalls || 0}/${formatPerfNumber(perf.stormGpuMs, 3)}MS` : "OFF"}`,
     `GPU READ   ${formatPerfNumber(perf.stormGpuReadMs, 3)}MS`,
+    `VIS GPU    ${perf.stormGpuReady ? `${perf.visibilityGpuRequests || 0}->${perf.visibilityGpuCalls || 0}/${formatPerfNumber(perf.visibilityGpuMs, 3)}MS` : "OFF"}`,
+    `VIS READ   ${formatPerfNumber(perf.visibilityGpuReadMs, 3)}MS`,
     `CORE       ${core.ready ? "WASM" : "JS"}`,
     `VIS CALLS  ${core.visibilityNativeCalls || 0}/${core.visibilityCalls || 0}`,
     `VIS AVG    ${formatPerfNumber(core.visibilityAvgMs, 3)}MS`,
