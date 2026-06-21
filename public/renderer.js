@@ -3223,7 +3223,7 @@ function drawAsteroid(
   if (asteroid.storm) {
     drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
   } else {
-    drawAsteroidBoundary(ctx, asteroid, camera, colors);
+    drawAsteroidBoundary(ctx, asteroid, camera, colors, visibility);
   }
 }
 
@@ -3631,21 +3631,31 @@ function drawAsteroidVisibilityGhostMap(ctx, asteroid, camera, colors, timeSecon
 
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
-  const minTileX = Math.max(0, Math.floor((camera.x - padding) / tileSize) - 1);
+  const viewMinTileX = Math.floor((camera.x - padding) / tileSize) - 1;
+  const viewMaxTileX = Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1;
+  const viewMinTileY = Math.floor((camera.y - padding) / tileSize) - 1;
+  const viewMaxTileY = Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1;
+  const minTileX = Math.max(0, viewMinTileX);
   const maxTileX = Math.min(
     asteroid.widthTiles - 1,
-    Math.ceil((camera.x + ctx.width + padding) / tileSize) + 1
+    viewMaxTileX
   );
-  const minTileY = Math.max(0, Math.floor((camera.y - padding) / tileSize) - 1);
+  const minTileY = Math.max(0, viewMinTileY);
   const maxTileY = Math.min(
     asteroid.heightTiles - 1,
-    Math.ceil((camera.y + ctx.height + padding) / tileSize) + 1
+    viewMaxTileY
   );
 
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      const index = tileY * asteroid.widthTiles + tileX;
-      if (isSolidTile(asteroid.tiles[index]) || !isPlayableTile(asteroid, tileX, tileY)) {
+  for (let tileY = viewMinTileY; tileY <= viewMaxTileY; tileY += 1) {
+    for (let tileX = viewMinTileX; tileX <= viewMaxTileX; tileX += 1) {
+      if (
+        tileX >= 0 &&
+        tileY >= 0 &&
+        tileX < asteroid.widthTiles &&
+        tileY < asteroid.heightTiles &&
+        isPlayableTile(asteroid, tileX, tileY) &&
+        isSolidTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX])
+      ) {
         continue;
       }
 
@@ -4110,11 +4120,11 @@ function buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bound
 
 function asteroidVisibilityBlockerKind(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
-    return asteroid.storm ? null : "square";
+    return null;
   }
 
   if (!isPlayableTile(asteroid, tileX, tileY)) {
-    return asteroid.storm ? null : "square";
+    return null;
   }
 
   const tile = asteroid.tiles[tileY * asteroid.widthTiles + tileX];
@@ -4353,12 +4363,12 @@ function addAsteroidVisibilitySegment(segments, x0, y0, x1, y1, camera) {
 
 function asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
-    return !asteroid.storm;
+    return false;
   }
 
   const index = tileY * asteroid.widthTiles + tileX;
   if (!isPlayableTile(asteroid, tileX, tileY)) {
-    return !asteroid.storm;
+    return false;
   }
 
   return isSolidTile(asteroid.tiles[index]);
@@ -5659,8 +5669,7 @@ function stormBoundaryMaskOn(asteroid, worldX, worldY, timeSeconds) {
   return stormNoiseAt(asteroid, worldX, worldY, timeSeconds) >= STORM_BOUNDARY_NOISE_THRESHOLD;
 }
 
-function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
-  ctx.fillStyle = colors.foreground;
+function drawAsteroidBoundary(ctx, asteroid, camera, colors, visibility = null) {
   const lines = asteroidBoundaryLines(asteroid);
   const padding = cameraCullPadding(camera);
   const minX = camera.x - padding - 1;
@@ -5668,9 +5677,26 @@ function drawAsteroidBoundary(ctx, asteroid, camera, colors) {
   const minY = camera.y - padding - 1;
   const maxY = camera.y + ctx.height + padding + 1;
 
-  for (const line of lines) {
-    drawDashedAsteroidBoundaryLine(ctx, line, camera, minX, maxX, minY, maxY);
+  const draw = () => {
+    if (!visibility) {
+      ctx.fillStyle = colors.foreground;
+    }
+
+    for (const line of lines) {
+      if (visibility) {
+        drawDashedAsteroidBoundaryLineVisibilityAware(ctx, line, camera, minX, maxX, minY, maxY, colors, visibility);
+      } else {
+        drawDashedAsteroidBoundaryLine(ctx, line, camera, minX, maxX, minY, maxY);
+      }
+    }
+  };
+
+  if (visibility) {
+    drawWithoutWorldMask(ctx, draw);
+    return;
   }
+
+  draw();
 }
 
 function asteroidBoundaryLines(asteroid) {
@@ -5795,6 +5821,34 @@ function drawDashedAsteroidBoundaryLine(ctx, line, camera, minX, maxX, minY, max
         1,
         1
       );
+    }
+
+    distance += segment.length;
+  }
+}
+
+function drawDashedAsteroidBoundaryLineVisibilityAware(ctx, line, camera, minX, maxX, minY, maxY, colors, visibility) {
+  let distance = 0;
+  ctx.fillStyle = colors.foreground;
+
+  for (const segment of line) {
+    for (let offset = 0; offset < segment.length; offset += 1) {
+      if (positiveModulo(distance + offset, ASTEROID_DASH_PERIOD) >= ASTEROID_DASH_ON) {
+        continue;
+      }
+
+      const pixel = asteroidBoundarySegmentPixel(segment, offset);
+      if (pixel.x < minX || pixel.x > maxX || pixel.y < minY || pixel.y > maxY) {
+        continue;
+      }
+
+      const screenX = Math.round(pixel.x - camera.x);
+      const screenY = Math.round(pixel.y - camera.y);
+      if (!asteroidVisibilityScreenPointVisible(visibility, screenX, screenY)) {
+        continue;
+      }
+
+      ctx.fillRect(screenX, screenY, 1, 1);
     }
 
     distance += segment.length;
