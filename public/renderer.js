@@ -1087,7 +1087,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       );
       drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
       drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
-      drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
+      drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.playerMapFeatureEnabled);
     }
   }
   drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
@@ -1274,8 +1274,8 @@ function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
 
   const warningPosition = drawWaitingTerminalActions(
     ctx,
-    10,
-    8,
+    panel.x + 2,
+    panel.y + panel.height + 7,
     false,
     options,
     colors,
@@ -1323,8 +1323,8 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
   });
   const warningPosition = drawWaitingTerminalActions(
     ctx,
-    10,
-    8,
+    panel.x + 2,
+    panel.y + panel.height + 7,
     canStart,
     options,
     colors,
@@ -1426,7 +1426,7 @@ function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
     fontSize: 8,
     color: colors.foreground
   });
-  drawTerminalLeaveAction(ctx, 10, 8, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
 }
 
 function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
@@ -2814,7 +2814,7 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
     const countdownY = panel.y + endedHudCountdownY(rowCount);
     drawCenteredText(ctx, textRenderer, `LOBBY ${formatClock(resetSeconds)}`, panel.x + panel.width / 2, countdownY, textOptions);
   }
-  drawTerminalLeaveAction(ctx, 10, 8, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
 }
 
 function endedHudPanelHeight(rowCount, hasCountdown) {
@@ -5233,7 +5233,7 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
 function mainHudPanelRect(ctx, width, height) {
   return {
     x: 8,
-    y: ctx.height - height - 8,
+    y: 8,
     width,
     height
   };
@@ -5246,11 +5246,11 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
 
   if (!upgradesUi?.active) {
     if (controllerActive) {
-      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 8, colors, textRenderer);
+      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 74, colors, textRenderer);
       return;
     }
 
-    textRenderer.draw(ctx, "Q - UPGRADES", 10, 10, {
+    textRenderer.draw(ctx, "Q - UPGRADES", 10, 74, {
       fontSize: 8,
       color: colors.foreground
     });
@@ -5271,30 +5271,30 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
       "faceLeft",
       buildUi?.active ? "MINING RAY" : "BUILDER ARM",
       10,
-      26,
+      92,
       colors,
       textRenderer
     );
     return;
   }
 
-  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 24, {
+  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 88, {
     fontSize: 8,
     color: colors.foreground
   });
 }
 
-function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
-  if (!player || upgradesUi?.active) {
+function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mapFeatureEnabled = true) {
+  if (!mapFeatureEnabled || !player || upgradesUi?.active) {
     return;
   }
 
   if (controllerActive) {
-    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", 10, 44, colors, textRenderer);
+    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", 10, 110, colors, textRenderer);
     return;
   }
 
-  textRenderer.draw(ctx, "M - MAP", 10, 38, {
+  textRenderer.draw(ctx, "M - MAP", 10, 102, {
     fontSize: 8,
     color: colors.foreground
   });

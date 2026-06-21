@@ -102,6 +102,9 @@ const PLAYER_MAP_UNKNOWN = 255;
 const PLAYER_MAP_BACKGROUND = 0;
 const PLAYER_MAP_FOREGROUND = 2;
 const PLAYER_MAP_STORM = 3;
+const DEBUG_FEATURES = {
+  playerMap: false
+};
 const MENU_PLAYER_ID = "menu-player";
 const LOCAL_BOT_ROOM_ID = "local-bots";
 const LOCAL_BOT_PLAYER_ID = "local-player";
@@ -955,6 +958,7 @@ function draw(now = 0) {
 	    playerMap: playerMapVisible ? playerMap : null,
 	    playerMapLarge: playerMapVisible && state.playerMap.large,
 	    playerMapVisible,
+	    playerMapFeatureEnabled: playerMapFeatureEnabled(),
 	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
 	    botDebugOverlay,
 	    theme: state.theme,
@@ -3657,12 +3661,24 @@ function setBotDebugOverlay(enabled) {
   return state.botDebugOverlay;
 }
 
+function setPlayerMapFeatureEnabled(enabled) {
+  DEBUG_FEATURES.playerMap = Boolean(enabled);
+  if (!DEBUG_FEATURES.playerMap) {
+    state.playerMap.large = false;
+  }
+  console.log(`BITSPACE player map feature ${DEBUG_FEATURES.playerMap ? "on" : "off"}`);
+  return DEBUG_FEATURES.playerMap;
+}
+
 function installControlHandles() {
   const handles = window.controls && typeof window.controls === "object"
     ? window.controls
     : {};
   handles.debugBot = (enabled = null) => setBotDebugOverlay(
     typeof enabled === "boolean" ? enabled : !state.botDebugOverlay
+  );
+  handles.debugMap = (enabled = null) => setPlayerMapFeatureEnabled(
+    typeof enabled === "boolean" ? enabled : !DEBUG_FEATURES.playerMap
   );
   handles.profileBots = (seconds = 5) => {
     const durationSeconds = clamp(Number(seconds) || 5, 0.5, 60);
@@ -7035,10 +7051,15 @@ function playerMapChunkHasPlayableTile(asteroid, chunkX, chunkY) {
 }
 
 function playerMapAllowed() {
-  return state.room?.state === "active" &&
+  return playerMapFeatureEnabled() &&
+    state.room?.state === "active" &&
     !isReadyMenu() &&
     Boolean(state.asteroid) &&
     Boolean(state.playerMap.cells);
+}
+
+function playerMapFeatureEnabled() {
+  return DEBUG_FEATURES.playerMap === true;
 }
 
 function playerMapRenderState(snapshot, cameraPlayerId = state.playerId) {
