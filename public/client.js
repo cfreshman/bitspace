@@ -143,7 +143,7 @@ const THEME_PRESETS = Object.freeze([
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
-  y: 72,
+  y: 8,
   padding: 8,
   rowTopOffset: 20,
   rowHeight: 16,
@@ -5088,12 +5088,28 @@ function predictedMiningRayForPlayer(player, authoritativeRay = null) {
   const lanes = miningRayLanesForPlayer(player, angle, rayLength).map((baseLane) => {
     const lane = clipPredictedMiningRayLaneStart(player, baseLane, angle, asteroid);
     const activeDistance = lane.rayDistance * extension;
-    const activeHit = raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, activeDistance, {
+    const activeAsteroidHit = raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, activeDistance, {
       blockNonPlayable: !asteroid.storm
     });
-    const fullHit = raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, lane.rayDistance, {
+    const fullAsteroidHit = raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, lane.rayDistance, {
       blockNonPlayable: !asteroid.storm
     });
+    const start = { x: lane.startX, y: lane.startY };
+    const direction = { x: lane.rayDirectionX, y: lane.rayDirectionY };
+    const activePlayerHit = predictedMiningRayPlayerHit(
+      player,
+      start,
+      direction,
+      Math.min(activeAsteroidHit.distance, activeDistance)
+    );
+    const fullPlayerHit = predictedMiningRayPlayerHit(
+      player,
+      start,
+      direction,
+      Math.min(fullAsteroidHit.distance, lane.rayDistance)
+    );
+    const activeHit = activePlayerHit || activeAsteroidHit;
+    const fullHit = fullPlayerHit || fullAsteroidHit;
     const authoritativeLane = authoritativeMiningLaneFor(lane, authoritativeRay);
     return predictedMiningRayLaneState(lane, activeHit, fullHit, authoritativeLane);
   });
@@ -5145,6 +5161,8 @@ function authoritativeMiningLaneFor(lane, authoritativeRay) {
 }
 
 function predictedMiningRayLaneState(baseLane, activeHit, fullHit, authoritativeLane = null) {
+  const hitType = activeHit.hitType || (activeHit.hit ? "asteroid" : null);
+  const hitPlayer = hitType === "player";
   return {
     laneIndex: baseLane.index,
     offset: baseLane.offset,
@@ -5161,17 +5179,48 @@ function predictedMiningRayLaneState(baseLane, activeHit, fullHit, authoritative
     fullEndX: fullHit.x,
     fullEndY: fullHit.y,
     hit: activeHit.hit,
-    hitType: activeHit.hit ? "asteroid" : null,
-    mineable: activeHit.mineable,
-    tileX: activeHit.tileX ?? null,
-    tileY: activeHit.tileY ?? null,
-    index: activeHit.index ?? null,
-    tile: activeHit.tile ?? null,
-    targetId: null,
-    targetNumber: null,
+    hitType,
+    mineable: !hitPlayer && activeHit.mineable,
+    tileX: hitPlayer ? null : activeHit.tileX ?? null,
+    tileY: hitPlayer ? null : activeHit.tileY ?? null,
+    index: hitPlayer ? null : activeHit.index ?? null,
+    tile: hitPlayer ? null : activeHit.tile ?? null,
+    targetId: activeHit.targetId ?? null,
+    targetNumber: activeHit.targetNumber ?? null,
     targetAction: null,
     progress: authoritativeLane?.progress ?? 0
   };
+}
+
+function predictedMiningRayPlayerHit(attacker, start, direction, maxDistance) {
+  if (!Number.isFinite(maxDistance) || maxDistance <= 0 || !Array.isArray(state.snapshot?.players)) {
+    return null;
+  }
+
+  let nearest = null;
+  for (const target of state.snapshot.players) {
+    if (!target?.alive || target.id === attacker.id) {
+      continue;
+    }
+
+    const hit = rayCircleIntersection(start, direction, target, maxDistance);
+    if (!hit || (nearest && hit.distance >= nearest.distance)) {
+      continue;
+    }
+
+    nearest = {
+      hit: true,
+      mineable: false,
+      hitType: "player",
+      x: hit.x,
+      y: hit.y,
+      distance: hit.distance,
+      targetId: target.id,
+      targetNumber: target.number ?? null
+    };
+  }
+
+  return nearest;
 }
 
 function applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds) {

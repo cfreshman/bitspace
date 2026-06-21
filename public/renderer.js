@@ -102,7 +102,7 @@ const BOT_CHUNK_MAP_ACTIVE_SIZE = 3;
 const BOT_CHUNK_MAP_HEAT_SIZE = 2;
 const PLAYER_MAP_CELL_SIZE = 1;
 const PLAYER_MAP_COMPACT_SAMPLE_TILES = 2;
-const PLAYER_MAP_COMPACT_OUTER_STORM_BORDER = 2;
+const PLAYER_MAP_COMPACT_OUTER_STORM_BORDER = 4;
 const PLAYER_MAP_FALLBACK_SIZE = 128;
 const PLAYER_MAP_RENDER_SCALE = 3;
 const PLAYER_MAP_CSS_SCALE = 1;
@@ -183,7 +183,7 @@ class PixelDivider {
 
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
-  y: 72,
+  y: 8,
   padding: 8,
   titleTop: 8,
   rowTopOffset: 20,
@@ -386,7 +386,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
     const cssHeight = height * PLAYER_MAP_CSS_SCALE;
     return {
       left: Math.round(sceneRect.left + sceneRect.width - cssWidth),
-      top: Math.round(sceneRect.top + sceneRect.height - cssHeight),
+      top: Math.round(sceneRect.top),
       width: cssWidth,
       height: cssHeight
     };
@@ -1265,7 +1265,7 @@ function drawMenuOverlay(ctx, options, colors, textRenderer) {
 }
 
 function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
-  const panel = { x: 8, y: 8, width: 132, height: 26 };
+  const panel = { x: UPGRADE_MENU_LAYOUT.x, y: UPGRADE_MENU_LAYOUT.y, width: 132, height: 26 };
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   drawCenteredText(ctx, textRenderer, "THEME", panel.x + panel.width / 2, panel.y + 8, {
     fontSize: 8,
@@ -1274,8 +1274,8 @@ function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
 
   const warningPosition = drawWaitingTerminalActions(
     ctx,
-    panel.x + 2,
-    panel.y + panel.height + 7,
+    10,
+    8,
     false,
     options,
     colors,
@@ -1306,7 +1306,7 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer) {
 }
 
 function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer) {
-  const panel = { x: 8, y: 8, width: 132, height: 34 };
+  const panel = mainHudPanelRect(ctx, 132, 34);
   const canStart = waitingRoomCanStart(room);
   const lobbyLabel = room.roomName
     ? `${String(room.roomName).toUpperCase()} ${count}/${maxPlayers}`
@@ -1323,8 +1323,8 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
   });
   const warningPosition = drawWaitingTerminalActions(
     ctx,
-    panel.x + 2,
-    panel.y + panel.height + 7,
+    10,
+    8,
     canStart,
     options,
     colors,
@@ -1418,7 +1418,7 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
 }
 
 function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
-  const panel = { x: 8, y: 8, width: 132, height: 26 };
+  const panel = mainHudPanelRect(ctx, 132, 26);
   const title = localPlayer ? "ELIMINATED" : "SPECTATING";
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
@@ -1426,7 +1426,7 @@ function drawSpectatorHud(ctx, options, localPlayer, colors, textRenderer) {
     fontSize: 8,
     color: colors.foreground
   });
-  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, 10, 8, options, colors, textRenderer);
 }
 
 function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
@@ -1434,7 +1434,7 @@ function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
     return;
   }
 
-  const panel = { x: 8, y: 8, width: 132, height: 26 };
+  const panel = { x: UPGRADE_MENU_LAYOUT.x, y: UPGRADE_MENU_LAYOUT.y, width: 132, height: 26 };
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   drawCenteredText(ctx, textRenderer, "CONFIRM LEAVE?", panel.x + panel.width / 2, panel.y + 5, {
     fontSize: 8,
@@ -2069,22 +2069,21 @@ function playerMapCompactOuterStormBorderCell(mapState, asteroid, chunkX, chunkY
   const step = Math.max(1, sampleTiles | 0);
   const radius = Math.max(1, borderPixels | 0);
 
-  for (const firstDirection of PLAYER_MAP_CARDINAL_OFFSETS) {
-    const firstX = chunkX + firstDirection.x * step;
-    const firstY = chunkY + firstDirection.y * step;
-    const firstState = playerMapCompactStormState(mapState, asteroid, firstX, firstY, stormMode, step);
-    if (firstState === "band") {
-      return true;
-    }
+  for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+    const remainingX = radius - Math.abs(offsetY);
+    for (let offsetX = -remainingX; offsetX <= remainingX; offsetX += 1) {
+      if (offsetX === 0 && offsetY === 0) {
+        continue;
+      }
 
-    if (radius < 2 || firstState !== "hidden") {
-      continue;
-    }
-
-    for (const secondDirection of PLAYER_MAP_CARDINAL_OFFSETS) {
-      const secondX = firstX + secondDirection.x * step;
-      const secondY = firstY + secondDirection.y * step;
-      if (playerMapCompactStormState(mapState, asteroid, secondX, secondY, stormMode, step) === "band") {
+      if (playerMapCompactStormState(
+        mapState,
+        asteroid,
+        chunkX + offsetX * step,
+        chunkY + offsetY * step,
+        stormMode,
+        step
+      ) === "band") {
         return true;
       }
     }
@@ -2121,7 +2120,7 @@ function playerMapChunkVisibleSample(mapState, cellIndex) {
 
 function playerMapValueColor(value, mapState, colors, dimmed = false, x = 0, y = 0, seen = true, compactMap = false) {
   if (compactMap) {
-    return seen && value !== mapState.unknown ? colors.foreground : colors.background;
+    return seen && value !== mapState.unknown ? colors.foreground : colors.backing || "#000000";
   }
 
   if (value === mapState.unknown) {
@@ -2175,7 +2174,7 @@ function playerMapStormPixelColor(
 
 function drawPlayerMapCell(ctx, x, y, size, value, mapState, colors, dimmed = false, seen = true, compactMap = false) {
   if (compactMap && value !== mapState.storm) {
-    ctx.fillStyle = seen && value !== mapState.unknown ? colors.foreground : colors.background;
+    ctx.fillStyle = seen && value !== mapState.unknown ? colors.foreground : colors.backing || "#000000";
     ctx.fillRect(x, y, size, size);
     return;
   }
@@ -2768,12 +2767,11 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
   const resetSeconds = Number.isFinite(room.resetToLobbyAtMs)
     ? Math.max(0, Math.ceil((room.resetToLobbyAtMs - Date.now()) / 1000))
     : null;
-  const panel = {
-    x: ENDED_HUD_LAYOUT.x,
-    y: ENDED_HUD_LAYOUT.y,
-    width: ENDED_HUD_LAYOUT.width,
-    height: endedHudPanelHeight(rowCount, resetSeconds !== null)
-  };
+  const panel = mainHudPanelRect(
+    ctx,
+    ENDED_HUD_LAYOUT.width,
+    endedHudPanelHeight(rowCount, resetSeconds !== null)
+  );
   const textOptions = {
     fontSize: 8,
     color: colors.foreground
@@ -2816,7 +2814,7 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
     const countdownY = panel.y + endedHudCountdownY(rowCount);
     drawCenteredText(ctx, textRenderer, `LOBBY ${formatClock(resetSeconds)}`, panel.x + panel.width / 2, countdownY, textOptions);
   }
-  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + 7, options, colors, textRenderer);
+  drawTerminalLeaveAction(ctx, 10, 8, options, colors, textRenderer);
 }
 
 function endedHudPanelHeight(rowCount, hasCountdown) {
@@ -2948,7 +2946,7 @@ function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds 
     const panelWidth = Math.min(ctx.width - 16, textWidth + 10);
     const panelHeight = 15;
     const x = ctx.width - panelWidth - 8;
-    const y = 8 + index * (panelHeight + 3);
+    const y = ctx.height - 8 - panelHeight - index * (panelHeight + 3);
 
     drawPanel(ctx, x, y, panelWidth, panelHeight, colors);
     textRenderer.draw(ctx, notice.text, x + 5, y + 4, {
@@ -5181,10 +5179,11 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     return;
   }
 
-  const x = 8;
-  const y = 8;
   const width = 112;
   const height = 58;
+  const panel = mainHudPanelRect(ctx, width, height);
+  const x = panel.x;
+  const y = panel.y;
   const padding = 4;
   const contentX = x + padding;
   const contentRight = x + width - padding;
@@ -5231,6 +5230,15 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   drawHudKillRow(ctx, player.kills || 0, playersLeft, contentX, contentRight, rowY + rowStep * 3, textRenderer, colors);
 }
 
+function mainHudPanelRect(ctx, width, height) {
+  return {
+    x: 8,
+    y: ctx.height - height - 8,
+    width,
+    height
+  };
+}
+
 function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
   if (!player) {
     return;
@@ -5238,11 +5246,11 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
 
   if (!upgradesUi?.active) {
     if (controllerActive) {
-      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 74, colors, textRenderer);
+      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 8, colors, textRenderer);
       return;
     }
 
-    textRenderer.draw(ctx, "Q - UPGRADES", 10, 74, {
+    textRenderer.draw(ctx, "Q - UPGRADES", 10, 10, {
       fontSize: 8,
       color: colors.foreground
     });
@@ -5263,14 +5271,14 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
       "faceLeft",
       buildUi?.active ? "MINING RAY" : "BUILDER ARM",
       10,
-      92,
+      26,
       colors,
       textRenderer
     );
     return;
   }
 
-  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 88, {
+  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 24, {
     fontSize: 8,
     color: colors.foreground
   });
@@ -5282,11 +5290,11 @@ function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerAct
   }
 
   if (controllerActive) {
-    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", 10, 110, colors, textRenderer);
+    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", 10, 44, colors, textRenderer);
     return;
   }
 
-  textRenderer.draw(ctx, "M - MAP", 10, 102, {
+  textRenderer.draw(ctx, "M - MAP", 10, 38, {
     fontSize: 8,
     color: colors.foreground
   });
