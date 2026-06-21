@@ -68,6 +68,7 @@ const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
 const PERF_DEBUG_STORAGE_KEY = "bitspace.debugPerf";
 const PLAYER_MAP_STORAGE_KEY = "bitspace.playerMap";
+const SPECTATOR_TARGET_STORAGE_KEY = "bitspace.spectatorTarget";
 const PLAYER_MAP_STORAGE_VERSION = 2;
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
@@ -174,7 +175,9 @@ const TERMINAL_LEAVE_ACTION = Object.freeze({
 });
 const canvas = document.querySelector("#scene");
 const minimapCanvas = document.querySelector("#minimap");
+const perfDebugRoot = document.querySelector("#perf-debug");
 const perfDebugPanel = document.querySelector("#perf-debug-panel");
+const perfDebugCopy = document.querySelector("#perf-debug-copy");
 const renderer = createRenderer(canvas, minimapCanvas);
 const gamepadControls = createGamepadControls();
 const talkInput = createTalkInput();
@@ -183,6 +186,7 @@ const cssDefaultTheme = readThemeSource() || {
   foreground: RENDER.foreground,
   background: RENDER.background
 };
+let perfDebugCopyResetTimer = null;
 const keys = new Set();
 const releasedKeysUntilKeyup = new Set();
 const storedClientId = getClientId();
@@ -254,6 +258,9 @@ const state = {
     visibilityGpuCalls: 0,
     visibilityGpuRequests: 0,
     stormGpuReady: false,
+    frameGpuReady: false,
+    frameStormReady: false,
+    buckets: {},
     panelLastUpdateMs: 0,
     panelLastText: "",
     panelLastColor: ""
@@ -327,6 +334,7 @@ const state = {
 
 setBotDebugEnabled(state.botDebugOverlay);
 installControlHandles();
+installPerfDebugCopyButton();
 
 const mapGenMode = isMapGenMode();
 if (!mapGenMode) {
@@ -413,7 +421,7 @@ function applyServerRoom(room) {
     releaseSpaceUntilKeyup();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
-    state.spectatorTargetId = null;
+    setSpectatorTarget(null);
   }
 
   if (!room || room.state === "menu") {
@@ -428,7 +436,7 @@ function applyServerRoom(room) {
     resetEntitySmoothing();
     state.eliminationNotices = [];
     state.playerAliveById.clear();
-    state.spectatorTargetId = null;
+    setSpectatorTarget(null);
     state.lastActiveMatchKey = null;
     state.upgrades.active = false;
     closeBuildMode();
@@ -2807,7 +2815,7 @@ function startLocalBotGame() {
   clearPredictedHuckRocks();
   state.eliminationNotices = [];
   state.playerAliveById.clear();
-  state.spectatorTargetId = null;
+  setSpectatorTarget(null);
   setClientAsteroid(snapshotAsteroid(arena));
   syncLocalArenaSnapshot(performance.now() / 1000);
 }
@@ -2834,7 +2842,7 @@ function leaveLocalBotGame() {
   resetEntitySmoothing();
   state.eliminationNotices = [];
   state.playerAliveById.clear();
-  state.spectatorTargetId = null;
+  setSpectatorTarget(null);
   state.lastActiveMatchKey = null;
   resetControlStateForNewMatch();
   resetLocalDamageAudioState();
@@ -3827,6 +3835,9 @@ function setPerfDebug(enabled) {
   state.perfDebug.visibilityGpuCalls = 0;
   state.perfDebug.visibilityGpuRequests = 0;
   state.perfDebug.stormGpuReady = false;
+  state.perfDebug.frameGpuReady = false;
+  state.perfDebug.frameStormReady = false;
+  state.perfDebug.buckets = {};
   state.perfDebug.panelLastUpdateMs = 0;
   state.perfDebug.panelLastText = "";
   updatePerfDebugPanel(performance.now(), true);
@@ -3943,6 +3954,9 @@ function updatePerfRenderMetrics(renderMs, renderPerf = null) {
     state.perfDebug.visibilityGpuRequests = renderPerf.visibilityGpuRequests;
   }
   state.perfDebug.stormGpuReady = Boolean(renderPerf?.stormGpuReady);
+  state.perfDebug.frameGpuReady = Boolean(renderPerf?.frameGpuReady);
+  state.perfDebug.frameStormReady = Boolean(renderPerf?.frameStormReady);
+  updatePerfBuckets(renderPerf?.buckets, alpha);
 }
 
 function updatePerfUpdateMetrics(updateMs) {
@@ -3956,6 +3970,23 @@ function updatePerfMetric(key, value, alpha) {
   state.perfDebug[key] = state.perfDebug[key]
     ? state.perfDebug[key] * (1 - alpha) + value * alpha
     : value;
+}
+
+function updatePerfBuckets(buckets, alpha) {
+  if (!buckets || typeof buckets !== "object") {
+    return;
+  }
+
+  const next = { ...state.perfDebug.buckets };
+  for (const [key, value] of Object.entries(buckets)) {
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+    next[key] = next[key]
+      ? next[key] * (1 - alpha) + value * alpha
+      : value;
+  }
+  state.perfDebug.buckets = next;
 }
 
 function perfDebugRenderState() {
@@ -3977,6 +4008,9 @@ function perfDebugRenderState() {
     visibilityGpuCalls: state.perfDebug.visibilityGpuCalls,
     visibilityGpuRequests: state.perfDebug.visibilityGpuRequests,
     stormGpuReady: state.perfDebug.stormGpuReady,
+    frameGpuReady: state.perfDebug.frameGpuReady,
+    frameStormReady: state.perfDebug.frameStormReady,
+    buckets: state.perfDebug.buckets,
     core
   };
 }
@@ -3986,7 +4020,11 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     return;
   }
   if (!state.perfDebug.enabled) {
-    perfDebugPanel.hidden = true;
+    if (perfDebugRoot) {
+      perfDebugRoot.hidden = true;
+    } else {
+      perfDebugPanel.hidden = true;
+    }
     state.perfDebug.panelLastText = "";
     return;
   }
@@ -4000,13 +4038,22 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
 
   const perf = perfDebugRenderState();
   const core = perf.core || {};
+  const buckets = perf.buckets || {};
   state.perfDebug.panelLastUpdateMs = nowMs;
-  perfDebugPanel.hidden = false;
+  if (perfDebugRoot) {
+    perfDebugRoot.hidden = false;
+  } else {
+    perfDebugPanel.hidden = false;
+  }
   const color = state.theme.foreground || RENDER.foreground;
   if (state.perfDebug.panelLastColor !== color) {
     state.perfDebug.panelLastColor = color;
-    perfDebugPanel.style.color = color;
-    perfDebugPanel.style.borderColor = color;
+    if (perfDebugRoot) {
+      perfDebugRoot.style.color = color;
+    } else {
+      perfDebugPanel.style.color = color;
+      perfDebugPanel.style.borderColor = color;
+    }
   }
   const text = [
     "BITSPACE PERF",
@@ -4016,11 +4063,24 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     `RENDER MS  ${formatPerfNumber(perf.renderMs, 2)}`,
     `DRAW MS    ${formatPerfNumber(perf.drawMs, 2)}`,
     `PRESENT MS ${formatPerfNumber(perf.presentMs, 2)}`,
+    `FRAME GPU  ${perf.frameGpuReady ? "ON" : "OFF"}`,
+    `FRAME STORM ${perf.frameStormReady ? "ON" : "OFF"}`,
     `MINIMAP MS ${formatPerfNumber(perf.minimapMs, 2)}`,
     `STORM GPU  ${perf.stormGpuReady ? `${perf.stormGpuRequests || 0}->${perf.stormGpuCalls || 0}/${formatPerfNumber(perf.stormGpuMs, 3)}MS` : "OFF"}`,
     `GPU READ   ${formatPerfNumber(perf.stormGpuReadMs, 3)}MS`,
     `VIS GPU    ${perf.stormGpuReady ? `${perf.visibilityGpuRequests || 0}->${perf.visibilityGpuCalls || 0}/${formatPerfNumber(perf.visibilityGpuMs, 3)}MS` : "OFF"}`,
     `VIS READ   ${formatPerfNumber(perf.visibilityGpuReadMs, 3)}MS`,
+    `R VIS      ${formatPerfNumber(buckets.visibilityMs, 2)}`,
+    `R GHOST    ${formatPerfNumber(buckets.ghostMs, 2)}`,
+    `R BG       ${formatPerfNumber(buckets.backgroundMs, 2)}`,
+    `R STARS    ${formatPerfNumber(buckets.starsMs, 2)}`,
+    `R AST      ${formatPerfNumber(buckets.asteroidMs, 2)}`,
+    `R ENT      ${formatPerfNumber(buckets.entitiesMs, 2)}`,
+    `R EMIT     ${formatPerfNumber(buckets.particleEmitMs, 2)}`,
+    `R PART     ${formatPerfNumber(buckets.particlesMs, 2)}`,
+    `R RAYS     ${formatPerfNumber(buckets.raysMs, 2)}`,
+    `R SHIPS    ${formatPerfNumber(buckets.shipsMs, 2)}`,
+    `R HUD      ${formatPerfNumber(buckets.hudMs, 2)}`,
     `CORE       ${core.ready ? "WASM" : "JS"}`,
     `VIS CALLS  ${core.visibilityNativeCalls || 0}/${core.visibilityCalls || 0}`,
     `VIS AVG    ${formatPerfNumber(core.visibilityAvgMs, 3)}MS`,
@@ -4038,6 +4098,57 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     state.perfDebug.panelLastText = text;
     perfDebugPanel.textContent = text;
   }
+}
+
+function installPerfDebugCopyButton() {
+  if (!perfDebugCopy) {
+    return;
+  }
+
+  perfDebugCopy.addEventListener("click", async () => {
+    const text = state.perfDebug.panelLastText || perfDebugPanel?.textContent || "";
+    if (!text) {
+      return;
+    }
+
+    const copied = await copyTextToClipboard(text);
+    perfDebugCopy.textContent = copied ? "COPIED" : "FAILED";
+    perfDebugCopy.blur();
+    if (perfDebugCopyResetTimer) {
+      window.clearTimeout(perfDebugCopyResetTimer);
+    }
+    perfDebugCopyResetTimer = window.setTimeout(() => {
+      perfDebugCopy.textContent = "COPY";
+      perfDebugCopyResetTimer = null;
+    }, 900);
+  });
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (error) {
+      // Fall through to the textarea path for browsers that block clipboard writes.
+    }
+  }
+
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.left = "-1000px";
+  input.style.top = "-1000px";
+  document.body.append(input);
+  input.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    input.remove();
+  }
+  return copied;
 }
 
 function formatPerfNumber(value, digits = 1) {
@@ -6985,6 +7096,54 @@ function forgetRegisteredRoom() {
   window.localStorage.removeItem(LEGACY_REGISTERED_ROOM_STORAGE_KEY);
 }
 
+function spectatorTargetRoomId() {
+  return state.room?.roomId ||
+    state.lastRoomId ||
+    (state.localGame.active ? LOCAL_BOT_ROOM_ID : "") ||
+    storedRoomId();
+}
+
+function loadSpectatorTargetMap() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(SPECTATOR_TARGET_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    window.localStorage.removeItem(SPECTATOR_TARGET_STORAGE_KEY);
+    return {};
+  }
+}
+
+function storedSpectatorTargetId(roomId = spectatorTargetRoomId()) {
+  if (!roomId) {
+    return null;
+  }
+
+  const target = loadSpectatorTargetMap()[roomId];
+  return typeof target === "string" && target.length > 0 ? target : null;
+}
+
+function rememberSpectatorTarget(targetId, roomId = spectatorTargetRoomId()) {
+  if (!roomId) {
+    return;
+  }
+
+  const targets = loadSpectatorTargetMap();
+  if (targetId) {
+    targets[roomId] = String(targetId);
+  } else {
+    delete targets[roomId];
+  }
+  window.localStorage.setItem(SPECTATOR_TARGET_STORAGE_KEY, JSON.stringify(targets));
+}
+
+function setSpectatorTarget(targetId, options = {}) {
+  state.spectatorTargetId = targetId || null;
+  if (options.persist) {
+    rememberSpectatorTarget(state.spectatorTargetId);
+  }
+  return state.spectatorTargetId;
+}
+
 function activeRoomButtons() {
   if (canLeaveWithControllerReset()) {
     return { terminalLeave: terminalLeaveActionRect() };
@@ -7427,6 +7586,11 @@ function cameraPlayerIdForRoom() {
   }
 
   if (!player && (room?.state === "waiting" || room?.state === "active")) {
+    const restored = restoredAliveSpectatorTargetId();
+    if (restored) {
+      return restored;
+    }
+
     return randomAliveSpectatorTargetId({
       id: state.playerId || state.clientId || "spectator",
       eliminatedAtTick: state.snapshot?.tick ?? 0
@@ -7434,7 +7598,7 @@ function cameraPlayerIdForRoom() {
   }
 
   if (!player || player.alive) {
-    state.spectatorTargetId = null;
+    setSpectatorTarget(null);
     return state.playerId;
   }
 
@@ -7442,13 +7606,17 @@ function cameraPlayerIdForRoom() {
     return state.spectatorTargetId;
   }
 
+  const restored = restoredAliveSpectatorTargetId();
+  if (restored) {
+    return restored;
+  }
+
   if (player.killedById) {
     const killer = state.snapshot?.players.find((candidate) => (
       candidate.id === player.killedById && candidate.alive === true
     ));
     if (killer) {
-      state.spectatorTargetId = killer.id;
-      return killer.id;
+      return setSpectatorTarget(killer.id, { persist: true });
     }
   }
 
@@ -7475,7 +7643,7 @@ function cycleSpectatorTarget(direction) {
   const startIndex = currentIndex >= 0 ? currentIndex : 0;
   const offset = direction >= 0 ? 1 : -1;
   const nextIndex = (startIndex + offset + players.length) % players.length;
-  state.spectatorTargetId = players[nextIndex].id;
+  setSpectatorTarget(players[nextIndex].id, { persist: true });
   return true;
 }
 
@@ -7492,7 +7660,7 @@ function aliveSpectatorPlayers() {
 function randomAliveSpectatorTargetId(eliminatedPlayer) {
   const alivePlayers = aliveSpectatorPlayers();
   if (alivePlayers.length <= 0) {
-    state.spectatorTargetId = null;
+    setSpectatorTarget(null, { persist: true });
     return null;
   }
 
@@ -7503,8 +7671,30 @@ function randomAliveSpectatorTargetId(eliminatedPlayer) {
   const random = createSeededRandom(
     `${eliminatedPlayer.id}:${eliminatedPlayer.eliminatedAtTick ?? state.snapshot?.tick ?? 0}:spectator`
   );
-  state.spectatorTargetId = alivePlayers[Math.floor(random() * alivePlayers.length)]?.id || alivePlayers[0].id;
-  return state.spectatorTargetId;
+  return setSpectatorTarget(
+    alivePlayers[Math.floor(random() * alivePlayers.length)]?.id || alivePlayers[0].id,
+    { persist: true }
+  );
+}
+
+function restoredAliveSpectatorTargetId() {
+  const alivePlayers = aliveSpectatorPlayers();
+  if (alivePlayers.length <= 0) {
+    return null;
+  }
+
+  const storedTargetId = storedSpectatorTargetId();
+  if (!storedTargetId) {
+    return null;
+  }
+
+  const target = alivePlayers.find((candidate) => candidate.id === storedTargetId);
+  if (!target) {
+    return null;
+  }
+
+  setSpectatorTarget(target.id);
+  return target.id;
 }
 
 function firstSnapshotPlayerId() {

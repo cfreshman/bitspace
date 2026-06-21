@@ -10,6 +10,7 @@ body {
 }
 
 #scene,
+#scene-present,
 #minimap {
   position: fixed;
   inset: var(--scene-edge-padding) auto auto var(--scene-edge-padding);
@@ -24,6 +25,11 @@ body {
   touch-action: none;
 }
 
+#scene-present {
+  background: #000000;
+  pointer-events: none;
+}
+
 #minimap {
   background: transparent;
   box-sizing: content-box;
@@ -33,22 +39,45 @@ body {
   z-index: 1;
 }
 
-.perf-debug-panel {
+.perf-debug {
   position: fixed;
   right: 12px;
   bottom: 12px;
   z-index: 10;
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  color: #74acef;
+}
+
+.perf-debug-copy {
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid currentColor;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.86);
+  font: 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.perf-debug-copy:active {
+  background: currentColor;
+  color: #000000;
+}
+
+.perf-debug-panel {
   min-width: 190px;
   box-sizing: border-box;
   margin: 0;
   padding: 8px 10px;
-  border: 1px solid #74acef;
-  color: #74acef;
+  border: 1px solid currentColor;
+  color: inherit;
   background: rgba(0, 0, 0, 0.86);
   font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   letter-spacing: 0;
   white-space: pre;
-  pointer-events: none;
 }
 
 .talk-input {
@@ -66,6 +95,7 @@ body.mapgen-active {
 }
 
 body.mapgen-active #scene,
+body.mapgen-active #scene-present,
 body.mapgen-active #minimap {
   display: none;
 }
@@ -73,6 +103,7 @@ body.mapgen-active #minimap {
 html.controller-pointer-hidden,
 html.controller-pointer-hidden body,
 html.controller-pointer-hidden #scene,
+html.controller-pointer-hidden #scene-present,
 html.controller-pointer-hidden #minimap {
   cursor: none;
 }
