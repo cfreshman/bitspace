@@ -96,6 +96,7 @@ const SHIP_SPHERE_DITHER = Object.freeze([
   15, 7, 13, 5
 ]);
 const SHIP_SPHERE_LIGHT = Object.freeze(normalize3d(-0.42, -0.58, 0.7));
+const SHIP_VISUAL_ROTATION_SPEED = Math.PI * 4;
 const THRUSTER_PARTICLE_RATE = 500;
 const THRUSTER_ENGINE_UPGRADE_ID = "speed";
 const THRUSTER_ENGINE_MAX_LEVEL =
@@ -108,7 +109,7 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   lifeMin: 1,
   lifeMax: 1,
   nozzleMin: 0.5,
-  nozzleMax: 0.5,
+  nozzleMax: 0.67,
 });
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
@@ -348,6 +349,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   let minimapSizeKey = "";
   let gpuStormRenderer = null;
   let framePresenter = null;
+  const visualShipAngles = new Map();
 
   function sizeCanvasBox() {
     const viewport = getViewportSize();
@@ -534,6 +536,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         ...options,
         timeSeconds,
         dtSeconds,
+        visualShipAngles,
         gpuStormRenderer,
         gpuFrameStormReady: framePresenter?.supportsStorm === true,
         gpuFrameCheckerReady: framePresenter?.supportsChecker === true
@@ -3410,6 +3413,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
       return extrapolateRemotePlayer(player, snapshot, options.timeSeconds);
     });
+    renderPlayers = applyVisualShipAngles(renderPlayers, options.visualShipAngles, options.dtSeconds);
     camera = cameraForSnapshot(
       snapshot,
       options.cameraPlayerId || options.playerId,
@@ -6097,6 +6101,79 @@ function extrapolateRemotePlayer(player, snapshot, timeSeconds) {
     vy: motion.vy,
     miningRay: offsetMiningRay(player.miningRay, dx, dy)
   };
+}
+
+function applyVisualShipAngles(players, visualAngles, dtSeconds) {
+  if (!(visualAngles instanceof Map) || !Array.isArray(players)) {
+    return players;
+  }
+
+  const visibleKeys = new Set();
+  const maxDelta = SHIP_VISUAL_ROTATION_SPEED * clamp(dtSeconds || 1 / 60, 0, 1 / 15);
+  const result = players.map((player) => {
+    const key = visualShipAngleKey(player);
+    const target = shipControlAngle(player);
+    if (!key || !Number.isFinite(target)) {
+      return player;
+    }
+
+    visibleKeys.add(key);
+    const previous = visualAngles.has(key)
+      ? visualAngles.get(key)
+      : target;
+    const visualAngle = rotateAngleToward(previous, target, maxDelta);
+    visualAngles.set(key, visualAngle);
+    return {
+      ...player,
+      visualAngle
+    };
+  });
+
+  for (const key of visualAngles.keys()) {
+    if (!visibleKeys.has(key)) {
+      visualAngles.delete(key);
+    }
+  }
+
+  return result;
+}
+
+function visualShipAngleKey(player) {
+  if (!player) {
+    return null;
+  }
+
+  return player.id || (Number.isFinite(player.number) ? `ship-${player.number}` : null);
+}
+
+function shipVisualAngle(player) {
+  return Number.isFinite(player?.visualAngle)
+    ? player.visualAngle
+    : shipControlAngle(player);
+}
+
+function shipControlAngle(player) {
+  return Number.isFinite(player?.angle)
+    ? player.angle
+    : Number.isFinite(player?.aimAngle) ? player.aimAngle : 0;
+}
+
+function rotateAngleToward(current, target, maxDelta) {
+  const delta = normalizeSignedAngle(target - current);
+  if (Math.abs(delta) <= maxDelta) {
+    return normalizeAngle(target);
+  }
+
+  return normalizeAngle(current + Math.sign(delta) * maxDelta);
+}
+
+function normalizeSignedAngle(angle) {
+  const normalized = normalizeAngle(angle);
+  return normalized > Math.PI ? normalized - Math.PI * 2 : normalized;
+}
+
+function normalizeAngle(angle) {
+  return positiveModulo(angle, Math.PI * 2);
 }
 
 function remotePlayerProjectedMotion(player, seconds) {
@@ -9449,14 +9526,15 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   const mainRadius = shipMainRadius(player);
   const geometryScale = shipGeometryScaleForRadius(mainRadius);
   const smallOrbRadius = shipSmallOrbRadius(geometryScale);
-  const rearAngle = player.angle + Math.PI;
+  const bodyAngle = shipVisualAngle(player);
+  const rearAngle = bodyAngle + Math.PI;
   const rear = {
     x: Math.cos(rearAngle),
     y: Math.sin(rearAngle)
   };
   const side = {
-    x: Math.cos(player.angle + Math.PI / 2),
-    y: Math.sin(player.angle + Math.PI / 2)
+    x: Math.cos(bodyAngle + Math.PI / 2),
+    y: Math.sin(bodyAngle + Math.PI / 2)
   };
   const mainOccluder = {
     x,
@@ -9470,7 +9548,7 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
     drawTruncatedRearSphere(ctx, orbX, orbY, smallOrbRadius, rear, colors, [mainOccluder]);
   }
 
-  drawSphere(ctx, x, y, mainRadius, player.angle, colors);
+  drawSphere(ctx, x, y, mainRadius, bodyAngle, colors);
 
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "front")) {
     const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
@@ -10348,13 +10426,19 @@ function emitThrusterParticles(state, player, dtSeconds) {
   const key = player.id || String(player.number);
   const particleMultiplier = effects.thrusterParticleMultiplier;
   const engineRamp = thrusterEngineRamp(player);
+  const turnIntensity = Number.isFinite(basis.intensity)
+    ? clamp(basis.intensity, 0, 1)
+    : 1;
+  if (turnIntensity <= 0.0001) {
+    return;
+  }
 
   for (let originIndex = 0; originIndex < origins.length; originIndex += 1) {
     const origin = origins[originIndex];
     const originKey = `${key}:thruster:${originIndex}`;
     const carry =
       (state.emitCarry.get(originKey) || 0) +
-      (THRUSTER_PARTICLE_RATE * particleMultiplier * engineRamp.rate * dtSeconds) / origins.length;
+      (THRUSTER_PARTICLE_RATE * particleMultiplier * engineRamp.rate * turnIntensity * dtSeconds) / origins.length;
     const count = Math.floor(carry);
     state.emitCarry.set(originKey, carry - count);
 
@@ -10422,10 +10506,16 @@ function thrusterParticleBasis(player) {
     return null;
   }
 
+  const visualAngle = shipVisualAngle(player);
   const forward = {
+    x: Math.cos(visualAngle),
+    y: Math.sin(visualAngle)
+  };
+  const intended = {
     x: moveX / moveMagnitude,
     y: moveY / moveMagnitude
   };
+  const intensity = clamp(forward.x * intended.x + forward.y * intended.y, 0, 1);
   return {
     rear: {
       x: -forward.x,
@@ -10434,7 +10524,8 @@ function thrusterParticleBasis(player) {
     side: {
       x: -forward.y,
       y: forward.x
-    }
+    },
+    intensity
   };
 }
 

@@ -7806,16 +7806,16 @@ function audioFocusPlayerIdForSnapshot(snapshot) {
     return state.room.winnerId;
   }
 
-  const spectator = players.find((candidate) => candidate.id === state.spectatorTargetId && candidate.alive === true);
-  if (spectator) {
-    return spectator.id;
-  }
-
   const killer = local?.killedById
     ? players.find((candidate) => candidate.id === local.killedById && candidate.alive === true)
     : null;
   if (killer) {
     return killer.id;
+  }
+
+  const spectator = players.find((candidate) => candidate.id === state.spectatorTargetId && candidate.alive === true);
+  if (spectator) {
+    return spectator.id;
   }
 
   return players.find((candidate) => candidate.alive === true)?.id || local?.id || state.playerId;
@@ -7845,15 +7845,6 @@ function cameraPlayerIdForRoom() {
     return state.playerId;
   }
 
-  if (aliveSpectatorPlayers().some((candidate) => candidate.id === state.spectatorTargetId)) {
-    return state.spectatorTargetId;
-  }
-
-  const restored = restoredAliveSpectatorTargetId();
-  if (restored) {
-    return restored;
-  }
-
   if (player.killedById) {
     const killer = state.snapshot?.players.find((candidate) => (
       candidate.id === player.killedById && candidate.alive === true
@@ -7861,6 +7852,15 @@ function cameraPlayerIdForRoom() {
     if (killer) {
       return setSpectatorTarget(killer.id, { persist: true });
     }
+  }
+
+  if (aliveSpectatorPlayers().some((candidate) => candidate.id === state.spectatorTargetId)) {
+    return state.spectatorTargetId;
+  }
+
+  const restored = restoredAliveSpectatorTargetId();
+  if (restored) {
+    return restored;
   }
 
   return randomAliveSpectatorTargetId(player) || state.playerId;
