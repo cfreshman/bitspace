@@ -6590,8 +6590,6 @@ function drawAsteroidVisibilityGhostMap(
           drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
         }
       }
-    } else {
-      drawAsteroidBoundary(ctx, asteroid, camera, ghostColors);
     }
   });
 }
@@ -10586,12 +10584,12 @@ function fillDitheredSphere(ctx, cx, cy, radius, colors, options = {}) {
   const maxX = Math.ceil(cx + radius);
   const minY = Math.floor(cy - radius);
   const maxY = Math.ceil(cy + radius);
-  const backing = colors.backing || "#000000";
+  const background = colors.background;
   const clipDirection = options.clipDirection || null;
   const clipDistance = Number.isFinite(options.clipDistance) ? options.clipDistance : Infinity;
   const occluders = options.occluders || [];
 
-  ctx.fillStyle = backing;
+  ctx.fillStyle = background;
   for (let py = minY; py <= maxY; py += 1) {
     for (let px = minX; px <= maxX; px += 1) {
       const dx = px - cx;

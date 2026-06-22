@@ -145,22 +145,24 @@ const THEME_PRESETS = Object.freeze([
   // { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff", backing: "#100810" },
   { id: "mono", label: "MONO", background: "#222222", foreground: "#ffffff" },
   // { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
-  { id: "ember", label: "EMBER", background: "#211c26", foreground: "#ff6f4f" },
+  // { id: "ember", label: "EMBER", background: "#211c26", foreground: "#ff6f4f" },
   // { id: "tan", label: "TAN", background: "#555452", foreground: "#ffc366" },
   // { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" },
   // { id: "ice", label: "ICE", background: "#1f353d", foreground: "#9bf7ff" },
   // { id: "sodium", label: "SODIUM", background: "#202419", foreground: "#ffd84a" },
   // { id: "amber", label: "AMBER", background: "#18110d", foreground: "#ffb24a" },
   // { id: "amber", label: "EMBER", background: "#221c19", foreground: "#ffad3d", backing: '#100000' },
-  { id: "blue-angels", label: "BLUE ANGELS", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
-  { id: "love", label: "LOVE", background: "#2e2234", foreground: "#ff72b6", backing: '#10080a' },
   // { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" }
   // { id: "honey", label: "HONEY", background: "#D19B3D", foreground: "#F7E2B1", backing: "#9C743B" },
   // { id: "honey", label: "HONEY", background: "#9C743B", foreground: "#F7E2B1", backing: "#2E2214" },
-  { id: "honey", label: "HONEY", background: "#b98a39", foreground: "#F7E2B1", backing: "#9C743B" },
-  { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
   // { id: "test", label: "TEST", background: "#5a5353", foreground: "#e6ccbe", backing: "#101010" },
   { id: "matrix", label: "MATRIX", background: "#181818", foreground: "#00ff00" },
+  { id: "love", label: "LOVE", background: "#2e2234", foreground: "#ff72b6", backing: '#10080a' },
+  { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
+  { id: "blue-angel", label: "BLUE ANGEL", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
+  { id: "plant", label: "PLANT", background: "#3ba94d", foreground: "#77ff77", backing: "#2d7949" },
+  { id: "honey", label: "HONEY", background: "#b98a39", foreground: "#F7E2B1", backing: "#9C743B" },
+  { id: "hyper", label: "HYPER", background: "#007fff", foreground: "#f87cff", backing: "#005fbe" },
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -1863,6 +1865,7 @@ function createMenuState() {
     huckRocks: [],
     huckRockCooldownSeconds: 0,
     rayCount: 1,
+    themeFocusUntilMs: 0,
     player: createMenuPlayer(asteroid)
   };
 }
@@ -2795,6 +2798,7 @@ function activateMenuEntity(entity) {
   }
 
   if (entity.action === "random-theme") {
+    focusSelectedThemeSwatch();
     setTheme(randomTheme());
     return;
   }
@@ -2804,6 +2808,7 @@ function activateMenuEntity(entity) {
     if (!preset) {
       return;
     }
+    focusSelectedThemeSwatch();
     setTheme(preset);
     return;
   }
@@ -3879,6 +3884,11 @@ function themeSwatchEntities(center) {
     };
   });
 
+  const focusActive = performance.now() < (state.menu.themeFocusUntilMs || 0);
+  const visibleEntities = focusActive
+    ? entities.filter((entity) => entity.selected === true)
+    : entities;
+
   return [
     {
       id: "menu-theme-band",
@@ -3888,7 +3898,7 @@ function themeSwatchEntities(center) {
       ringRadius: THEME_SWATCH_RING_RADIUS,
       bandRadius: THEME_SWATCH_RADIUS
     },
-    ...entities
+    ...(visibleEntities.length ? visibleEntities : entities)
   ];
 }
 
@@ -4392,6 +4402,10 @@ function setTheme(theme) {
   state.theme = normalizeTheme(theme);
   applyThemeToSource(state.theme);
   saveTheme();
+}
+
+function focusSelectedThemeSwatch() {
+  state.menu.themeFocusUntilMs = performance.now() + 1000;
 }
 
 function randomTheme() {
