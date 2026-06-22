@@ -20,6 +20,7 @@ import {
   takeAsteroidUpdates,
   stepArena
 } from "../shared/arena.js";
+import { diffArenaSnapshot } from "../shared/snapshot-delta.js";
 import {
   createRoomManager,
   ROOM_STATES
@@ -72,6 +73,7 @@ app.get("*", (_request, response) => {
 });
 
 let lastTickTime = performance.now();
+const roomSnapshotBaselines = new Map();
 
 io.on("connection", (socket) => {
   const requestedName = sanitizePlayerName(socket.handshake.auth?.name || "");
@@ -353,8 +355,10 @@ setInterval(() => {
   }
 
   const ticksPerSnapshot = Math.max(1, Math.floor(ENGINE.tickRate / ENGINE.snapshotRate));
+  const ticksPerFullSnapshot = Math.max(1, ENGINE.tickRate);
   for (const room of roomManager.allRooms()) {
     if (!room.arena) {
+      roomSnapshotBaselines.delete(room.id);
       continue;
     }
 
@@ -367,7 +371,16 @@ setInterval(() => {
       (room.state === ROOM_STATES.waiting || room.state === ROOM_STATES.active) &&
       room.arena.tick % ticksPerSnapshot === 0
     ) {
-      io.to(roomChannel(room)).volatile.emit(SERVER_EVENTS.snapshot, snapshotArena(room.arena));
+      const snapshot = snapshotArena(room.arena);
+      const previous = roomSnapshotBaselines.get(room.id);
+      const sendFull = !previous ||
+        previous.arenaId !== snapshot.arenaId ||
+        snapshot.tick % ticksPerFullSnapshot === 0;
+      const payload = sendFull
+        ? snapshot
+        : diffArenaSnapshot(previous, snapshot) || snapshot;
+      roomSnapshotBaselines.set(room.id, snapshot);
+      io.to(roomChannel(room)).emit(SERVER_EVENTS.snapshot, payload);
     }
   }
 }, 1000 / ENGINE.tickRate);
@@ -404,6 +417,7 @@ function emitGameState(socket, room) {
     return;
   }
 
+  roomSnapshotBaselines.delete(room.id);
   socket.emit(SERVER_EVENTS.asteroid, snapshotAsteroid(room.arena));
   socket.emit(SERVER_EVENTS.snapshot, snapshotArena(room.arena));
 }
@@ -422,7 +436,9 @@ function broadcastSnapshot(room) {
     return;
   }
 
-  io.to(roomChannel(room)).emit(SERVER_EVENTS.snapshot, snapshotArena(room.arena));
+  const snapshot = snapshotArena(room.arena);
+  roomSnapshotBaselines.set(room.id, snapshot);
+  io.to(roomChannel(room)).emit(SERVER_EVENTS.snapshot, snapshot);
 }
 
 function broadcastBeep(room, kind = "button") {

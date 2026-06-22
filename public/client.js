@@ -53,6 +53,7 @@ import {
   nextUpgradeCost,
   UPGRADE_DEFINITIONS
 } from "/shared/upgrades.js";
+import { applyArenaSnapshotDelta } from "/shared/snapshot-delta.js";
 import { createGamepadControls } from "/gamepad.js";
 import { createRenderer } from "/renderer.js";
 
@@ -270,6 +271,18 @@ const state = {
   },
   entitySmoothing: {
     byId: new Map()
+  },
+  net: {
+    inputSentCount: 0,
+    inputRate: 0,
+    lastInputRateAtMs: 0,
+    snapshotCount: 0,
+    snapshotRate: 0,
+    lastSnapshotRateAtMs: 0,
+    lastSnapshotAtMs: 0,
+    snapshotAgeMs: 0,
+    lastSnapshotBytes: 0,
+    lastSnapshotDelta: false
   },
   playerMap: {
     roomId: null,
@@ -512,13 +525,19 @@ function resetControlStateForNewMatch() {
   releaseSpaceUntilKeyup();
 }
 
-socket.on(SERVER_EVENTS.snapshot, (snapshot) => {
+socket.on(SERVER_EVENTS.snapshot, (payload) => {
   if (isLocalBotGame()) {
     return;
   }
 
   const receivedAtSeconds = performance.now() / 1000;
+  const snapshot = applyArenaSnapshotDelta(state.snapshot, payload);
+  if (!snapshot) {
+    return;
+  }
+
   snapshot.receivedAtSeconds = receivedAtSeconds;
+  recordNetworkSnapshot(snapshot, receivedAtSeconds * 1000, payload);
   recordEntitySnapshot(snapshot, receivedAtSeconds);
   updateLocalDamageAudio(snapshot, receivedAtSeconds);
   recordEliminations(snapshot, receivedAtSeconds);
@@ -983,6 +1002,7 @@ setInterval(() => {
     requestRoomReattach(now, true);
   }
 
+  state.net.inputSentCount += 1;
   socket.emit(CLIENT_EVENTS.input, readInput());
 }, 1000 / ENGINE.tickRate);
 
@@ -998,6 +1018,24 @@ function emitHeartbeat() {
   }
 
   socket.emit(CLIENT_EVENTS.heartbeat);
+}
+
+function recordNetworkSnapshot(snapshot, nowMs = performance.now(), payload = snapshot) {
+  const net = state.net;
+  net.snapshotCount += 1;
+  net.lastSnapshotAtMs = nowMs;
+  net.lastSnapshotDelta = Boolean(payload?.delta);
+  if (state.perfDebug.enabled) {
+    net.lastSnapshotBytes = roughJsonByteLength(payload);
+  }
+}
+
+function roughJsonByteLength(value) {
+  try {
+    return new Blob([JSON.stringify(value)]).size;
+  } catch {
+    return 0;
+  }
 }
 
 function draw(now = 0) {
@@ -3879,6 +3917,7 @@ function setBotDebugOverlay(enabled) {
 function setPerfDebug(enabled) {
   state.perfDebug.enabled = Boolean(enabled);
   window.localStorage.setItem(PERF_DEBUG_STORAGE_KEY, state.perfDebug.enabled ? "1" : "0");
+  resetNetworkPerfMetrics();
   state.perfDebug.lastNowMs = 0;
   state.perfDebug.fps = 0;
   state.perfDebug.frameMs = 0;
@@ -3905,6 +3944,18 @@ function setPerfDebug(enabled) {
   updatePerfDebugPanel(performance.now(), true);
   console.log(`BITSPACE perf debug ${state.perfDebug.enabled ? "on" : "off"}`);
   return state.perfDebug.enabled;
+}
+
+function resetNetworkPerfMetrics(nowMs = performance.now()) {
+  state.net.inputSentCount = 0;
+  state.net.inputRate = 0;
+  state.net.lastInputRateAtMs = nowMs;
+  state.net.snapshotCount = 0;
+  state.net.snapshotRate = 0;
+  state.net.lastSnapshotRateAtMs = nowMs;
+  state.net.snapshotAgeMs = 0;
+  state.net.lastSnapshotBytes = 0;
+  state.net.lastSnapshotDelta = false;
 }
 
 function setPlayerMapFeatureEnabled(enabled) {
@@ -3986,6 +4037,34 @@ function updatePerfFrameMetrics(nowMs) {
   state.perfDebug.fps = state.perfDebug.fps
     ? state.perfDebug.fps * (1 - alpha) + fps * alpha
     : fps;
+  updateNetworkPerfMetrics(nowMs, alpha);
+}
+
+function updateNetworkPerfMetrics(nowMs, alpha) {
+  const net = state.net;
+  net.snapshotAgeMs = net.lastSnapshotAtMs > 0
+    ? Math.max(0, nowMs - net.lastSnapshotAtMs)
+    : 0;
+
+  const snapshotElapsedSeconds = (nowMs - net.lastSnapshotRateAtMs) / 1000;
+  if (snapshotElapsedSeconds >= 1) {
+    const snapshotRate = net.snapshotCount / snapshotElapsedSeconds;
+    net.snapshotRate = net.snapshotRate
+      ? net.snapshotRate * (1 - alpha) + snapshotRate * alpha
+      : snapshotRate;
+    net.snapshotCount = 0;
+    net.lastSnapshotRateAtMs = nowMs;
+  }
+
+  const inputElapsedSeconds = (nowMs - net.lastInputRateAtMs) / 1000;
+  if (inputElapsedSeconds >= 1) {
+    const inputRate = net.inputSentCount / inputElapsedSeconds;
+    net.inputRate = net.inputRate
+      ? net.inputRate * (1 - alpha) + inputRate * alpha
+      : inputRate;
+    net.inputSentCount = 0;
+    net.lastInputRateAtMs = nowMs;
+  }
 }
 
 function updatePerfRenderMetrics(renderMs, renderPerf = null) {
@@ -4099,6 +4178,7 @@ function perfDebugRenderState() {
     frameStormReady: state.perfDebug.frameStormReady,
     frameCheckerReady: state.perfDebug.frameCheckerReady,
     buckets: state.perfDebug.buckets,
+    net: { ...state.net },
     core
   };
 }
@@ -4127,6 +4207,7 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
   const perf = perfDebugRenderState();
   const core = perf.core || {};
   const buckets = perf.buckets || {};
+  const net = perf.net || {};
   state.perfDebug.panelLastUpdateMs = nowMs;
   if (perfDebugRoot) {
     perfDebugRoot.hidden = false;
@@ -4154,6 +4235,9 @@ function updatePerfDebugPanel(nowMs = performance.now(), force = false) {
     `U SNAP     ${formatPerfNumber(buckets.snapshotMs, 2)}`,
     `U MAP      ${formatPerfNumber(buckets.mapStateMs, 2)}`,
     `U AUDIO    ${formatPerfNumber(buckets.audioMs, 2)}`,
+    `NET SNAP   ${formatPerfNumber(net.snapshotRate || 0, 1)}HZ/${formatPerfInteger(net.snapshotAgeMs || 0)}MS ${net.lastSnapshotDelta ? "DELTA" : "FULL"}`,
+    `NET SIZE   ${formatPerfBytes(net.lastSnapshotBytes || 0)}`,
+    `NET INPUT  ${formatPerfNumber(net.inputRate || 0, 1)}HZ`,
     `RENDER MS  ${formatPerfNumber(perf.renderMs, 2)}`,
     `DRAW MS    ${formatPerfNumber(perf.drawMs, 2)}`,
     `PRESENT MS ${formatPerfNumber(perf.presentMs, 2)}`,
@@ -4252,6 +4336,25 @@ async function copyTextToClipboard(text) {
 function formatPerfNumber(value, digits = 1) {
   const number = Number(value);
   return Number.isFinite(number) ? number.toFixed(digits) : "-";
+}
+
+function formatPerfInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(Math.round(number)) : "-";
+}
+
+function formatPerfBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "-";
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)}KB`;
+  }
+  return `${Math.round(bytes)}B`;
 }
 
 function resetTheme() {
