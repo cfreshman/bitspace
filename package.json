@@ -10,7 +10,9 @@
     "dev": "node --watch server/index.js",
     "check": "for file in server/*.js shared/*.js shared/core/*.js public/*.js scripts/*.mjs; do node --check \"$file\"; done",
     "smoke:core": "node scripts/smoke-core.mjs",
-    "smoke:socket": "node scripts/smoke-socket.mjs"
+    "smoke:socket": "node scripts/smoke-socket.mjs",
+    "deploy:do": "bash scripts/deploy-digitalocean.sh",
+    "status:do": "bash scripts/remote-status-digitalocean.sh"
   },
   "engines": {
     "node": ">=20"

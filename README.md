@@ -23,6 +23,8 @@ The current scaffold intentionally avoids game mechanics. There is low-drift deb
 
 ## Deployment
 
+### Raspberry Pi
+
 The Pi target is expected to have `pm2` and `nginx` already installed. Deploys run from this machine and sync the local workspace to the remote app directory:
 
 ```sh
@@ -38,3 +40,34 @@ Defaults:
 - PM2 process name: `bitspace`
 
 Override with `BITSPACE_REMOTE_HOST`, `BITSPACE_REMOTE_SSH_PORT`, `BITSPACE_REMOTE_DIR`, `BITSPACE_PORT`, and `BITSPACE_PM2_NAME`.
+
+### DigitalOcean
+
+The DigitalOcean path is separate from the Pi path and targets Ubuntu 24 droplets over normal SSH. Set the droplet SSH target, then deploy:
+
+```sh
+BITSPACE_DO_HOST=root@203.0.113.10 ./scripts/deploy-digitalocean.sh
+```
+
+or:
+
+```sh
+BITSPACE_DO_HOST=root@203.0.113.10 npm run deploy:do
+```
+
+Defaults:
+
+- SSH target: required via `BITSPACE_DO_HOST`, such as `root@<ip>` or `ubuntu@<ip>`
+- SSH port: `22`
+- Remote directory: `/opt/bitspace` for `root`, otherwise `/home/<user>/bitspace`
+- App port: `7024`
+- PM2 process name: `bitspace`
+- Bootstrap: enabled, installs Node 20 and `pm2` if missing
+
+Override with `BITSPACE_DO_SSH_PORT`, `BITSPACE_DO_REMOTE_DIR`, `BITSPACE_DO_PORT`, `BITSPACE_DO_PM2_NAME`, and `BITSPACE_DO_BOOTSTRAP=0`.
+
+Check the deployed process with:
+
+```sh
+BITSPACE_DO_HOST=root@203.0.113.10 ./scripts/remote-status-digitalocean.sh
+```
