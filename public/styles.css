@@ -26,7 +26,6 @@ body {
 }
 
 #scene-present {
-  background: #000000;
   pointer-events: none;
 }
 

@@ -142,16 +142,25 @@ const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
   { id: "blue", label: "BLUE", background: "#231f33", foreground: "#74acef" },
-  { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff", backing: "#100810" },
+  // { id: "mono", label: "MONO", background: "#000000", foreground: "#ffffff", backing: "#100810" },
+  { id: "mono", label: "MONO", background: "#222222", foreground: "#ffffff" },
   // { id: "green", label: "GREEN", background: "#27543c", foreground: "#ffbf00" },
   { id: "ember", label: "EMBER", background: "#211c26", foreground: "#ff6f4f" },
   // { id: "tan", label: "TAN", background: "#555452", foreground: "#ffc366" },
-  { id: "rose", label: "ROSE", background: "#34222c", foreground: "#ff72b6" },
   // { id: "plum", label: "PLUM", background: "#412c34", foreground: "#d8bd7a" },
   // { id: "ice", label: "ICE", background: "#1f353d", foreground: "#9bf7ff" },
   // { id: "sodium", label: "SODIUM", background: "#202419", foreground: "#ffd84a" },
-  { id: "amber", label: "AMBER", background: "#18110d", foreground: "#ffb24a" },
-  { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" }
+  // { id: "amber", label: "AMBER", background: "#18110d", foreground: "#ffb24a" },
+  // { id: "amber", label: "EMBER", background: "#221c19", foreground: "#ffad3d", backing: '#100000' },
+  { id: "blue-angels", label: "BLUE ANGELS", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
+  { id: "love", label: "LOVE", background: "#2e2234", foreground: "#ff72b6", backing: '#10080a' },
+  // { id: "matrix", label: "MATRIX", background: "#111111", foreground: "#00ff00" }
+  // { id: "honey", label: "HONEY", background: "#D19B3D", foreground: "#F7E2B1", backing: "#9C743B" },
+  // { id: "honey", label: "HONEY", background: "#9C743B", foreground: "#F7E2B1", backing: "#2E2214" },
+  { id: "honey", label: "HONEY", background: "#b98a39", foreground: "#F7E2B1", backing: "#9C743B" },
+  { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
+  // { id: "test", label: "TEST", background: "#5a5353", foreground: "#e6ccbe", backing: "#101010" },
+  { id: "matrix", label: "MATRIX", background: "#181818", foreground: "#00ff00" },
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -1134,6 +1143,7 @@ function draw(now = 0) {
 	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
 	    botDebugOverlay,
 	    theme: state.theme,
+	    themeName: themeLabelForTheme(state.theme),
 	    timeSeconds,
 	    measurePerf: state.perfDebug.enabled
 	  });
@@ -3798,15 +3808,18 @@ function menuButton(id, action, label, x, y, width) {
 function themeSwatchEntities(center) {
   const startAngle = -Math.PI / 2;
   const presetItems = THEME_PRESETS.map((preset, index) => ({ type: "preset", preset, themeNumber: index + 1 }));
+  const themeMatchesKnownPreset = THEME_PRESETS.some((preset) => themeMatchesPreset(state.theme, preset));
   const ringItems = [
-    { type: "home" },
-    presetItems[0],
-    presetItems[1],
-    presetItems[2],
+    // { type: "home" },
+    ...presetItems,
+    // presetItems[0],
+    // presetItems[1],
+    // presetItems[2],
+    // presetItems[3],
+    // presetItems[4],
+    // presetItems[5],
+    // presetItems[6],
     { type: "random" },
-    presetItems[3],
-    presetItems[4],
-    presetItems[5]
   ].filter(Boolean);
   const entities = ringItems.map((item, index) => {
     const angle = startAngle + (index * Math.PI * 2) / ringItems.length;
@@ -3826,7 +3839,7 @@ function themeSwatchEntities(center) {
         y,
         radius: THEME_SWATCH_RADIUS,
         active: state.menu.activeTargetId === THEME_RANDOM_ID,
-        selected: false
+        selected: !themeMatchesKnownPreset
       };
     }
 
@@ -3866,7 +3879,17 @@ function themeSwatchEntities(center) {
     };
   });
 
-  return entities;
+  return [
+    {
+      id: "menu-theme-band",
+      type: "themeBand",
+      x: center.x,
+      y: center.y,
+      ringRadius: THEME_SWATCH_RING_RADIUS,
+      bandRadius: THEME_SWATCH_RADIUS
+    },
+    ...entities
+  ];
 }
 
 function menuCenter(asteroid) {
@@ -4503,6 +4526,11 @@ function themeMatchesPreset(theme, preset) {
   return normalized?.foreground === presetTheme?.foreground &&
     normalized?.background === presetTheme?.background &&
     normalized?.backing === presetTheme?.backing;
+}
+
+function themeLabelForTheme(theme) {
+  const preset = THEME_PRESETS.find((candidate) => themeMatchesPreset(theme, candidate));
+  return preset?.label || "RANDOM";
 }
 
 function syncThemeFromCss() {

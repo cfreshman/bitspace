@@ -322,7 +322,6 @@ const BITMAP_GLYPHS = Object.freeze({
   "&": ["01100", "10010", "10100", "01000", "10101", "10010", "01101"],
   "⌂": ["0001000", "0010100", "0100010", "1111111", "0100010", "0101010", "0111110"]
 });
-
 export function createRenderer(canvas, minimapCanvas = null) {
   const canvasContext = canvas.getContext("2d", { alpha: false });
   const minimapContext = minimapCanvas?.getContext("2d") || null;
@@ -3849,11 +3848,21 @@ function drawMenuOverlay(ctx, options, colors, textRenderer) {
 }
 
 function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
-  const panel = mainHudPanelRect(ctx, 132, 26);
-  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, "THEME", panel.x + panel.width / 2, panel.y + 8, {
+  const label = `THEME - ${String(options.themeName || "RANDOM").toUpperCase()}`;
+  const padding = HUD_PANEL_PADDING;
+  const textOptions = {
     fontSize: 8,
     color: colors.foreground
+  };
+  const panel = mainHudPanelRect(
+    ctx,
+    Math.max(HUD_PANEL_MIN_WIDTH, textRenderer.measure(label, textOptions) + padding * 2),
+    hudPanelHeightForRows(1)
+  );
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  textRenderer.draw(ctx, label, panel.x + padding, panel.y + padding, {
+    ...textOptions,
+    width: panel.width - padding * 2
   });
 
   const warningPosition = drawWaitingTerminalActions(
@@ -9088,6 +9097,11 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     return;
   }
 
+  if (entity.type === "themeBand") {
+    drawThemeBandEntity(ctx, entity, camera, colors);
+    return;
+  }
+
   if (entity.type === "menuTitle") {
     drawMenuTitleEntity(ctx, entity, camera, colors, textRenderer);
     return;
@@ -9301,21 +9315,65 @@ function drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer) {
   const background = entity.background || colors.background;
   const foreground = entity.foreground || colors.foreground;
   const backing = entity.backing || colors.backing || "#000000";
-  const fillColor = selected ? foreground : background;
-  const detailColor = selected ? background : foreground;
+  const backingColor = selected ? foreground : backing;
+  const fillColor = background;
+  const detailColor = foreground;
 
-  if (!selected) {
-    ctx.fillStyle = backing;
-    fillSolidDisk(ctx, x, y, radius + 4);
-  }
+  ctx.fillStyle = backingColor;
+  fillSolidDisk(ctx, x, y, radius + 4);
 
   ctx.fillStyle = fillColor;
   fillSolidDisk(ctx, x, y, radius);
   ctx.fillStyle = detailColor;
   drawCenteredCircleLabel(ctx, textRenderer, String(entity.label || ""), x, y - 7, {
     fontSize: 10,
-    color: detailColor
+    color: detailColor,
+    borderColor: background
   });
+}
+
+function drawThemeBandEntity(ctx, entity, camera, colors) {
+  const screen = worldToScreen(entity, camera);
+  const x = Math.round(screen.x);
+  const y = Math.round(screen.y);
+  const ringRadius = Math.max(1, Number(entity.ringRadius || 1));
+  const bandRadius = Math.max(1, Number(entity.bandRadius || 1));
+  drawCircleBandSpans(ctx, x, y, Math.max(0, ringRadius - bandRadius), ringRadius + bandRadius, colors.backing || "#000000");
+}
+
+function drawCircleBandSpans(ctx, cx, cy, innerRadius, outerRadius, color) {
+  const innerRadiusSq = Math.max(0, innerRadius * innerRadius);
+  const outerRadiusSq = Math.max(0, outerRadius * outerRadius);
+  const minY = Math.floor(cy - outerRadius);
+  const maxY = Math.ceil(cy + outerRadius);
+
+  ctx.fillStyle = color;
+  for (let py = minY; py <= maxY; py += 1) {
+    const dy = py + 0.5 - cy;
+    const outerHorizontalSq = outerRadiusSq - dy * dy;
+    if (outerHorizontalSq < 0) {
+      continue;
+    }
+
+    const outerHorizontal = Math.sqrt(outerHorizontalSq);
+    const outerStart = Math.ceil(cx - outerHorizontal);
+    const outerEnd = Math.floor(cx + outerHorizontal);
+    const innerHorizontalSq = innerRadiusSq - dy * dy;
+    if (innerHorizontalSq <= 0) {
+      ctx.fillRect(outerStart, py, outerEnd - outerStart + 1, 1);
+      continue;
+    }
+
+    const innerHorizontal = Math.sqrt(innerHorizontalSq);
+    const leftEnd = Math.floor(cx - innerHorizontal);
+    const rightStart = Math.ceil(cx + innerHorizontal);
+    if (leftEnd >= outerStart) {
+      ctx.fillRect(outerStart, py, leftEnd - outerStart + 1, 1);
+    }
+    if (rightStart <= outerEnd) {
+      ctx.fillRect(rightStart, py, outerEnd - rightStart + 1, 1);
+    }
+  }
 }
 
 function drawCenteredCircleLabel(ctx, textRenderer, label, centerX, y, options) {
@@ -10529,11 +10587,11 @@ function fillDitheredSphere(ctx, cx, cy, radius, colors, options = {}) {
   const minY = Math.floor(cy - radius);
   const maxY = Math.ceil(cy + radius);
   const backing = colors.backing || "#000000";
-  const background = colors.background;
   const clipDirection = options.clipDirection || null;
   const clipDistance = Number.isFinite(options.clipDistance) ? options.clipDistance : Infinity;
   const occluders = options.occluders || [];
 
+  ctx.fillStyle = backing;
   for (let py = minY; py <= maxY; py += 1) {
     for (let px = minX; px <= maxX; px += 1) {
       const dx = px - cx;
@@ -10550,15 +10608,6 @@ function fillDitheredSphere(ctx, cx, cy, radius, colors, options = {}) {
         }
       }
 
-      const inverseRadius = 1 / Math.max(1, radius);
-      const nx = dx * inverseRadius;
-      const ny = dy * inverseRadius;
-      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
-      const diffuse = clamp(nx * SHIP_SPHERE_LIGHT.x + ny * SHIP_SPHERE_LIGHT.y + nz * SHIP_SPHERE_LIGHT.z, 0, 1);
-      const edgeShadow = clamp(1 - Math.sqrt(distanceSq) * inverseRadius, 0, 1);
-      const backgroundAmount = clamp(0.08 + diffuse * 0.72 + edgeShadow * 0.2, 0, 1);
-      const threshold = (SHIP_SPHERE_DITHER[((py & 3) << 2) | (px & 3)] + 0.5) / 16;
-      ctx.fillStyle = threshold <= backgroundAmount ? background : backing;
       ctx.fillRect(px, py, 1, 1);
     }
   }
