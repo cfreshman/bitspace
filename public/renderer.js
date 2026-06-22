@@ -101,14 +101,14 @@ const THRUSTER_ENGINE_UPGRADE_ID = "speed";
 const THRUSTER_ENGINE_MAX_LEVEL =
   UPGRADE_DEFINITIONS.find((upgrade) => upgrade.id === THRUSTER_ENGINE_UPGRADE_ID)?.maxLevel || 5;
 const THRUSTER_ENGINE_RAMP = Object.freeze({
-  rateMin: 0.25,
-  rateMax: 1,
+  rateMin: 1,
+  rateMax: 2,
   plumeSpeedMin: 0.5,
   plumeSpeedMax: 1,
   lifeMin: 1,
   lifeMax: 1,
-  nozzleMin: 0.82,
-  nozzleMax: 1.08
+  nozzleMin: 0.5,
+  nozzleMax: 0.5,
 });
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
@@ -10361,8 +10361,11 @@ function emitThrusterParticles(state, player, dtSeconds) {
     for (let index = 0; index < count; index += 1) {
       const seed = state.nextSeed();
       const nozzleWidth = Math.max(2, (origin.nozzleWidth || 0) * engineRamp.nozzle);
-      const sideJitter = sampleProjectedNozzleOffset(seed, nozzleWidth * 0.5);
-      const rearJitter = (randomUnit(seed, 2) - 0.5) * 2.2;
+      const nozzleRadius = nozzleWidth * 0.5;
+      const sideJitter = sampleProjectedNozzleOffset(seed, nozzleRadius);
+      const sideRatio = clamp(Math.abs(sideJitter) / Math.max(1, nozzleRadius), 0, 1);
+      const capOffset = 1 + sideRatio * sideRatio * Math.max(1, nozzleRadius * 0.7);
+      const rearJitter = randomUnit(seed, 2) * 0.9;
       const speed = (92 + randomUnit(seed, 3) * 90) * Math.sqrt(particleMultiplier) * engineRamp.plumeSpeed;
       const spread = (randomUnit(seed, 4) - 0.5) * 10 * Math.sqrt(particleMultiplier);
       const localHeat = 1 - clamp(Math.abs(sideJitter) / (nozzleWidth * 0.5), 0, 1);
@@ -10375,8 +10378,8 @@ function emitThrusterParticles(state, player, dtSeconds) {
         engineRamp.life;
 
       state.particles.push({
-        x: origin.x + side.x * sideJitter + rear.x * rearJitter,
-        y: origin.y + side.y * sideJitter + rear.y * rearJitter,
+        x: origin.x + side.x * sideJitter + rear.x * (capOffset + rearJitter),
+        y: origin.y + side.y * sideJitter + rear.y * (capOffset + rearJitter),
         vx: (player.vx || 0) + rear.x * speed + side.x * spread,
         vy: (player.vy || 0) + rear.y * speed + side.y * spread,
         age: randomUnit(seed, 6) * 0.025,
