@@ -96,17 +96,17 @@ const SHIP_SPHERE_DITHER = Object.freeze([
   15, 7, 13, 5
 ]);
 const SHIP_SPHERE_LIGHT = Object.freeze(normalize3d(-0.42, -0.58, 0.7));
-const THRUSTER_PARTICLE_RATE = 140;
+const THRUSTER_PARTICLE_RATE = 500;
 const THRUSTER_ENGINE_UPGRADE_ID = "speed";
 const THRUSTER_ENGINE_MAX_LEVEL =
   UPGRADE_DEFINITIONS.find((upgrade) => upgrade.id === THRUSTER_ENGINE_UPGRADE_ID)?.maxLevel || 5;
 const THRUSTER_ENGINE_RAMP = Object.freeze({
-  rateMin: 0.38,
-  rateMax: 1.34,
-  plumeSpeedMin: 0.82,
-  plumeSpeedMax: 1.22,
-  lifeMin: 0.72,
-  lifeMax: 1.18,
+  rateMin: 0.25,
+  rateMax: 1,
+  plumeSpeedMin: 0.5,
+  plumeSpeedMax: 1,
+  lifeMin: 1,
+  lifeMax: 1,
   nozzleMin: 0.82,
   nozzleMax: 1.08
 });
@@ -118,7 +118,6 @@ const MINING_RAY_SIDE_WAVE_SPEED = 18;
 const MINING_RAY_EMITTER_RADIUS = 1;
 const MINING_RAY_EMITTER_LENGTH = 8;
 const MINING_RAY_HIT_FLARE_RADIUS = 3;
-const MAX_PARTICLES = 260;
 const HUD_FLASH_MODE = Object.freeze({
   additive: "additive",
   subtractive: "subtractive"
@@ -10370,7 +10369,7 @@ function emitThrusterParticles(state, player, dtSeconds) {
       const medialOffset = (origin.medialOffset || 0) + sideJitter;
       const medialHeatLinear = 1 - clamp(Math.abs(medialOffset) / Math.max(1, origin.medialRadius || 1), 0, 1);
       const medialHeat = medialHeatLinear * medialHeatLinear * medialHeatLinear;
-      const centerHeat = localHeat * 0.08 + medialHeat * 0.92;
+      const centerHeat = localHeat * 0.5 + medialHeat * 0.5;
       const life =
         (0.05 + centerHeat * 0.68 + randomUnit(seed, 5) * (0.1 + centerHeat * 0.3)) *
         engineRamp.life;
@@ -10385,10 +10384,6 @@ function emitThrusterParticles(state, player, dtSeconds) {
         seed
       });
     }
-  }
-
-  if (state.particles.length > MAX_PARTICLES) {
-    state.particles.splice(0, state.particles.length - MAX_PARTICLES);
   }
 }
 
@@ -10484,10 +10479,6 @@ function emitMiningParticles(state, player, dtSeconds) {
       size: randomUnit(seed, 8) > 0.58 ? 2 : 1
     });
   }
-
-  if (state.miningParticles.length > MAX_PARTICLES) {
-    state.miningParticles.splice(0, state.miningParticles.length - MAX_PARTICLES);
-  }
 }
 
 function rearEnginePlumeOrigins(player, rear, side) {
@@ -10549,7 +10540,7 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
 
 function drawHotParticle(ctx, screen, particle) {
   const heat = particleHeatFromLife(particle);
-  const size = heat > 0.52 ? 3 : heat > 0.18 ? 2 : 1;
+  const size = 1 // heat > 0.52 ? 3 : heat > 0.30 ? 2 : 1;
   const offset = size > 1 ? -1 : 0;
   ctx.fillRect(screen.x + offset, screen.y + offset, size, size);
 }
