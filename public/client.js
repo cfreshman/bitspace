@@ -134,7 +134,7 @@ const MENU_MINING_RAY_MAX_COUNT = 3;
 const MENU_SPEED_UPGRADE_ID = "speed";
 const PERF_DEBUG_PANEL_INTERVAL_MS = 250;
 const THEME_SWATCH_RADIUS = 15.5;
-const THEME_SWATCH_RING_RADIUS = 76;
+const THEME_SWATCH_RING_RADIUS = 84;
 const THEME_ASTEROID_GAP = 24;
 const THEME_RANDOM_ID = "menu-theme-random";
 const THEME_BACK_ID = "menu-theme-back";
@@ -169,6 +169,8 @@ const THEME_PRESETS = Object.freeze([
   // { id: "blossom", label: "BLOSSOM", background: "#A4133C", foreground: "#FFCCD5", backing: "#590D22" },
   { id: "hyper", label: "HYPER", background: "#007fff", foreground: "#f87cff", backing: "#005fbe" },
   { id: "berry", label: "BERRY", background: "#3b67a9", foreground: "#efaeff", backing: "#494758" },
+  // { id: "cloud", label: "CLOUD", background: "#3b89a9", foreground: "#9af2ff", backing: "#b1b1b1" },
+  { id: "cloud", label: "CLOUD", background: "#3b89a9", foreground: "#9af2ff", backing: "#77bcd9" },
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -3879,20 +3881,22 @@ function themeSwatchEntities(center) {
 
     const { preset } = item;
     const id = `menu-theme-${preset.id}`;
+    const selected = selectedPresetId === preset.id;
+    const swatchTheme = selected ? state.theme : preset;
     return themeSwatchWithEffectColors({
       id,
       type: "themeSwatch",
       action: "select-theme",
       label: String(item.themeNumber),
       themeId: preset.id,
-      background: preset.background,
-      foreground: preset.foreground,
-      backing: preset.backing || "#000000",
+      background: swatchTheme.background,
+      foreground: swatchTheme.foreground,
+      backing: swatchTheme.backing || "#000000",
       x,
       y,
       radius: THEME_SWATCH_RADIUS,
       active: state.menu.activeTargetId === id,
-      selected: selectedPresetId === preset.id
+      selected
     });
   });
 
