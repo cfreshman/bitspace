@@ -142,6 +142,7 @@ const THEME_SWATCH_EFFECT_HOLD_MS = 1000;
 const THEME_SWATCH_EFFECT_FADE_MS = 150;
 const THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES = 15;
 const THEME_REPEAT_RANDOM_MIN_HUE_DISTANCE_DEGREES = 30;
+const THEME_RANDOM_CONTRAST_SAMPLES = 10;
 const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
@@ -165,12 +166,12 @@ const THEME_PRESETS = Object.freeze([
   { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
   { id: "honey", label: "HONEY", background: "#d0942f", foreground: "#F7E2B1", backing: "#9C743B" },
   { id: "plant", label: "PLANT", background: "#3ba94d", foreground: "#77ff77", backing: "#2d7949" },
-  { id: "blue-angel", label: "BLUE ANGEL", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
   // { id: "blossom", label: "BLOSSOM", background: "#A4133C", foreground: "#FFCCD5", backing: "#590D22" },
-  { id: "hyper", label: "HYPER", background: "#007fff", foreground: "#f87cff", backing: "#005fbe" },
-  { id: "berry", label: "BERRY", background: "#3b67a9", foreground: "#efaeff", backing: "#494758" },
   // { id: "cloud", label: "CLOUD", background: "#3b89a9", foreground: "#9af2ff", backing: "#b1b1b1" },
   { id: "cloud", label: "CLOUD", background: "#3b89a9", foreground: "#9af2ff", backing: "#77bcd9" },
+  { id: "hyper", label: "HYPER", background: "#007fff", foreground: "#f87cff", backing: "#005fbe" },
+  { id: "berry", label: "BERRY", background: "#3b67a9", foreground: "#efaeff", backing: "#494758" },
+  { id: "blue-angel", label: "BLUE ANGEL", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
@@ -4500,7 +4501,9 @@ function hueRotatedPresetTheme() {
   }
 
   const preset = presets[Math.floor(Math.random() * presets.length)];
-  return randomizedThemeHueFrame(preset, preset, THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES);
+  return scoredRandomizedTheme(
+    () => randomizedThemeHueFrame(preset, preset, THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES)
+  );
 }
 
 function hueRotateTheme(theme, degrees) {
@@ -4517,10 +4520,59 @@ function hueRotateTheme(theme, degrees) {
 }
 
 function randomizedThemeVariant(theme) {
-  const randomized = themeHasHueRotatableColor(theme)
-    ? randomizedThemeHueFrame(theme, state.theme, THEME_REPEAT_RANDOM_MIN_HUE_DISTANCE_DEGREES)
-    : generatedRandomTheme();
-  return themeMatchesPreset(randomized, theme) ? generatedRandomTheme() : randomized;
+  const makeCandidate = themeHasHueRotatableColor(theme)
+    ? () => randomizedThemeHueFrame(theme, state.theme, THEME_REPEAT_RANDOM_MIN_HUE_DISTANCE_DEGREES)
+    : () => generatedRandomTheme();
+  return scoredRandomizedTheme(makeCandidate, (candidate) => !themeMatchesPreset(candidate, theme));
+}
+
+function scoredRandomizedTheme(makeCandidate, validate = () => true) {
+  const candidates = [];
+  for (let attempt = 0; attempt < THEME_RANDOM_CONTRAST_SAMPLES; attempt += 1) {
+    const theme = normalizeTheme(makeCandidate());
+    if (!theme || !validate(theme)) {
+      continue;
+    }
+
+    candidates.push({
+      theme,
+      contrast: themeForegroundBackgroundContrast(theme)
+    });
+  }
+
+  if (candidates.length <= 0) {
+    return generatedRandomTheme();
+  }
+
+  candidates.sort((a, b) => b.contrast - a.contrast);
+  let totalWeight = 0;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const rank = candidates.length - index;
+    const contrastWeight = Math.max(0.05, candidates[index].contrast);
+    candidates[index].weight = rank * rank * contrastWeight;
+    totalWeight += candidates[index].weight;
+  }
+
+  let remainingWeight = totalWeight * Math.random();
+  for (const candidate of candidates) {
+    remainingWeight -= candidate.weight;
+    if (remainingWeight <= 0) {
+      return candidate.theme;
+    }
+  }
+
+  return candidates[0].theme;
+}
+
+function themeForegroundBackgroundContrast(theme) {
+  const normalized = normalizeTheme(theme);
+  const background = hexToRgb(normalized?.background);
+  const foreground = hexToRgb(normalized?.foreground);
+  if (!background || !foreground) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  return relativeLuminance(foreground) - relativeLuminance(background);
 }
 
 function randomizedThemeHueFrame(baseTheme, currentTheme, minDegrees) {
