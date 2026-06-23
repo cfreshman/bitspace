@@ -135,6 +135,11 @@ const HUD_PANEL_ACTION_GAP = 7;
 const HUD_CONTROL_TEXT_BORDER = Object.freeze({
   borderTransparentAsBacking: true
 });
+const MOBILE_UPGRADE_CLOSE_ACTION = Object.freeze({
+  gap: 7,
+  width: 52,
+  height: 13
+});
 const ENDED_HUD_LAYOUT = Object.freeze({
   x: 8,
   y: 8,
@@ -671,6 +676,14 @@ function createScenePresentCanvas(sourceCanvas) {
 }
 
 function renderSizeForViewport(viewport) {
+  if (typeof document !== "undefined" && document.body?.classList.contains("mobile-controls")) {
+    const diameter = Math.min(RENDER.width, RENDER.height);
+    return {
+      width: diameter,
+      height: diameter
+    };
+  }
+
   const aspect = clamp(viewport.width / Math.max(1, viewport.height), MIN_RENDER_ASPECT, MAX_RENDER_ASPECT);
   const diameter = Math.min(RENDER.width, RENDER.height);
   if (aspect >= 1) {
@@ -3680,9 +3693,10 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           options.timeSeconds,
           playersLeft
         );
-        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive);
-        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive);
-        drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.playerMapFeatureEnabled);
+        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive);
+        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive);
+        drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
+        drawMobileLeaveHud(ctx, localPlayer, options, colors, textRenderer);
       }
     }
     drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
@@ -4031,6 +4045,23 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRe
   };
 
   const firstLineY = y + labelOffsetY;
+
+  if (options.mobileActive) {
+    textRenderer.draw(ctx, "LEAVE", x, firstLineY, {
+      ...textOptions,
+      width: 96
+    });
+    if (canStart) {
+      textRenderer.draw(ctx, "START", x, firstLineY + keyboardLineStep, {
+        ...textOptions,
+        width: 96
+      });
+    }
+    return {
+      x,
+      y: firstLineY + keyboardLineStep * (canStart ? 2 : 1)
+    };
+  }
 
   textRenderer.draw(ctx, "ESC - LEAVE", x, firstLineY, {
     ...textOptions,
@@ -5704,6 +5735,14 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
     ...HUD_CONTROL_TEXT_BORDER
   };
 
+  if (options.mobileActive) {
+    textRenderer.draw(ctx, "LEAVE", x, y + 2, {
+      ...textOptions,
+      width: 96
+    });
+    return;
+  }
+
   textRenderer.draw(ctx, "ESC - LEAVE", x, y + 2, {
     ...textOptions,
     width: 96
@@ -5713,6 +5752,16 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
 function drawTerminalConfirmLeaveAction(ctx, x, y, options, colors, textRenderer) {
   if (options.controllerActive) {
     drawControllerHudAction(ctx, "faceBottom", "CONFIRM", x, y, colors, textRenderer);
+    return;
+  }
+
+  if (options.mobileActive) {
+    textRenderer.draw(ctx, "CONFIRM", x, y + 2, {
+      fontSize: 8,
+      color: colors.foreground,
+      ...HUD_CONTROL_TEXT_BORDER,
+      width: 112
+    });
     return;
   }
 
@@ -9964,12 +10013,17 @@ function hudPanelHeightForRows(rowCount) {
     Math.max(0, Math.floor(rowCount) - 1) * HUD_PANEL_ROW_STEP;
 }
 
-function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
+function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
   if (!player) {
     return;
   }
 
   if (!upgradesUi?.active) {
+    if (mobileActive) {
+      drawMobileHudAction(ctx, "UPGRADES", 10, 74, colors, textRenderer);
+      return;
+    }
+
     if (controllerActive) {
       drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 74, colors, textRenderer);
       return;
@@ -9983,11 +10037,16 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
     return;
   }
 
-  drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive);
+  drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive, mobileActive);
 }
 
-function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false) {
+function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
   if (!player || upgradesUi?.active) {
+    return;
+  }
+
+  if (mobileActive) {
+    drawMobileHudAction(ctx, buildUi?.active ? "MINING RAY" : "BUILDER ARM", 10, 88, colors, textRenderer);
     return;
   }
 
@@ -10011,8 +10070,13 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
   });
 }
 
-function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mapFeatureEnabled = true) {
+function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true) {
   if (!mapFeatureEnabled || !player || upgradesUi?.active) {
+    return;
+  }
+
+  if (mobileActive) {
+    drawMobileHudAction(ctx, "MAP", 10, 102, colors, textRenderer);
     return;
   }
 
@@ -10028,8 +10092,16 @@ function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerAct
   });
 }
 
-function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false) {
-  const layout = upgradeMenuLayout(textRenderer, controllerActive);
+function drawMobileLeaveHud(ctx, player, options, colors, textRenderer) {
+  if (!options.mobileActive || !player || options.upgrades?.active || options.build?.active || options.leaveConfirm?.active) {
+    return;
+  }
+
+  drawMobileHudAction(ctx, "LEAVE", 10, 116, colors, textRenderer);
+}
+
+function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
+  const layout = upgradeMenuLayout(textRenderer, controllerActive, mobileActive);
   const { panel, metrics } = layout;
   const resources = player.resources || {};
   const selectedIndex = Number.isInteger(upgradesUi.selectedIndex)
@@ -10098,7 +10170,7 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     ? `COST: ${formatUpgradeCostLong(selectedCost)}`
     : "COST: MAX LEVEL";
   const actionText = selectedCost
-    ? affordable ? controllerActive ? "SELECT BUY" : "CLICK BUY" : "NEED RESOURCES"
+    ? affordable ? controllerActive ? "SELECT BUY" : mobileActive ? "TAP BUY" : "CLICK BUY" : "NEED RESOURCES"
     : "MAXED";
 
   UPGRADE_MENU_DIVIDER.draw(ctx, panel, layout.dividerY, colors);
@@ -10116,6 +10188,30 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     color: colors.foreground,
     width: layout.contentWidth
   });
+
+  if (mobileActive) {
+    drawMobileUpgradeCloseAction(ctx, panel, colors, textRenderer);
+  }
+}
+
+function drawMobileHudAction(ctx, label, x, y, colors, textRenderer) {
+  textRenderer.draw(ctx, label, x, y + 2, {
+    fontSize: 8,
+    color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER,
+    width: 120
+  });
+}
+
+function drawMobileUpgradeCloseAction(ctx, panel, colors, textRenderer) {
+  drawMobileHudAction(
+    ctx,
+    "CLOSE",
+    panel.x + 2,
+    panel.y + panel.height + MOBILE_UPGRADE_CLOSE_ACTION.gap,
+    colors,
+    textRenderer
+  );
 }
 
 function drawControllerHudAction(ctx, buttonPosition, label, x, y, colors, textRenderer) {
@@ -10212,7 +10308,7 @@ function measurePixelTableColumns(rows, textRenderer, options = {}) {
   });
 }
 
-function upgradeMenuMetrics(textRenderer, controllerActive = false) {
+function upgradeMenuMetrics(textRenderer, controllerActive = false, mobileActive = false) {
   const textOptions = { fontSize: 8 };
   const tableColumns = measurePixelTableColumns(
     UPGRADE_DEFINITIONS.map((definition) => ({
@@ -10226,7 +10322,7 @@ function upgradeMenuMetrics(textRenderer, controllerActive = false) {
     tableColumns.labelWidth +
     UPGRADE_MENU_LAYOUT.columnGap +
     tableColumns.levelWidth;
-  const detailWidth = Math.max(...upgradeMenuDetailLines(controllerActive).map((line) =>
+  const detailWidth = Math.max(...upgradeMenuDetailLines(controllerActive, mobileActive).map((line) =>
     textRenderer.measure(line, textOptions)
   ));
   const titleWidth = textRenderer.measure("UPGRADES", textOptions);
@@ -10245,8 +10341,8 @@ function upgradeMenuMetrics(textRenderer, controllerActive = false) {
   };
 }
 
-function upgradeMenuLayout(textRenderer, controllerActive = false) {
-  const metrics = upgradeMenuMetrics(textRenderer, controllerActive);
+function upgradeMenuLayout(textRenderer, controllerActive = false, mobileActive = false) {
+  const metrics = upgradeMenuMetrics(textRenderer, controllerActive, mobileActive);
   const panel = {
     x: UPGRADE_MENU_LAYOUT.x,
     y: UPGRADE_MENU_LAYOUT.y,
@@ -10299,12 +10395,12 @@ function expandPixelTableColumns(columns, rowWidth) {
   };
 }
 
-function upgradeMenuDetailLines(controllerActive = false) {
+function upgradeMenuDetailLines(controllerActive = false, mobileActive = false) {
   const lines = new Set([
     "COST: MAX LEVEL",
     "MAXED",
     "NEED RESOURCES",
-    controllerActive ? "SELECT BUY" : "CLICK BUY"
+    controllerActive ? "SELECT BUY" : mobileActive ? "TAP BUY" : "CLICK BUY"
   ]);
 
   for (const definition of UPGRADE_DEFINITIONS) {

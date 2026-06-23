@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <title>BITSPACE</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
@@ -14,6 +14,14 @@
     ></div>
     <canvas id="scene" width="384" height="384"></canvas>
     <canvas id="minimap" width="384" height="384" aria-hidden="true"></canvas>
+    <div id="mobile-controls" class="mobile-controls" hidden aria-hidden="true">
+      <div id="mobile-move-joystick" class="mobile-joystick">
+        <div id="mobile-move-joystick-knob" class="mobile-joystick-knob"></div>
+      </div>
+      <div id="mobile-aim-joystick" class="mobile-joystick">
+        <div id="mobile-aim-joystick-knob" class="mobile-joystick-knob"></div>
+      </div>
+    </div>
     <div id="perf-debug" class="perf-debug" hidden>
       <button id="perf-debug-copy" class="perf-debug-copy" type="button">COPY</button>
       <pre id="perf-debug-panel" class="perf-debug-panel"></pre>

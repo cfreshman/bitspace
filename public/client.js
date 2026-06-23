@@ -177,13 +177,37 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
   y: 70,
   padding: 8,
+  titleTop: 8,
   rowTopOffset: 20,
   rowHeight: 16,
   rowInset: 8,
   labelOffset: 14,
   columnGap: 8,
-  rowHitPadding: 2
+  rowHitPadding: 2,
+  dividerTopGap: 5,
+  dividerBottomGap: 5,
+  rowTextHeight: 7,
+  detailLineHeight: 12,
+  detailLineCount: 4,
+  bottomPadding: 8
 });
+const MOBILE_POINTER_QUERY = "(pointer: coarse)";
+const MOBILE_JOYSTICK_MIN_RADIUS = 42;
+const MOBILE_JOYSTICK_MAX_RADIUS = 72;
+const MOBILE_HUCK_ROCK_QUEUE_SECONDS = 0.35;
+const MOBILE_UPGRADE_CLOSE_ACTION = Object.freeze({
+  gap: 7,
+  width: 52,
+  height: 13
+});
+const HUD_PANEL_MIN_WIDTH = 112;
+const HUD_PANEL_PADDING = 4;
+const HUD_PANEL_TEXT_HEIGHT = 7;
+const HUD_PANEL_ROW_STEP = 10;
+const HUD_PANEL_ACTION_GAP = 7;
+const MOBILE_HUD_ACTION_X = 10;
+const MOBILE_HUD_ACTION_WIDTH = 118;
+const MOBILE_HUD_ACTION_HEIGHT = 12;
 const TERMINAL_LEAVE_ACTION = Object.freeze({
   x: 10,
   eliminatedY: 41,
@@ -198,6 +222,11 @@ const TERMINAL_LEAVE_ACTION = Object.freeze({
 });
 const canvas = document.querySelector("#scene");
 const minimapCanvas = document.querySelector("#minimap");
+const mobileControlsRoot = document.querySelector("#mobile-controls");
+const mobileMoveJoystick = document.querySelector("#mobile-move-joystick");
+const mobileMoveJoystickKnob = document.querySelector("#mobile-move-joystick-knob");
+const mobileAimJoystick = document.querySelector("#mobile-aim-joystick");
+const mobileAimJoystickKnob = document.querySelector("#mobile-aim-joystick-knob");
 const perfDebugRoot = document.querySelector("#perf-debug");
 const perfDebugPanel = document.querySelector("#perf-debug-panel");
 const perfDebugCopy = document.querySelector("#perf-debug-copy");
@@ -340,6 +369,32 @@ const state = {
     down: false,
     aimAngle: 0
   },
+  mobile: {
+    enabled: false,
+    move: { x: 0, y: 0 },
+    moveJoystick: {
+      pointerId: null,
+      active: false,
+      x: 0,
+      y: 0,
+      centerX: 0,
+      centerY: 0,
+      radius: 0
+    },
+    aimJoystick: {
+      pointerId: null,
+      active: false,
+      x: 0,
+      y: 0,
+      centerX: 0,
+      centerY: 0,
+      radius: 0
+    },
+    aimAngle: 0,
+    huckRockQueued: false,
+    huckRockQueuedUntilSeconds: 0,
+    huckRockTarget: null
+  },
   controller: createControllerState(),
   chat: {
     active: false,
@@ -373,6 +428,15 @@ state.menu.themeBaseId = themePresetIdForTheme(state.theme);
 setBotDebugEnabled(state.botDebugOverlay);
 installControlHandles();
 installPerfDebugCopyButton();
+const mobilePointerMedia = typeof window.matchMedia === "function"
+  ? window.matchMedia(MOBILE_POINTER_QUERY)
+  : null;
+syncMobileControlsEnabled();
+if (typeof mobilePointerMedia?.addEventListener === "function") {
+  mobilePointerMedia.addEventListener("change", syncMobileControlsEnabled);
+} else if (typeof mobilePointerMedia?.addListener === "function") {
+  mobilePointerMedia.addListener(syncMobileControlsEnabled);
+}
 
 const mapGenMode = isMapGenMode();
 if (!mapGenMode) {
@@ -827,11 +891,14 @@ talkInput.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("pointermove", (event) => {
-  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
+  if (handleMobilePointerMove(event)) {
+    return;
+  }
 
+  revealMousePointer();
   updateMouse(event);
   if (state.mouse.down && !state.build.active && !hasMousePointer()) {
     state.mouse.down = false;
@@ -849,11 +916,14 @@ window.addEventListener("pointerout", (event) => {
 });
 
 window.addEventListener("pointerdown", (event) => {
-  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
+  if (handleMobilePointerDown(event)) {
+    return;
+  }
 
+  revealMousePointer();
   event.preventDefault();
   unlockAudio();
   updateMouse(event);
@@ -889,22 +959,28 @@ window.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("pointerup", (event) => {
-  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
+  if (handleMobilePointerUp(event)) {
+    return;
+  }
 
+  revealMousePointer();
   event.preventDefault();
   updateMouse(event);
   state.mouse.down = false;
 });
 
 window.addEventListener("pointercancel", (event) => {
-  revealMousePointer();
   if (shouldIgnorePagePointerEvent()) {
     return;
   }
+  if (handleMobilePointerUp(event)) {
+    return;
+  }
 
+  revealMousePointer();
   event.preventDefault();
   updateMouse(event);
   state.mouse.down = false;
@@ -917,6 +993,27 @@ window.addEventListener("contextmenu", (event) => {
 
   event.preventDefault();
 });
+window.addEventListener("touchstart", preventPageTouchGesture, { passive: false });
+window.addEventListener("touchmove", preventPageTouchGesture, { passive: false });
+window.addEventListener("gesturestart", preventPageGesture, { passive: false });
+window.addEventListener("gesturechange", preventPageGesture, { passive: false });
+window.addEventListener("gestureend", preventPageGesture, { passive: false });
+
+function preventPageTouchGesture(event) {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
+  }
+
+  event.preventDefault();
+}
+
+function preventPageGesture(event) {
+  if (shouldIgnorePagePointerEvent()) {
+    return;
+  }
+
+  event.preventDefault();
+}
 
 function shouldIgnorePagePointerEvent() {
   return document.body.classList.contains("mapgen-active");
@@ -946,6 +1043,526 @@ function setMousePointerHidden(hidden) {
   state.controller.mousePointerHidden = nextHidden;
   document.documentElement.classList.toggle("controller-pointer-hidden", nextHidden);
   document.body.classList.toggle("controller-pointer-hidden", nextHidden);
+}
+
+function syncMobileControlsEnabled() {
+  const enabled = Boolean(mobilePointerMedia?.matches);
+  state.mobile.enabled = enabled;
+  document.body.classList.toggle("mobile-controls", enabled);
+  if (!enabled) {
+    resetMobileJoysticks();
+    clearMobileHuckRockQueue();
+    state.mobile.move = { x: 0, y: 0 };
+  }
+  updateMobileControlUi();
+}
+
+function mobileControlsActive() {
+  return state.mobile.enabled && !state.controller.connected;
+}
+
+function handleMobilePointerMove(event) {
+  if (!mobileControlsActive()) {
+    return false;
+  }
+
+  event.preventDefault();
+  updateMouse(event);
+  if (state.mobile.moveJoystick.active && event.pointerId === state.mobile.moveJoystick.pointerId) {
+    updateMobileJoystickFromPointer(event, "move");
+  }
+  if (state.mobile.aimJoystick.active && event.pointerId === state.mobile.aimJoystick.pointerId) {
+    updateMobileJoystickFromPointer(event, "aim");
+  }
+  state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  if (state.upgrades.active) {
+    updateUpgradeSelectionFromMouse();
+  }
+  return true;
+}
+
+function handleMobilePointerDown(event) {
+  if (!mobileControlsActive()) {
+    return false;
+  }
+
+  event.preventDefault();
+  unlockAudio();
+  updateMouse(event);
+
+  const mobileAction = mobileActionAtPoint(state.mouse.x, state.mouse.y);
+  if (mobileAction) {
+    handleMobileAction(mobileAction);
+    return true;
+  }
+
+  const menuEntity = mobileMenuEntityAtPoint(state.mouse.x, state.mouse.y);
+  if (menuEntity) {
+    activateMenuEntity(menuEntity);
+    return true;
+  }
+
+  const screenButton = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  if (screenButton) {
+    handleRoomUiClick(screenButton);
+    return true;
+  }
+
+  if (state.upgrades.active) {
+    if (pointInRect(state.mouse.x, state.mouse.y, mobileUpgradeCloseActionRect())) {
+      closeUpgrades();
+      return true;
+    }
+    updateUpgradeSelectionFromMouse();
+    buySelectedUpgrade();
+    return true;
+  }
+
+  if (state.build.active && state.mouse.inFrame && !state.chat.active && !isRoomUiBlocking()) {
+    state.mouse.down = true;
+    buildWallAtMouse({ force: true });
+    return true;
+  }
+
+  const moveJoystickRect = mobileJoystickCssRect("move");
+  if (pointInCssRect(event.clientX, event.clientY, moveJoystickRect)) {
+    state.mobile.moveJoystick.pointerId = event.pointerId;
+    state.mobile.moveJoystick.active = true;
+    updateMobileJoystickFromPointer(event, "move");
+    return true;
+  }
+
+  const aimJoystickRect = mobileJoystickCssRect("aim");
+  if (pointInCssRect(event.clientX, event.clientY, aimJoystickRect)) {
+    state.mobile.aimJoystick.pointerId = event.pointerId;
+    state.mobile.aimJoystick.active = true;
+    updateMobileJoystickFromPointer(event, "aim");
+    return true;
+  }
+
+  if (!state.chat.active && !isRoomUiBlocking() && state.mouse.inFrame) {
+    queueMobileHuckRockFromPointer(event);
+    return true;
+  }
+
+  return true;
+}
+
+function handleMobilePointerUp(event) {
+  if (!mobileControlsActive()) {
+    return false;
+  }
+
+  event.preventDefault();
+  updateMouse(event);
+  if (state.mobile.moveJoystick.active && event.pointerId === state.mobile.moveJoystick.pointerId) {
+    resetMobileJoystick("move");
+  }
+  if (state.mobile.aimJoystick.active && event.pointerId === state.mobile.aimJoystick.pointerId) {
+    resetMobileJoystick("aim");
+  }
+  state.mouse.down = false;
+  return true;
+}
+
+function handleMobileAction(action) {
+  return runControlAction(action, { source: "mobile" });
+}
+
+function runControlAction(action, options = {}) {
+  switch (action) {
+    case "upgrades":
+      activateUpgrades();
+      return true;
+    case "closeUpgrades":
+      closeUpgrades();
+      return true;
+    case "build":
+      toggleBuildMode();
+      return true;
+    case "map":
+      if (playerMapAllowed()) {
+        state.playerMap.large = !state.playerMap.large;
+        return true;
+      }
+      return false;
+    case "leave":
+      return handleLeaveShortcut();
+    case "themeBack":
+      leaveThemeMenuRoom();
+      return true;
+    case "confirmLeave":
+      return confirmLeaveShortcut();
+    case "start":
+      requestWaitingRoomStart();
+      return true;
+    default:
+      return false;
+  }
+}
+
+function mobileActionAtPoint(x, y) {
+  if (state.upgrades.active && pointInRect(x, y, mobileUpgradeCloseActionRect())) {
+    return "closeUpgrades";
+  }
+
+  if (leaveConfirmIsActive()) {
+    return pointInRect(x, y, mobileConfirmLeaveActionRect()) ? "confirmLeave" : null;
+  }
+
+  if (state.room?.state === "waiting") {
+    if (pointInRect(x, y, mobileWaitingLeaveActionRect())) {
+      return "leave";
+    }
+    if (canStartWaitingRoom() && pointInRect(x, y, mobileWaitingStartActionRect())) {
+      return "start";
+    }
+    return null;
+  }
+
+  if (state.room?.state === "active" && !state.upgrades.active && !state.chat.active) {
+    if (pointInRect(x, y, mobileHudActionRect("upgrades"))) {
+      return "upgrades";
+    }
+    if (pointInRect(x, y, mobileHudActionRect("build"))) {
+      return "build";
+    }
+    if (playerMapAllowed() && pointInRect(x, y, mobileHudActionRect("map"))) {
+      return "map";
+    }
+    if (canLeaveWithShortcut() && pointInRect(x, y, mobileHudActionRect("leave"))) {
+      return "leave";
+    }
+  }
+
+  if (state.room?.state === "menu" && state.menu.room === MENU_ROOMS.theme) {
+    return pointInRect(x, y, mobileThemeLeaveActionRect()) ? "themeBack" : null;
+  }
+
+  return null;
+}
+
+function mobileMenuEntityAtPoint(frameX, frameY) {
+  if (state.room?.state !== "menu" || !state.menu.player || !state.mouse.inFrame) {
+    return null;
+  }
+
+  const worldPoint = lensScreenPointToWorld(state.menu.player, frameX, frameY, framebufferSize());
+  const entities = menuEntities();
+  for (let index = entities.length - 1; index >= 0; index -= 1) {
+    const entity = entities[index];
+    if (!entity?.action) {
+      continue;
+    }
+
+    if (menuEntityContainsPoint(entity, worldPoint.x, worldPoint.y)) {
+      return entity;
+    }
+  }
+
+  return null;
+}
+
+function menuEntityContainsPoint(entity, x, y) {
+  if (entity.type === "themeSwatch") {
+    const radius = Number(entity.radius || 0);
+    const dx = x - entity.x;
+    const dy = y - entity.y;
+    return dx * dx + dy * dy <= radius * radius;
+  }
+
+  return x >= entity.x &&
+    x <= entity.x + entity.width &&
+    y >= entity.y &&
+    y <= entity.y + entity.height;
+}
+
+function mobileHudActionRect(kind) {
+  const yByKind = {
+    upgrades: 74,
+    build: 88,
+    map: 102,
+    leave: 116
+  };
+  return {
+    x: MOBILE_HUD_ACTION_X,
+    y: yByKind[kind] || 0,
+    width: MOBILE_HUD_ACTION_WIDTH,
+    height: MOBILE_HUD_ACTION_HEIGHT
+  };
+}
+
+function mobileUpgradeCloseActionRect() {
+  const height = approximateUpgradeMenuHeight();
+  return {
+    x: UPGRADE_MENU_LAYOUT.x + 2,
+    y: UPGRADE_MENU_LAYOUT.y + height + MOBILE_UPGRADE_CLOSE_ACTION.gap,
+    width: MOBILE_UPGRADE_CLOSE_ACTION.width,
+    height: MOBILE_UPGRADE_CLOSE_ACTION.height
+  };
+}
+
+function mobileConfirmLeaveActionRect() {
+  return {
+    x: 10,
+    y: 8 + hudPanelHeightForRows(2) + HUD_PANEL_ACTION_GAP,
+    width: 112,
+    height: MOBILE_HUD_ACTION_HEIGHT
+  };
+}
+
+function mobileThemeLeaveActionRect() {
+  return {
+    x: 10,
+    y: 8 + hudPanelHeightForRows(1) + 7,
+    width: 96,
+    height: MOBILE_HUD_ACTION_HEIGHT
+  };
+}
+
+function mobileWaitingLeaveActionRect() {
+  const actionY = mobileWaitingActionsY();
+  return {
+    x: 10,
+    y: actionY,
+    width: 96,
+    height: MOBILE_HUD_ACTION_HEIGHT
+  };
+}
+
+function mobileWaitingStartActionRect() {
+  const actionY = mobileWaitingActionsY();
+  return {
+    x: 10,
+    y: actionY + 12,
+    width: 96,
+    height: MOBILE_HUD_ACTION_HEIGHT
+  };
+}
+
+function mobileWaitingActionsY() {
+  const playerHudHeight = localPlayerFromSnapshot() ? 58 : 0;
+  const waitingPanelY = playerHudHeight ? 8 + playerHudHeight + 6 : 8;
+  return waitingPanelY + hudPanelHeightForRows(2) + HUD_PANEL_ACTION_GAP;
+}
+
+function hudPanelHeightForRows(rowCount) {
+  return HUD_PANEL_PADDING * 2 +
+    HUD_PANEL_TEXT_HEIGHT +
+    Math.max(0, Math.floor(rowCount) - 1) * HUD_PANEL_ROW_STEP;
+}
+
+function approximateUpgradeMenuHeight() {
+  const rowsBottom = UPGRADE_MENU_LAYOUT.rowTopOffset +
+    UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
+  const dividerY = rowsBottom + UPGRADE_MENU_LAYOUT.dividerTopGap;
+  const detailY = dividerY + 1 + UPGRADE_MENU_LAYOUT.dividerBottomGap;
+  const detailHeight = UPGRADE_MENU_LAYOUT.rowTextHeight +
+    Math.max(0, UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
+  return detailY + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
+}
+
+function queueMobileHuckRockFromPointer(event) {
+  const player = isReadyMenu()
+    ? state.menu.player
+    : predictedLocalPlayer() || localPlayerFromSnapshot();
+  if (!player) {
+    return;
+  }
+
+  const target = lensScreenPointToWorld(player, state.mouse.x, state.mouse.y, framebufferSize());
+  state.mobile.huckRockTarget = target;
+  state.mobile.huckRockQueued = true;
+  state.mobile.huckRockQueuedUntilSeconds = performance.now() / 1000 + MOBILE_HUCK_ROCK_QUEUE_SECONDS;
+}
+
+function clearMobileHuckRockQueue() {
+  state.mobile.huckRockQueued = false;
+  state.mobile.huckRockQueuedUntilSeconds = 0;
+  state.mobile.huckRockTarget = null;
+}
+
+function mobileHuckRockQueued(nowSeconds = performance.now() / 1000) {
+  if (!mobileControlsActive() || !state.mobile.huckRockQueued) {
+    return false;
+  }
+
+  if (nowSeconds <= state.mobile.huckRockQueuedUntilSeconds) {
+    return true;
+  }
+
+  clearMobileHuckRockQueue();
+  return false;
+}
+
+function updateMobileJoystickFromPointer(event, kind) {
+  const joystick = mobileJoystickState(kind);
+  if (!joystick) {
+    return;
+  }
+
+  const rect = mobileJoystickCssRect(kind);
+  const dx = event.clientX - rect.centerX;
+  const dy = event.clientY - rect.centerY;
+  const distance = Math.hypot(dx, dy);
+  const limit = Math.max(1, rect.radius);
+  const clampedDistance = Math.min(distance, limit);
+  const x = distance > 0 ? dx / distance : 0;
+  const y = distance > 0 ? dy / distance : 0;
+
+  joystick.x = x * clampedDistance;
+  joystick.y = y * clampedDistance;
+  joystick.centerX = rect.centerX;
+  joystick.centerY = rect.centerY;
+  joystick.radius = rect.radius;
+  if (kind === "move") {
+    state.mobile.move = distance > 0
+      ? {
+          x: x * (clampedDistance / limit),
+          y: y * (clampedDistance / limit)
+        }
+      : { x: 0, y: 0 };
+  } else if (distance > 4) {
+    state.mobile.aimAngle = Math.atan2(dy, dx);
+    state.mouse.aimAngle = state.mobile.aimAngle;
+  }
+  updateMobileControlUi();
+}
+
+function mobileJoystickState(kind) {
+  return kind === "move"
+    ? state.mobile.moveJoystick
+    : kind === "aim"
+      ? state.mobile.aimJoystick
+      : null;
+}
+
+function resetMobileJoystick(kind) {
+  const joystick = mobileJoystickState(kind);
+  if (!joystick) {
+    return;
+  }
+
+  joystick.pointerId = null;
+  joystick.active = false;
+  joystick.x = 0;
+  joystick.y = 0;
+  if (kind === "move") {
+    state.mobile.move = { x: 0, y: 0 };
+  }
+  updateMobileControlUi();
+}
+
+function resetMobileJoysticks() {
+  resetMobileJoystick("move");
+  resetMobileJoystick("aim");
+  updateMobileControlUi();
+}
+
+function updateMobileControlUi() {
+  if (
+    !mobileControlsRoot ||
+    !mobileMoveJoystick ||
+    !mobileMoveJoystickKnob ||
+    !mobileAimJoystick ||
+    !mobileAimJoystickKnob
+  ) {
+    return;
+  }
+
+  const active = mobileControlsActive() && !shouldIgnorePagePointerEvent();
+  mobileControlsRoot.hidden = !active;
+  if (!active) {
+    return;
+  }
+
+  updateMobileJoystickElement("move", mobileMoveJoystick, mobileMoveJoystickKnob);
+  updateMobileJoystickElement("aim", mobileAimJoystick, mobileAimJoystickKnob);
+}
+
+function updateMobileJoystickElement(kind, element, knob) {
+  const joystick = mobileJoystickState(kind);
+  const rect = mobileJoystickCssRect(kind);
+  const foreground = state.theme?.foreground || cssDefaultTheme.foreground || RENDER.foreground;
+  const background = state.theme?.background || cssDefaultTheme.background || RENDER.background;
+  element.style.left = `${rect.centerX}px`;
+  element.style.top = `${rect.centerY}px`;
+  element.style.width = `${rect.radius * 2}px`;
+  element.style.height = `${rect.radius * 2}px`;
+  element.style.color = foreground;
+  element.style.setProperty("--bitspace-mobile-joystick-background", background);
+  knob.style.transform = `translate(calc(-50% + ${joystick.x}px), calc(-50% + ${joystick.y}px))`;
+}
+
+function mobileJoystickCssRect(kind = "aim") {
+  const frame = canvasContentCssRect(canvas);
+  const viewport = window.visualViewport;
+  const viewportTop = viewport?.offsetTop || 0;
+  const viewportHeight = viewport?.height || window.innerHeight || frame.bottom;
+  const viewportBottom = viewportTop + viewportHeight - canvasEdgePaddingPxClient();
+  const availableTop = frame.bottom + 4;
+  const availableHeight = Math.max(1, viewportBottom - availableTop);
+  const radius = clamp(
+    Math.min(frame.width * 0.18, availableHeight * 0.36),
+    MOBILE_JOYSTICK_MIN_RADIUS,
+    MOBILE_JOYSTICK_MAX_RADIUS
+  );
+  const centerX = kind === "move"
+    ? frame.left + frame.width * 0.28
+    : frame.left + frame.width * 0.72;
+  const centerY = availableHeight >= radius * 2
+    ? availableTop + availableHeight / 2
+    : viewportBottom - radius;
+
+  return {
+    centerX,
+    centerY,
+    radius,
+    left: centerX - radius,
+    top: centerY - radius,
+    right: centerX + radius,
+    bottom: centerY + radius
+  };
+}
+
+function canvasContentCssRect(targetCanvas) {
+  const rect = targetCanvas.getBoundingClientRect();
+  const canvasWidth = targetCanvas.width || RENDER.width;
+  const canvasHeight = targetCanvas.height || RENDER.height;
+  const scale = Math.min(rect.width / canvasWidth, rect.height / canvasHeight);
+  const width = canvasWidth * scale;
+  const height = canvasHeight * scale;
+  const offsetX = (rect.width - width) / 2;
+  const offsetY = mobileControlsActive() && targetCanvas === canvas
+    ? 0
+    : (rect.height - height) / 2;
+
+  return {
+    left: rect.left + offsetX,
+    top: rect.top + offsetY,
+    width,
+    height,
+    right: rect.left + offsetX + width,
+    bottom: rect.top + offsetY + height,
+    scale
+  };
+}
+
+function canvasEdgePaddingPxClient() {
+  const value = getComputedStyle(document.documentElement).getPropertyValue("--scene-edge-padding").trim();
+  if (value.endsWith("em")) {
+    const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    return (Number.parseFloat(value) || 0) * rootFontSize;
+  }
+  return Number.parseFloat(value) || 0;
+}
+
+function pointInRect(x, y, rect) {
+  return Boolean(rect) && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+}
+
+function pointInCssRect(x, y, rect) {
+  return Boolean(rect) && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 function clearPagePointerHover() {
@@ -1073,6 +1690,7 @@ function draw(now = 0) {
   measureUpdateBucket("updateInputMs", () => {
     updateControllerState(timeSeconds);
     syncThemeFromCss();
+    updateMobileControlUi();
     pruneEliminationNotices(timeSeconds);
   });
   measureUpdateBucket("updateGameMs", () => {
@@ -1145,6 +1763,7 @@ function draw(now = 0) {
     predictedPlayer: readyMenu ? null : predictedLocalPlayer(),
     eliminationNotices: state.eliminationNotices,
     controllerActive: state.controller.connected,
+	    mobileActive: mobileControlsActive(),
 	    controllerCursor: controllerCursorRenderState(),
 	    controllerAimCursor: controllerAimCursorRenderState(),
 	    hudFlash: hudFlashRenderState(timeSeconds),
@@ -2048,6 +2667,12 @@ function updateMenuAim(player) {
     return;
   }
 
+  if (mobileControlsActive() && state.mobile.aimJoystick.active) {
+    player.aimAngle = state.mobile.aimAngle;
+    state.mouse.aimAngle = player.aimAngle;
+    return;
+  }
+
   if (!hasMousePointer()) {
     return;
   }
@@ -2263,15 +2888,18 @@ function updateMenuHuckRocks(player, dtSeconds) {
 
   state.menu.huckRocks = rocks.concat(spawnedFragments);
 
-  if (
+  const shouldSpawnMenuHuckRock =
     !activatedEntityThisFrame &&
     !state.chat.active &&
-    (keys.has("Space") || state.controller.huckRock) &&
-    state.menu.huckRockCooldownSeconds <= 0
-  ) {
+    huckRockPhysicalInputActive() &&
+    state.menu.huckRockCooldownSeconds <= 0;
+  if (shouldSpawnMenuHuckRock) {
     spawnMenuHuckRock(player);
     requestHuckRockThunk();
     state.menu.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
+    if (mobileHuckRockQueued()) {
+      clearMobileHuckRockQueue();
+    }
   }
 }
 
@@ -3125,6 +3753,9 @@ function readLocalPlayerInput() {
   const move = readMoveVector();
   const huckRock = readHuckRockInput();
   const huckRockTarget = huckRock ? huckRockTargetForPlayer(player) : null;
+  if (huckRock && mobileHuckRockQueued()) {
+    clearMobileHuckRockQueue();
+  }
   return normalizeInput({
     sessionId: inputSessionId,
     seq: state.localGame.inputSeq,
@@ -3771,6 +4402,14 @@ function menuEntities() {
 }
 
 function menuControlHintRows() {
+  if (mobileControlsActive()) {
+    return [
+      { input: "LEFT JOYSTICK", action: "MOVE" },
+      { input: "RIGHT JOYSTICK", action: "MINING RAY" },
+      { input: "TAP", action: "HUCK ROCK" }
+    ];
+  }
+
   if (state.controller.connected) {
     return [
       { input: "L STICK", action: "MOVE" },
@@ -5887,6 +6526,9 @@ function readInput() {
   const huckRockTarget = huckRock
     ? huckRockTargetForPlayer(player)
     : null;
+  if (huckRock && mobileHuckRockQueued()) {
+    clearMobileHuckRockQueue();
+  }
 
   return normalizeInput({
     sessionId: inputSessionId,
@@ -5921,6 +6563,9 @@ function readHuckRockInput() {
       state.huckRockNeedRockFlashArmed = false;
       state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
     }
+    if (huckRockBlockedForRockCost()) {
+      clearMobileHuckRockQueue();
+    }
     return false;
   }
 
@@ -5934,15 +6579,18 @@ function readHuckRockInput() {
 }
 
 function huckRockPhysicalInputActive() {
-  return keys.has("Space") || (state.controller.connected && state.controller.huckRock);
+  return keys.has("Space") ||
+    (state.controller.connected && state.controller.huckRock) ||
+    mobileHuckRockQueued();
 }
 
 function huckRockInputAllowed() {
   const roomState = state.room?.state;
   const controllerHuck = state.controller.connected && state.controller.huckRock;
+  const mobileHuck = mobileHuckRockQueued();
   if (
     !huckRockPhysicalInputActive() ||
-    (!controllerHuck && !hasMousePointer()) ||
+    (!controllerHuck && !mobileHuck && !hasMousePointer()) ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
     state.build.active
@@ -5985,12 +6633,18 @@ function huckRockTargetForPlayer(player) {
     return controllerAimTargetForPlayer(player);
   }
 
+  if (mobileControlsActive() && state.mobile.huckRockTarget) {
+    return state.mobile.huckRockTarget;
+  }
+
   const aim = activeAimFramePoint();
   return lensScreenPointToWorld(player, aim.x, aim.y, aim);
 }
 
 function physicalMiningInputActive() {
-  return (state.mouse.down && hasMousePointer()) || controllerMiningActive();
+  return (state.mouse.down && hasMousePointer()) ||
+    controllerMiningActive() ||
+    (mobileControlsActive() && state.mobile.aimJoystick.active);
 }
 
 function activeRoomMiningInputAllowed() {
@@ -6155,6 +6809,10 @@ function huckRockRecoilImpulse(player) {
 }
 
 function readMoveVector() {
+  if (mobileControlsActive()) {
+    return state.mobile.move;
+  }
+
   const keyboardX = axis("KeyD", "ArrowRight", "KeyA", "ArrowLeft");
   const keyboardY = axis("KeyS", "ArrowDown", "KeyW", "ArrowUp");
   const controllerMove = controllerShipMoveVector();
@@ -7870,7 +8528,8 @@ function buildHoldActive() {
   }
 
   return state.mouse.down ||
-    (state.controller.connected && state.controller.mining);
+    (state.controller.connected && state.controller.mining) ||
+    (mobileControlsActive() && state.mobile.aimJoystick.active);
 }
 
 function resetBuildHold() {
@@ -7976,6 +8635,10 @@ function buildTargetFromMouse() {
 function buildAngleForPlayer(player) {
   if (state.controller.connected && state.build.active && !state.mouse.down) {
     return controllerAimAngleForPlayer(player);
+  }
+
+  if (mobileControlsActive() && state.build.active && !state.mouse.down) {
+    return state.mobile.aimAngle;
   }
 
   const aim = activeAimFramePoint();
@@ -9376,6 +10039,18 @@ function inputAimAngleForPlayer(player) {
     return controllerAimAngleForPlayer(player);
   }
 
+  if (mobileControlsActive()) {
+    if (state.mobile.aimJoystick.active && Number.isFinite(state.mobile.aimAngle)) {
+      return state.mobile.aimAngle;
+    }
+    if (Number.isFinite(player?.aimAngle)) {
+      return player.aimAngle;
+    }
+    if (Number.isFinite(player?.angle)) {
+      return player.angle;
+    }
+  }
+
   return state.mouse.aimAngle;
 }
 
@@ -9404,19 +10079,16 @@ function eventToMiniPlayerPoint(event) {
 }
 
 function eventToCanvasFramePoint(event, targetCanvas) {
-  const rect = targetCanvas.getBoundingClientRect();
   const canvasWidth = targetCanvas.width || RENDER.width;
   const canvasHeight = targetCanvas.height || RENDER.height;
-  const scale = Math.min(rect.width / canvasWidth, rect.height / canvasHeight);
-  const width = canvasWidth * scale;
-  const height = canvasHeight * scale;
-  const x = event.clientX - rect.left - (rect.width - width) / 2;
-  const y = event.clientY - rect.top - (rect.height - height) / 2;
+  const rect = canvasContentCssRect(targetCanvas);
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
 
   return {
-    x: clamp(x / scale, 0, canvasWidth),
-    y: clamp(y / scale, 0, canvasHeight),
-    inFrame: x >= 0 && x <= width && y >= 0 && y <= height
+    x: clamp(x / rect.scale, 0, canvasWidth),
+    y: clamp(y / rect.scale, 0, canvasHeight),
+    inFrame: x >= 0 && x <= rect.width && y >= 0 && y <= rect.height
   };
 }
 
