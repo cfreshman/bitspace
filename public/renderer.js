@@ -132,6 +132,9 @@ const HUD_PANEL_PADDING = 4;
 const HUD_PANEL_TEXT_HEIGHT = 7;
 const HUD_PANEL_ROW_STEP = 10;
 const HUD_PANEL_ACTION_GAP = 7;
+const HUD_CONTROL_TEXT_BORDER = Object.freeze({
+  borderTransparentAsBacking: true
+});
 const ENDED_HUD_LAYOUT = Object.freeze({
   x: 8,
   y: 8,
@@ -952,6 +955,15 @@ function createPixelSurface(canvasContext, width, height) {
     },
     getImageData() {
       return imageData;
+    },
+    getPixelColor(x, y) {
+      const px = Math.floor(x);
+      const py = Math.floor(y);
+      if (px < 0 || py < 0 || px >= width || py >= height) {
+        return null;
+      }
+
+      return pixels[py * width + px];
     },
     queueGpuStormLayer(layer) {
       if (!layer) {
@@ -3223,8 +3235,12 @@ function drawBitmapTextLine(ctx, text, x, y, maxWidth, scale, options = {}, colo
 
 function drawBitmapGlyph(ctx, glyph, x, y, scale, color, borderColor) {
   if (borderColor) {
-    ctx.fillStyle = borderColor;
-    drawBitmapGlyphBorder(ctx, glyph, x, y, scale);
+    if (borderColor.mode === "adaptive") {
+      drawBitmapGlyphAdaptiveBorder(ctx, glyph, x, y, scale, borderColor);
+    } else {
+      ctx.fillStyle = borderColor;
+      drawBitmapGlyphBorder(ctx, glyph, x, y, scale);
+    }
   }
 
   ctx.fillStyle = color;
@@ -3232,6 +3248,36 @@ function drawBitmapGlyph(ctx, glyph, x, y, scale, color, borderColor) {
     for (let col = 0; col < glyph[row].length; col += 1) {
       if (glyph[row][col] === "1") {
         ctx.fillRect(x + col * scale, y + row * scale, scale, scale);
+      }
+    }
+  }
+}
+
+function drawBitmapGlyphAdaptiveBorder(ctx, glyph, x, y, scale, borderColor) {
+  const background = borderColor.background || RENDER.background;
+  const backing = borderColor.backing || "#000000";
+  const packedBacking = packColor(backing) >>> 0;
+  const transparentIsBacking = borderColor.transparentAsBacking === true;
+
+  for (let row = 0; row < glyph.length; row += 1) {
+    for (let col = 0; col < glyph[row].length; col += 1) {
+      if (glyph[row][col] !== "1") {
+        continue;
+      }
+
+      const startX = x + col * scale - 1;
+      const startY = y + row * scale - 1;
+      const size = scale + 2;
+      for (let py = startY; py < startY + size; py += 1) {
+        for (let px = startX; px < startX + size; px += 1) {
+          const sample = typeof ctx.getPixelColor === "function"
+            ? ctx.getPixelColor(px, py)
+            : null;
+          ctx.fillStyle = sample === packedBacking || (transparentIsBacking && sample === 0)
+            ? backing
+            : background;
+          ctx.fillRect(px, py, 1, 1);
+        }
       }
     }
   }
@@ -3249,12 +3295,26 @@ function drawBitmapGlyphBorder(ctx, glyph, x, y, scale) {
 
 function bitmapTextBorderColor(textColor, options = {}, colors = {}) {
   if (options.borderColor) {
+    if (options.borderColor === "auto") {
+      return adaptiveBitmapTextBorder(colors, options);
+    }
     return options.borderColor;
   }
 
   const foreground = colors.foreground || RENDER.foreground;
   const background = colors.background || RENDER.background;
-  return sameColor(textColor, background) ? foreground : background;
+  return sameColor(textColor, background)
+    ? foreground
+    : adaptiveBitmapTextBorder(colors, options);
+}
+
+function adaptiveBitmapTextBorder(colors = {}, options = {}) {
+  return {
+    mode: "adaptive",
+    background: options.borderBackgroundColor || colors.background || RENDER.background,
+    backing: options.borderBackingColor || colors.backing || "#000000",
+    transparentAsBacking: options.borderTransparentAsBacking === true
+  };
 }
 
 function sameColor(a, b) {
@@ -3966,7 +4026,8 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRe
 
   const textOptions = {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER
   };
 
   const firstLineY = y + labelOffsetY;
@@ -4000,6 +4061,7 @@ function drawWaitingDisabledFlash(ctx, x, y, options, colors, textRenderer) {
   textRenderer.draw(ctx, text, x, y, {
     fontSize: 8,
     color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER,
     width: 112
   });
 }
@@ -5638,7 +5700,8 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
 
   const textOptions = {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER
   };
 
   textRenderer.draw(ctx, "ESC - LEAVE", x, y + 2, {
@@ -5656,6 +5719,7 @@ function drawTerminalConfirmLeaveAction(ctx, x, y, options, colors, textRenderer
   textRenderer.draw(ctx, "ENTER - CONFIRM", x, y + 2, {
     fontSize: 8,
     color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER,
     width: 112
   });
 }
@@ -9402,7 +9466,9 @@ function drawThemeSwatchEntity(ctx, entity, camera, colors, textRenderer) {
   drawCenteredCircleLabel(ctx, textRenderer, String(entity.label || ""), x, y - 7, {
     fontSize: 10,
     color: detailColor,
-    borderColor: background
+    borderColor: "auto",
+    borderBackgroundColor: background,
+    borderBackingColor: backing
   });
 }
 
@@ -9911,7 +9977,8 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
 
     textRenderer.draw(ctx, "Q - UPGRADES", 10, 74, {
       fontSize: 8,
-      color: colors.foreground
+      color: colors.foreground,
+      ...HUD_CONTROL_TEXT_BORDER
     });
     return;
   }
@@ -9939,7 +10006,8 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
 
   textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 88, {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER
   });
 }
 
@@ -9955,7 +10023,8 @@ function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerAct
 
   textRenderer.draw(ctx, "M - MAP", 10, 102, {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER
   });
 }
 
@@ -10057,6 +10126,7 @@ function drawControllerHudAction(ctx, buttonPosition, label, x, y, colors, textR
   textRenderer.draw(ctx, label, x + 19, labelY, {
     fontSize: 8,
     color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER,
     width: 120
   });
 }
@@ -10069,6 +10139,7 @@ function drawControllerDpadHudAction(ctx, buttonPosition, label, x, y, colors, t
   textRenderer.draw(ctx, label, x + 19, labelY, {
     fontSize: 8,
     color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER,
     width: 120
   });
 }
