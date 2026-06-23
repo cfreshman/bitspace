@@ -1,12 +1,14 @@
 :root {
   --scene-edge-padding: 1em;
+  --mobile-control-drawer-height: 168px;
+  --bitspace-backing: #000000;
 }
 
 html,
 body {
   margin: 0;
   overflow: hidden;
-  background: #000000;
+  background: var(--bitspace-backing);
   overscroll-behavior: none;
   touch-action: none;
   user-select: none;
@@ -17,6 +19,7 @@ body {
 
 #scene,
 #scene-present,
+#hud-present,
 #minimap {
   position: fixed;
   inset: var(--scene-edge-padding) auto auto var(--scene-edge-padding);
@@ -27,17 +30,24 @@ body {
 }
 
 #scene {
-  background: #000000;
+  background: var(--bitspace-backing);
   touch-action: none;
 }
 
 body.mobile-controls #scene,
 body.mobile-controls #scene-present {
-  object-position: top center;
+  object-position: bottom center;
 }
 
 #scene-present {
   pointer-events: none;
+}
+
+#hud-present {
+  background: transparent;
+  object-fit: fill;
+  pointer-events: none;
+  z-index: 2;
 }
 
 #minimap {
@@ -111,6 +121,16 @@ body.mobile-controls #scene-present {
   pointer-events: none;
 }
 
+.mobile-controls::before {
+  content: "";
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--mobile-control-drawer-height);
+  background: var(--bitspace-backing);
+}
+
 .mobile-controls[hidden] {
   display: none;
 }
@@ -119,46 +139,20 @@ body.mobile-controls #scene-present {
   position: fixed;
   width: 128px;
   height: 128px;
-  transform: translate(-50%, -50%);
-  border: 2px solid currentColor;
-  border-radius: 50%;
-  color: #74acef;
-  background: var(--bitspace-mobile-joystick-background, #231f33);
+  transform: none;
+  border: 0;
+  background: transparent;
+  box-sizing: border-box;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
 }
 
-.mobile-joystick::before,
-.mobile-joystick::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  background: currentColor;
-  transform: translate(-50%, -50%);
-}
-
-.mobile-joystick::before {
-  width: 1px;
-  height: 22px;
-}
-
-.mobile-joystick::after {
-  width: 22px;
-  height: 1px;
-}
-
-.mobile-joystick-knob {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 26px;
-  height: 26px;
-  transform: translate(-50%, -50%);
-  border: 2px solid currentColor;
-  border-radius: 50%;
-  background: var(--bitspace-mobile-joystick-background, #231f33);
-  box-sizing: border-box;
+.mobile-joystick-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
 body.mapgen-active {
@@ -167,6 +161,7 @@ body.mapgen-active {
 
 body.mapgen-active #scene,
 body.mapgen-active #scene-present,
+body.mapgen-active #hud-present,
 body.mapgen-active #minimap {
   display: none;
 }
@@ -175,6 +170,7 @@ html.controller-pointer-hidden,
 html.controller-pointer-hidden body,
 html.controller-pointer-hidden #scene,
 html.controller-pointer-hidden #scene-present,
+html.controller-pointer-hidden #hud-present,
 html.controller-pointer-hidden #minimap {
   cursor: none;
 }

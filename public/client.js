@@ -192,6 +192,9 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
   bottomPadding: 8
 });
 const MOBILE_POINTER_QUERY = "(pointer: coarse)";
+const MOBILE_HUD_SCALE = 1.5;
+const MOBILE_JOYSTICK_DEADZONE_RATIO = 0.22;
+const MOBILE_JOYSTICK_MIN_DEADZONE = 8;
 const MOBILE_JOYSTICK_MIN_RADIUS = 42;
 const MOBILE_JOYSTICK_MAX_RADIUS = 72;
 const MOBILE_HUCK_ROCK_QUEUE_SECONDS = 0.35;
@@ -224,9 +227,9 @@ const canvas = document.querySelector("#scene");
 const minimapCanvas = document.querySelector("#minimap");
 const mobileControlsRoot = document.querySelector("#mobile-controls");
 const mobileMoveJoystick = document.querySelector("#mobile-move-joystick");
-const mobileMoveJoystickKnob = document.querySelector("#mobile-move-joystick-knob");
+const mobileMoveJoystickCanvas = document.querySelector("#mobile-move-joystick-canvas");
 const mobileAimJoystick = document.querySelector("#mobile-aim-joystick");
-const mobileAimJoystickKnob = document.querySelector("#mobile-aim-joystick-knob");
+const mobileAimJoystickCanvas = document.querySelector("#mobile-aim-joystick-canvas");
 const perfDebugRoot = document.querySelector("#perf-debug");
 const perfDebugPanel = document.querySelector("#perf-debug-panel");
 const perfDebugCopy = document.querySelector("#perf-debug-copy");
@@ -375,6 +378,7 @@ const state = {
     moveJoystick: {
       pointerId: null,
       active: false,
+      engaged: false,
       x: 0,
       y: 0,
       centerX: 0,
@@ -384,6 +388,7 @@ const state = {
     aimJoystick: {
       pointerId: null,
       active: false,
+      engaged: false,
       x: 0,
       y: 0,
       centerX: 0,
@@ -1049,6 +1054,7 @@ function syncMobileControlsEnabled() {
   const enabled = Boolean(mobilePointerMedia?.matches);
   state.mobile.enabled = enabled;
   document.body.classList.toggle("mobile-controls", enabled);
+  renderer.resize?.();
   if (!enabled) {
     resetMobileJoysticks();
     clearMobileHuckRockQueue();
@@ -1061,6 +1067,10 @@ function mobileControlsActive() {
   return state.mobile.enabled && !state.controller.connected;
 }
 
+function mobileAimJoystickEngaged() {
+  return mobileControlsActive() && state.mobile.aimJoystick.active && state.mobile.aimJoystick.engaged;
+}
+
 function handleMobilePointerMove(event) {
   if (!mobileControlsActive()) {
     return false;
@@ -1068,15 +1078,16 @@ function handleMobilePointerMove(event) {
 
   event.preventDefault();
   updateMouse(event);
+  const hudPoint = mobileHudFramePointFromEvent(event);
   if (state.mobile.moveJoystick.active && event.pointerId === state.mobile.moveJoystick.pointerId) {
     updateMobileJoystickFromPointer(event, "move");
   }
   if (state.mobile.aimJoystick.active && event.pointerId === state.mobile.aimJoystick.pointerId) {
     updateMobileJoystickFromPointer(event, "aim");
   }
-  state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  state.uiHoverId = screenRoomButtonAtPoint(hudPoint.x, hudPoint.y);
   if (state.upgrades.active) {
-    updateUpgradeSelectionFromMouse();
+    updateUpgradeSelectionFromPoint(hudPoint.x, hudPoint.y);
   }
   return true;
 }
@@ -1089,8 +1100,9 @@ function handleMobilePointerDown(event) {
   event.preventDefault();
   unlockAudio();
   updateMouse(event);
+  const hudPoint = mobileHudFramePointFromEvent(event);
 
-  const mobileAction = mobileActionAtPoint(state.mouse.x, state.mouse.y);
+  const mobileAction = mobileActionAtPoint(hudPoint.x, hudPoint.y);
   if (mobileAction) {
     handleMobileAction(mobileAction);
     return true;
@@ -1102,18 +1114,18 @@ function handleMobilePointerDown(event) {
     return true;
   }
 
-  const screenButton = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
+  const screenButton = screenRoomButtonAtPoint(hudPoint.x, hudPoint.y);
   if (screenButton) {
     handleRoomUiClick(screenButton);
     return true;
   }
 
   if (state.upgrades.active) {
-    if (pointInRect(state.mouse.x, state.mouse.y, mobileUpgradeCloseActionRect())) {
+    if (pointInRect(hudPoint.x, hudPoint.y, mobileUpgradeCloseActionRect())) {
       closeUpgrades();
       return true;
     }
-    updateUpgradeSelectionFromMouse();
+    updateUpgradeSelectionFromPoint(hudPoint.x, hudPoint.y);
     buySelectedUpgrade();
     return true;
   }
@@ -1355,6 +1367,10 @@ function hudPanelHeightForRows(rowCount) {
 function approximateUpgradeMenuHeight() {
   const rowsBottom = UPGRADE_MENU_LAYOUT.rowTopOffset +
     UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
+  if (mobileControlsActive()) {
+    return rowsBottom + UPGRADE_MENU_LAYOUT.bottomPadding;
+  }
+
   const dividerY = rowsBottom + UPGRADE_MENU_LAYOUT.dividerTopGap;
   const detailY = dividerY + 1 + UPGRADE_MENU_LAYOUT.dividerBottomGap;
   const detailHeight = UPGRADE_MENU_LAYOUT.rowTextHeight +
@@ -1407,6 +1423,9 @@ function updateMobileJoystickFromPointer(event, kind) {
   const distance = Math.hypot(dx, dy);
   const limit = Math.max(1, rect.radius);
   const clampedDistance = Math.min(distance, limit);
+  const deadzone = Math.min(limit - 1, Math.max(MOBILE_JOYSTICK_MIN_DEADZONE, limit * MOBILE_JOYSTICK_DEADZONE_RATIO));
+  const liveDistance = Math.max(0, clampedDistance - deadzone);
+  const engaged = liveDistance > 0;
   const x = distance > 0 ? dx / distance : 0;
   const y = distance > 0 ? dy / distance : 0;
 
@@ -1415,14 +1434,16 @@ function updateMobileJoystickFromPointer(event, kind) {
   joystick.centerX = rect.centerX;
   joystick.centerY = rect.centerY;
   joystick.radius = rect.radius;
+  joystick.engaged = engaged;
   if (kind === "move") {
-    state.mobile.move = distance > 0
+    const power = clamp(liveDistance / Math.max(1, limit * 0.5 - deadzone), 0, 1);
+    state.mobile.move = engaged
       ? {
-          x: x * (clampedDistance / limit),
-          y: y * (clampedDistance / limit)
+          x: x * power,
+          y: y * power
         }
       : { x: 0, y: 0 };
-  } else if (distance > 4) {
+  } else if (engaged) {
     state.mobile.aimAngle = Math.atan2(dy, dx);
     state.mouse.aimAngle = state.mobile.aimAngle;
   }
@@ -1445,6 +1466,7 @@ function resetMobileJoystick(kind) {
 
   joystick.pointerId = null;
   joystick.active = false;
+  joystick.engaged = false;
   joystick.x = 0;
   joystick.y = 0;
   if (kind === "move") {
@@ -1463,9 +1485,9 @@ function updateMobileControlUi() {
   if (
     !mobileControlsRoot ||
     !mobileMoveJoystick ||
-    !mobileMoveJoystickKnob ||
+    !mobileMoveJoystickCanvas ||
     !mobileAimJoystick ||
-    !mobileAimJoystickKnob
+    !mobileAimJoystickCanvas
   ) {
     return;
   }
@@ -1476,22 +1498,70 @@ function updateMobileControlUi() {
     return;
   }
 
-  updateMobileJoystickElement("move", mobileMoveJoystick, mobileMoveJoystickKnob);
-  updateMobileJoystickElement("aim", mobileAimJoystick, mobileAimJoystickKnob);
+  updateMobileJoystickElement("move", mobileMoveJoystick, mobileMoveJoystickCanvas);
+  updateMobileJoystickElement("aim", mobileAimJoystick, mobileAimJoystickCanvas);
 }
 
-function updateMobileJoystickElement(kind, element, knob) {
+function updateMobileJoystickElement(kind, element, joystickCanvas) {
   const joystick = mobileJoystickState(kind);
   const rect = mobileJoystickCssRect(kind);
   const foreground = state.theme?.foreground || cssDefaultTheme.foreground || RENDER.foreground;
   const background = state.theme?.background || cssDefaultTheme.background || RENDER.background;
-  element.style.left = `${rect.centerX}px`;
-  element.style.top = `${rect.centerY}px`;
-  element.style.width = `${rect.radius * 2}px`;
-  element.style.height = `${rect.radius * 2}px`;
-  element.style.color = foreground;
-  element.style.setProperty("--bitspace-mobile-joystick-background", background);
-  knob.style.transform = `translate(calc(-50% + ${joystick.x}px), calc(-50% + ${joystick.y}px))`;
+  const diameter = Math.round(rect.radius * 2);
+  element.style.left = `${Math.round(rect.left)}px`;
+  element.style.top = `${Math.round(rect.top)}px`;
+  element.style.width = `${diameter}px`;
+  element.style.height = `${diameter}px`;
+  drawMobileJoystickCanvas(joystickCanvas, diameter, joystick, foreground, background);
+}
+
+function drawMobileJoystickCanvas(joystickCanvas, diameter, joystick, foreground, background) {
+  if (!joystickCanvas) {
+    return;
+  }
+
+  if (joystickCanvas.width !== diameter || joystickCanvas.height !== diameter) {
+    joystickCanvas.width = diameter;
+    joystickCanvas.height = diameter;
+  }
+
+  const ctx = joystickCanvas.getContext("2d");
+  if (!ctx) {
+    return;
+  }
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, diameter, diameter);
+
+  const center = Math.round(diameter / 2);
+  const radius = Math.max(1, Math.floor(diameter / 2));
+  ctx.fillStyle = background;
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = foreground;
+  ctx.fillRect(center - 1, center - 11, 2, 22);
+  ctx.fillRect(center - 11, center - 1, 22, 2);
+
+  const knobSize = 26;
+  const knobRadius = knobSize / 2;
+  const knobX = Math.round(center + (joystick?.x || 0));
+  const knobY = Math.round(center + (joystick?.y || 0));
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = background;
+  ctx.beginPath();
+  ctx.arc(knobX, knobY, knobRadius - 1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = foreground;
+  ctx.beginPath();
+  ctx.arc(knobX, knobY, knobRadius - 1, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function mobileJoystickCssRect(kind = "aim") {
@@ -1502,26 +1572,28 @@ function mobileJoystickCssRect(kind = "aim") {
   const viewportBottom = viewportTop + viewportHeight - canvasEdgePaddingPxClient();
   const availableTop = frame.bottom + 4;
   const availableHeight = Math.max(1, viewportBottom - availableTop);
-  const radius = clamp(
+  const radius = Math.round(clamp(
     Math.min(frame.width * 0.18, availableHeight * 0.36),
     MOBILE_JOYSTICK_MIN_RADIUS,
     MOBILE_JOYSTICK_MAX_RADIUS
-  );
+  ));
   const centerX = kind === "move"
     ? frame.left + frame.width * 0.28
     : frame.left + frame.width * 0.72;
   const centerY = availableHeight >= radius * 2
     ? availableTop + availableHeight / 2
     : viewportBottom - radius;
+  const roundedCenterX = Math.round(centerX);
+  const roundedCenterY = Math.round(centerY);
 
   return {
-    centerX,
-    centerY,
+    centerX: roundedCenterX,
+    centerY: roundedCenterY,
     radius,
-    left: centerX - radius,
-    top: centerY - radius,
-    right: centerX + radius,
-    bottom: centerY + radius
+    left: roundedCenterX - radius,
+    top: roundedCenterY - radius,
+    right: roundedCenterX + radius,
+    bottom: roundedCenterY + radius
   };
 }
 
@@ -1534,7 +1606,7 @@ function canvasContentCssRect(targetCanvas) {
   const height = canvasHeight * scale;
   const offsetX = (rect.width - width) / 2;
   const offsetY = mobileControlsActive() && targetCanvas === canvas
-    ? 0
+    ? rect.height - height
     : (rect.height - height) / 2;
 
   return {
@@ -1544,6 +1616,42 @@ function canvasContentCssRect(targetCanvas) {
     height,
     right: rect.left + offsetX + width,
     bottom: rect.top + offsetY + height,
+    scale
+  };
+}
+
+function mobileHudFramePointFromEvent(event) {
+  const basePoint = eventToFramebufferPoint(event);
+  if (!mobileControlsActive()) {
+    return basePoint;
+  }
+
+  const frame = mobileHudContentCssRect();
+  const scale = Math.max(0.0001, frame.scale);
+  const x = event.clientX - frame.left;
+  const y = event.clientY - frame.top;
+  return {
+    x: clamp(x / scale, 0, canvas.width || RENDER.width),
+    y: clamp(y / scale, 0, canvas.height || RENDER.height),
+    inFrame: x >= 0 && x <= frame.width && y >= 0 && y <= frame.height
+  };
+}
+
+function mobileHudContentCssRect() {
+  const frame = canvasContentCssRect(canvas);
+  if (!mobileControlsActive()) {
+    return frame;
+  }
+
+  const canvasRect = canvas.getBoundingClientRect();
+  const scale = frame.scale * MOBILE_HUD_SCALE;
+  return {
+    left: frame.left,
+    top: canvasRect.top,
+    width: frame.width * MOBILE_HUD_SCALE,
+    height: frame.height * MOBILE_HUD_SCALE,
+    right: frame.left + frame.width * MOBILE_HUD_SCALE,
+    bottom: canvasRect.top + frame.height * MOBILE_HUD_SCALE,
     scale
   };
 }
@@ -2667,7 +2775,7 @@ function updateMenuAim(player) {
     return;
   }
 
-  if (mobileControlsActive() && state.mobile.aimJoystick.active) {
+  if (mobileAimJoystickEngaged()) {
     player.aimAngle = state.mobile.aimAngle;
     state.mouse.aimAngle = player.aimAngle;
     return;
@@ -3617,7 +3725,7 @@ function updateLocalBotGameImpl(timeSeconds) {
   const stepSeconds = 1 / ENGINE.tickRate;
   let steps = 0;
   while (localGame.accumulatorSeconds >= stepSeconds && steps < LOCAL_BOT_MAX_STEPS_PER_FRAME) {
-    const stepOptions = { updateBotInputs: steps === 0 };
+    const stepOptions = { updateBotInputs: true };
     if (botProfileActive()) {
       botProfileMeasure("stepLocalBotArena", () => stepLocalBotArena(stepSeconds, stepOptions));
     } else {
@@ -5503,6 +5611,7 @@ function applyThemeToSource(theme) {
 
 function applyThemeBacking(theme) {
   const backing = normalizeTheme(theme).backing;
+  document.documentElement.style.setProperty("--bitspace-backing", backing);
   document.documentElement.style.backgroundColor = backing;
   document.body.style.backgroundColor = backing;
   canvas.style.backgroundColor = backing;
@@ -6644,7 +6753,7 @@ function huckRockTargetForPlayer(player) {
 function physicalMiningInputActive() {
   return (state.mouse.down && hasMousePointer()) ||
     controllerMiningActive() ||
-    (mobileControlsActive() && state.mobile.aimJoystick.active);
+    mobileAimJoystickEngaged();
 }
 
 function activeRoomMiningInputAllowed() {
@@ -8434,7 +8543,11 @@ function isLocalPlayerEliminated() {
 }
 
 function updateUpgradeSelectionFromMouse() {
-  const index = upgradeIndexAtPoint(state.mouse.x, state.mouse.y);
+  updateUpgradeSelectionFromPoint(state.mouse.x, state.mouse.y);
+}
+
+function updateUpgradeSelectionFromPoint(x, y) {
+  const index = upgradeIndexAtPoint(x, y);
   if (state.upgrades.selectedIndex !== index) {
     state.upgrades.selectedIndex = index;
   }
@@ -8529,7 +8642,7 @@ function buildHoldActive() {
 
   return state.mouse.down ||
     (state.controller.connected && state.controller.mining) ||
-    (mobileControlsActive() && state.mobile.aimJoystick.active);
+    mobileAimJoystickEngaged();
 }
 
 function resetBuildHold() {
@@ -9911,10 +10024,10 @@ function upgradeRowsRect() {
 }
 
 function upgradeMenuRowWidth() {
-  return approximateUpgradeMenuWidth() - UPGRADE_MENU_LAYOUT.rowInset * 2;
+  return approximateUpgradeMenuWidth(mobileControlsActive()) - UPGRADE_MENU_LAYOUT.rowInset * 2;
 }
 
-function approximateUpgradeMenuWidth() {
+function approximateUpgradeMenuWidth(mobileActive = false) {
   const labelWidth = Math.max(...UPGRADE_DEFINITIONS.map((definition) =>
     approximateBitmapTextWidth(definition.label)
   ));
@@ -9925,14 +10038,17 @@ function approximateUpgradeMenuWidth() {
     labelWidth +
     UPGRADE_MENU_LAYOUT.columnGap +
     levelWidth;
-  const detailWidth = Math.max(...approximateUpgradeMenuDetailLines().map(approximateBitmapTextWidth));
   const titleWidth = approximateBitmapTextWidth("UPGRADES");
-
-  return Math.ceil(Math.max(
+  const widths = [
     titleWidth + UPGRADE_MENU_LAYOUT.padding * 2,
-    rowWidth + UPGRADE_MENU_LAYOUT.rowInset * 2,
-    detailWidth + UPGRADE_MENU_LAYOUT.padding * 2
-  ));
+    rowWidth + UPGRADE_MENU_LAYOUT.rowInset * 2
+  ];
+  if (!mobileActive) {
+    const detailWidth = Math.max(...approximateUpgradeMenuDetailLines().map(approximateBitmapTextWidth));
+    widths.push(detailWidth + UPGRADE_MENU_LAYOUT.padding * 2);
+  }
+
+  return Math.ceil(Math.max(...widths));
 }
 
 function approximateUpgradeMenuDetailLines() {

@@ -29,6 +29,7 @@ import {
 
 const ENTITY_PIXEL_SIZE = 1;
 const CANVAS_EDGE_PADDING_EM = 1;
+const MOBILE_HUD_SCALE = 1.5;
 const MIN_RENDER_ASPECT = 2 / 3;
 const MAX_RENDER_ASPECT = 3 / 2;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
@@ -334,6 +335,8 @@ export function createRenderer(canvas, minimapCanvas = null) {
   const canvasContext = canvas.getContext("2d", { alpha: false });
   const minimapContext = minimapCanvas?.getContext("2d") || null;
   const presentCanvas = createScenePresentCanvas(canvas);
+  const hudPresentCanvas = createHudPresentCanvas(presentCanvas || canvas);
+  const hudPresentContext = hudPresentCanvas?.getContext("2d", { alpha: true }) || null;
   let surface = null;
   let overlaySurface = null;
   let hudSurface = null;
@@ -363,11 +366,19 @@ export function createRenderer(canvas, minimapCanvas = null) {
     const viewport = getViewportSize();
     resizeRenderSurface(viewport);
     resizeMinimapSurface(viewport);
+    const sceneViewport = sceneBoxViewport(viewport);
     canvas.style.width = `${viewport.width}px`;
-    canvas.style.height = `${viewport.height}px`;
+    canvas.style.height = `${sceneViewport.height}px`;
     if (presentCanvas) {
       presentCanvas.style.width = `${viewport.width}px`;
-      presentCanvas.style.height = `${viewport.height}px`;
+      presentCanvas.style.height = `${sceneViewport.height}px`;
+    }
+    if (hudPresentCanvas) {
+      const hudRect = hudCanvasCssRect(viewport);
+      hudPresentCanvas.style.left = `${hudRect.left}px`;
+      hudPresentCanvas.style.top = `${hudRect.top}px`;
+      hudPresentCanvas.style.width = `${hudRect.width}px`;
+      hudPresentCanvas.style.height = `${hudRect.height}px`;
     }
     if (minimapCanvas) {
       minimapCanvas.style.display = minimapVisible ? "block" : "none";
@@ -391,9 +402,16 @@ export function createRenderer(canvas, minimapCanvas = null) {
 
     canvas.width = size.width;
     canvas.height = size.height;
+    if (hudPresentCanvas) {
+      hudPresentCanvas.width = size.width;
+      hudPresentCanvas.height = size.height;
+      if (hudPresentContext) {
+        hudPresentContext.imageSmoothingEnabled = false;
+      }
+    }
     surface = createPixelSurface(canvasContext, size.width, size.height);
     overlaySurface = createPixelSurface(canvasContext, size.width, size.height);
-    hudSurface = createPixelSurface(canvasContext, size.width, size.height);
+    hudSurface = createPixelSurface(hudPresentContext || canvasContext, size.width, size.height);
     textRenderer = createPixelTextRenderer(size.width, size.height, () => colors);
     gpuStormRenderer = createGpuStormRenderer(size.width, size.height);
     framePresenter = createGpuFramePresenter(presentCanvas, size.width, size.height);
@@ -482,14 +500,29 @@ export function createRenderer(canvas, minimapCanvas = null) {
     };
   }
 
+  function hudCanvasCssRect(viewport = getViewportSize()) {
+    const sceneRect = sceneContentRect(viewport);
+    const scale = mobileControlsActiveForRender() ? MOBILE_HUD_SCALE : 1;
+    return {
+      left: Math.round(sceneRect.left),
+      top: Math.round(mobileControlsActiveForRender() ? canvasEdgePaddingPx() : sceneRect.top),
+      width: Math.round(sceneRect.width * scale),
+      height: Math.round(sceneRect.height * scale)
+    };
+  }
+
   function sceneContentRect(viewport = getViewportSize()) {
     const padding = canvasEdgePaddingPx();
-    const scale = Math.min(viewport.width / canvas.width, viewport.height / canvas.height);
+    const sceneViewport = sceneBoxViewport(viewport);
+    const scale = Math.min(sceneViewport.width / canvas.width, sceneViewport.height / canvas.height);
     const width = canvas.width * scale;
     const height = canvas.height * scale;
+    const offsetY = mobileControlsActiveForRender()
+      ? sceneViewport.height - height
+      : (sceneViewport.height - height) / 2;
     return {
-      left: padding + (viewport.width - width) / 2,
-      top: padding + (viewport.height - height) / 2,
+      left: padding + (sceneViewport.width - width) / 2,
+      top: padding + offsetY,
       width,
       height,
       scale
@@ -502,6 +535,9 @@ export function createRenderer(canvas, minimapCanvas = null) {
   window.visualViewport?.addEventListener("scroll", sizeCanvasBox);
 
   return {
+    resize() {
+      sizeCanvasBox();
+    },
     draw(snapshot, options = {}) {
       const nextMinimapVisible = options.playerMapVisible === true &&
         Boolean(options.playerMap?.cells) &&
@@ -625,7 +661,10 @@ export function createRenderer(canvas, minimapCanvas = null) {
         perf.visibilityGpuRequests = stormStats?.visibilityRequests || 0;
       }
       const presentStart = measurePerf ? performance.now() : 0;
-      surface.present(framePresenter, [overlaySurface, hudSurface]);
+      surface.present(framePresenter, hudPresentCanvas ? [overlaySurface] : [overlaySurface, hudSurface]);
+      if (hudPresentCanvas) {
+        hudSurface.present();
+      }
       if (measurePerf) {
         perf.presentMs = performance.now() - presentStart;
       }
@@ -675,8 +714,20 @@ function createScenePresentCanvas(sourceCanvas) {
   return canvas;
 }
 
+function createHudPresentCanvas(anchorCanvas) {
+  if (!anchorCanvas?.parentNode || typeof document === "undefined") {
+    return null;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.id = "hud-present";
+  canvas.setAttribute("aria-hidden", "true");
+  anchorCanvas.after(canvas);
+  return canvas;
+}
+
 function renderSizeForViewport(viewport) {
-  if (typeof document !== "undefined" && document.body?.classList.contains("mobile-controls")) {
+  if (mobileControlsActiveForRender()) {
     const diameter = Math.min(RENDER.width, RENDER.height);
     return {
       width: diameter,
@@ -684,7 +735,12 @@ function renderSizeForViewport(viewport) {
     };
   }
 
-  const aspect = clamp(viewport.width / Math.max(1, viewport.height), MIN_RENDER_ASPECT, MAX_RENDER_ASPECT);
+  const sceneViewport = sceneBoxViewport(viewport);
+  const aspect = clamp(
+    sceneViewport.width / Math.max(1, sceneViewport.height),
+    MIN_RENDER_ASPECT,
+    MAX_RENDER_ASPECT
+  );
   const diameter = Math.min(RENDER.width, RENDER.height);
   if (aspect >= 1) {
     return {
@@ -696,6 +752,33 @@ function renderSizeForViewport(viewport) {
   return {
     width: diameter,
     height: roundEven(diameter / aspect)
+  };
+}
+
+function mobileControlsActiveForRender() {
+  return typeof document !== "undefined" && document.body?.classList.contains("mobile-controls");
+}
+
+function mobileControlDrawerHeightPx() {
+  if (typeof document === "undefined") {
+    return 0;
+  }
+
+  const raw = window.getComputedStyle(document.documentElement)
+    .getPropertyValue("--mobile-control-drawer-height")
+    .trim();
+  return Math.max(0, Number.parseFloat(raw) || 0);
+}
+
+function sceneBoxViewport(viewport) {
+  if (!mobileControlsActiveForRender()) {
+    return viewport;
+  }
+
+  const drawerHeight = Math.min(mobileControlDrawerHeightPx(), Math.max(0, viewport.height - 1));
+  return {
+    width: viewport.width,
+    height: Math.max(1, viewport.height - drawerHeight)
   };
 }
 
@@ -10159,35 +10242,37 @@ function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controll
     });
   }
 
-  const selectedDefinition = selectedIndex === null ? null : UPGRADE_DEFINITIONS[selectedIndex];
-  const selectedLevel = upgradeLevel(player.upgrades, selectedDefinition?.id);
-  const selectedUpgradeLevel = selectedDefinition?.levels[selectedLevel];
-  const selectedCost = nextUpgradeCost(player.upgrades, selectedDefinition?.id);
-  const affordable = canAffordUpgrade(resources, selectedCost);
-  const currentText = currentUpgradeStatText(selectedDefinition, selectedLevel);
-  const nextText = selectedUpgradeLevel?.effectText || "MAX LEVEL";
-  const costText = selectedCost
-    ? `COST: ${formatUpgradeCostLong(selectedCost)}`
-    : "COST: MAX LEVEL";
-  const actionText = selectedCost
-    ? affordable ? controllerActive ? "SELECT BUY" : mobileActive ? "TAP BUY" : "CLICK BUY" : "NEED RESOURCES"
-    : "MAXED";
+  if (!mobileActive) {
+    const selectedDefinition = selectedIndex === null ? null : UPGRADE_DEFINITIONS[selectedIndex];
+    const selectedLevel = upgradeLevel(player.upgrades, selectedDefinition?.id);
+    const selectedUpgradeLevel = selectedDefinition?.levels[selectedLevel];
+    const selectedCost = nextUpgradeCost(player.upgrades, selectedDefinition?.id);
+    const affordable = canAffordUpgrade(resources, selectedCost);
+    const currentText = currentUpgradeStatText(selectedDefinition, selectedLevel);
+    const nextText = selectedUpgradeLevel?.effectText || "MAX LEVEL";
+    const costText = selectedCost
+      ? `COST: ${formatUpgradeCostLong(selectedCost)}`
+      : "COST: MAX LEVEL";
+    const actionText = selectedCost
+      ? affordable ? controllerActive ? "SELECT BUY" : "CLICK BUY" : "NEED RESOURCES"
+      : "MAXED";
 
-  UPGRADE_MENU_DIVIDER.draw(ctx, panel, layout.dividerY, colors);
-  textRenderer.draw(ctx, "", layout.contentX, layout.detailY, {
-    lines: selectedDefinition
-      ? [
-          `CURRENT: ${currentText}`,
-          `NEXT: ${nextText}`,
-          costText,
-          actionText
-        ]
-      : ["HOVER UPGRADE TO SEE DETAILS", "", "", ""],
-    fontSize: 8,
-    lineHeight: UPGRADE_MENU_LAYOUT.detailLineHeight,
-    color: colors.foreground,
-    width: layout.contentWidth
-  });
+    UPGRADE_MENU_DIVIDER.draw(ctx, panel, layout.dividerY, colors);
+    textRenderer.draw(ctx, "", layout.contentX, layout.detailY, {
+      lines: selectedDefinition
+        ? [
+            `CURRENT: ${currentText}`,
+            `NEXT: ${nextText}`,
+            costText,
+            actionText
+          ]
+        : ["HOVER UPGRADE TO SEE DETAILS", "", "", ""],
+      fontSize: 8,
+      lineHeight: UPGRADE_MENU_LAYOUT.detailLineHeight,
+      color: colors.foreground,
+      width: layout.contentWidth
+    });
+  }
 
   if (mobileActive) {
     drawMobileUpgradeCloseAction(ctx, panel, colors, textRenderer);
@@ -10322,15 +10407,18 @@ function upgradeMenuMetrics(textRenderer, controllerActive = false, mobileActive
     tableColumns.labelWidth +
     UPGRADE_MENU_LAYOUT.columnGap +
     tableColumns.levelWidth;
-  const detailWidth = Math.max(...upgradeMenuDetailLines(controllerActive, mobileActive).map((line) =>
-    textRenderer.measure(line, textOptions)
-  ));
   const titleWidth = textRenderer.measure("UPGRADES", textOptions);
-  const width = Math.ceil(Math.max(
+  const widthInputs = [
     titleWidth + UPGRADE_MENU_LAYOUT.padding * 2,
-    baseRowWidth + UPGRADE_MENU_LAYOUT.rowInset * 2,
-    detailWidth + UPGRADE_MENU_LAYOUT.padding * 2
-  ));
+    baseRowWidth + UPGRADE_MENU_LAYOUT.rowInset * 2
+  ];
+  if (!mobileActive) {
+    const detailWidth = Math.max(...upgradeMenuDetailLines(controllerActive, mobileActive).map((line) =>
+      textRenderer.measure(line, textOptions)
+    ));
+    widthInputs.push(detailWidth + UPGRADE_MENU_LAYOUT.padding * 2);
+  }
+  const width = Math.ceil(Math.max(...widthInputs));
   const rowWidth = width - UPGRADE_MENU_LAYOUT.rowInset * 2;
   const expandedTableColumns = expandPixelTableColumns(tableColumns, rowWidth);
 
@@ -10365,7 +10453,9 @@ function upgradeMenuLayout(textRenderer, controllerActive = false, mobileActive 
   const detailHeight = UPGRADE_MENU_LAYOUT.rowTextHeight +
     Math.max(0, UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
 
-  panel.height = detailY - panel.y + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
+  panel.height = mobileActive
+    ? rowsBottom - panel.y + UPGRADE_MENU_LAYOUT.bottomPadding
+    : detailY - panel.y + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
 
   return {
     panel,
