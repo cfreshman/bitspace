@@ -331,6 +331,7 @@ export function createPilotBotBrain(id, options = {}) {
     navFailedKey: "",
     navFailedUntilTick: 0,
     attackFallbackTarget: null,
+    combatAimSample: null,
     combatRayTargetId: "",
     combatRayUntilTick: 0,
     mineQueue: sanitizeMineQueue(options.mineQueue),
@@ -1065,31 +1066,46 @@ function heldBotCombatRay(arena, bot, brain, effects) {
 
 function botCombatAimAngle(arena, bot, brain, target, kind) {
   void kind;
-  const aimTarget = botCombatAimPoint(arena, bot, brain, target);
-  return Math.atan2(aimTarget.y - bot.y, aimTarget.x - bot.x);
+  return botCombatAimAngleFromSample(arena, bot, brain, target);
 }
 
 function botAimedCombatTarget(arena, bot, brain, target, kind) {
   void kind;
-  return botCombatAimPoint(arena, bot, brain, target);
-}
-
-function botCombatAimPoint(arena, bot, brain, target) {
   if (!target) {
     return { x: bot.x, y: bot.y };
   }
 
+  const angle = botCombatAimAngleFromSample(arena, bot, brain, target);
+  return pointAtAngle(bot, angle, Math.max(RENDER.tileSize, distanceBetween(bot, target)));
+}
+
+function botCombatAimAngleFromSample(arena, bot, brain, target) {
+  if (!target) {
+    return Number.isFinite(bot?.aimAngle) ? bot.aimAngle : Number.isFinite(bot?.angle) ? bot.angle : 0;
+  }
+
+  const centerAngle = Math.atan2(target.y - bot.y, target.x - bot.x);
   const tick = Number.isFinite(arena?.tick) ? arena.tick : Number(brain?.seq || 0);
   const bucket = Math.floor(tick / BOT_COMBAT_AIM_SAMPLE_TICKS);
   const targetKey = target.id || `${Math.round(Number(target.x || 0))},${Math.round(Number(target.y || 0))}`;
-  const seed = `${brain?.seed || brain?.id || bot?.id || "bot"}:combat-aim:${targetKey}:${bucket}`;
+  const sampleKey = `${targetKey}:${bucket}`;
+  if (brain?.combatAimSample?.key === sampleKey && Number.isFinite(brain.combatAimSample.offset)) {
+    return centerAngle + brain.combatAimSample.offset;
+  }
+
+  const seed = `${brain?.seed || brain?.id || bot?.id || "bot"}:combat-aim:${sampleKey}`;
   const radius = Math.sqrt(stableUnitNoise(`${seed}:radius`)) * BOT_COMBAT_AIM_SAMPLE_RADIUS;
-  const angle = stableUnitNoise(`${seed}:angle`) * Math.PI * 2;
-  return {
-    ...target,
-    x: target.x + Math.cos(angle) * radius,
-    y: target.y + Math.sin(angle) * radius
+  const sampleAngle = stableUnitNoise(`${seed}:angle`) * Math.PI * 2;
+  const sampledTarget = {
+    x: target.x + Math.cos(sampleAngle) * radius,
+    y: target.y + Math.sin(sampleAngle) * radius
   };
+  const sampledAngle = Math.atan2(sampledTarget.y - bot.y, sampledTarget.x - bot.x);
+  const offset = normalizeSignedAngle(sampledAngle - centerAngle);
+  if (brain) {
+    brain.combatAimSample = { key: sampleKey, offset };
+  }
+  return centerAngle + offset;
 }
 
 function botCombatAimErrorRadians(bot, brain, target, kind) {

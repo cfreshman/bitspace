@@ -138,6 +138,9 @@ const THEME_SWATCH_RING_RADIUS = 76;
 const THEME_ASTEROID_GAP = 24;
 const THEME_RANDOM_ID = "menu-theme-random";
 const THEME_BACK_ID = "menu-theme-back";
+const THEME_SWATCH_EFFECT_HOLD_MS = 1000;
+const THEME_SWATCH_EFFECT_FADE_MS = 150;
+const THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES = 15;
 const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
@@ -161,7 +164,8 @@ const THEME_PRESETS = Object.freeze([
   { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
   { id: "blue-angel", label: "BLUE ANGEL", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
   { id: "plant", label: "PLANT", background: "#3ba94d", foreground: "#77ff77", backing: "#2d7949" },
-  { id: "honey", label: "HONEY", background: "#b98a39", foreground: "#F7E2B1", backing: "#9C743B" },
+  { id: "honey", label: "HONEY", background: "#d0942f", foreground: "#F7E2B1", backing: "#9C743B" },
+  // { id: "blossom", label: "BLOSSOM", background: "#A4133C", foreground: "#FFCCD5", backing: "#590D22" },
   { id: "hyper", label: "HYPER", background: "#007fff", foreground: "#f87cff", backing: "#005fbe" },
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
@@ -1865,7 +1869,9 @@ function createMenuState() {
     huckRocks: [],
     huckRockCooldownSeconds: 0,
     rayCount: 1,
+    themeFocusStartedMs: 0,
     themeFocusUntilMs: 0,
+    themeFocusTheme: null,
     player: createMenuPlayer(asteroid)
   };
 }
@@ -2798,8 +2804,8 @@ function activateMenuEntity(entity) {
   }
 
   if (entity.action === "random-theme") {
-    focusSelectedThemeSwatch();
     setTheme(randomTheme());
+    focusSelectedThemeSwatch(state.theme);
     return;
   }
 
@@ -2808,8 +2814,8 @@ function activateMenuEntity(entity) {
     if (!preset) {
       return;
     }
-    focusSelectedThemeSwatch();
     setTheme(preset);
+    focusSelectedThemeSwatch(state.theme);
     return;
   }
 
@@ -3832,7 +3838,7 @@ function themeSwatchEntities(center) {
     const y = center.y + Math.sin(angle) * THEME_SWATCH_RING_RADIUS;
 
     if (item.type === "random") {
-      return {
+      return themeSwatchWithEffectColors({
         id: THEME_RANDOM_ID,
         type: "themeSwatch",
         action: "random-theme",
@@ -3845,11 +3851,11 @@ function themeSwatchEntities(center) {
         radius: THEME_SWATCH_RADIUS,
         active: state.menu.activeTargetId === THEME_RANDOM_ID,
         selected: !themeMatchesKnownPreset
-      };
+      });
     }
 
     if (item.type === "home") {
-      return {
+      return themeSwatchWithEffectColors({
         id: THEME_BACK_ID,
         type: "themeSwatch",
         action: "back",
@@ -3862,12 +3868,12 @@ function themeSwatchEntities(center) {
         radius: THEME_SWATCH_RADIUS,
         active: state.menu.activeTargetId === THEME_BACK_ID,
         selected: false
-      };
+      });
     }
 
     const { preset } = item;
     const id = `menu-theme-${preset.id}`;
-    return {
+    return themeSwatchWithEffectColors({
       id,
       type: "themeSwatch",
       action: "select-theme",
@@ -3881,13 +3887,8 @@ function themeSwatchEntities(center) {
       radius: THEME_SWATCH_RADIUS,
       active: state.menu.activeTargetId === id,
       selected: themeMatchesPreset(state.theme, preset)
-    };
+    });
   });
-
-  const focusActive = performance.now() < (state.menu.themeFocusUntilMs || 0);
-  const visibleEntities = focusActive
-    ? entities.filter((entity) => entity.selected === true)
-    : entities;
 
   return [
     {
@@ -3898,8 +3899,39 @@ function themeSwatchEntities(center) {
       ringRadius: THEME_SWATCH_RING_RADIUS,
       bandRadius: THEME_SWATCH_RADIUS
     },
-    ...(visibleEntities.length ? visibleEntities : entities)
+    ...entities
   ];
+}
+
+function themeSwatchWithEffectColors(entity) {
+  const effect = themeSwatchEffectState();
+  if (!effect) {
+    return entity;
+  }
+
+  return {
+    ...entity,
+    background: mixHexColor(effect.theme.background, entity.background, effect.t),
+    foreground: mixHexColor(effect.theme.foreground, entity.foreground, effect.t),
+    backing: mixHexColor(effect.theme.backing, entity.backing, effect.t)
+  };
+}
+
+function themeSwatchEffectState(nowMs = performance.now()) {
+  const startedAt = Number(state.menu.themeFocusStartedMs || 0);
+  const until = Number(state.menu.themeFocusUntilMs || 0);
+  const theme = normalizeTheme(state.menu.themeFocusTheme);
+  if (!theme || startedAt <= 0 || nowMs >= until) {
+    return null;
+  }
+
+  const elapsed = Math.max(0, nowMs - startedAt);
+  const fadeElapsed = elapsed - THEME_SWATCH_EFFECT_HOLD_MS;
+  const fadeDuration = Math.max(1, THEME_SWATCH_EFFECT_FADE_MS);
+  return {
+    theme,
+    t: fadeElapsed <= 0 ? 0 : clamp(fadeElapsed / fadeDuration, 0, 1)
+  };
 }
 
 function menuCenter(asteroid) {
@@ -4404,11 +4436,21 @@ function setTheme(theme) {
   saveTheme();
 }
 
-function focusSelectedThemeSwatch() {
-  state.menu.themeFocusUntilMs = performance.now() + 1000;
+function focusSelectedThemeSwatch(theme = state.theme) {
+  const normalized = normalizeTheme(theme);
+  const now = performance.now();
+  state.menu.themeFocusStartedMs = now;
+  state.menu.themeFocusUntilMs = now + THEME_SWATCH_EFFECT_HOLD_MS + THEME_SWATCH_EFFECT_FADE_MS;
+  state.menu.themeFocusTheme = normalized;
 }
 
 function randomTheme() {
+  return Math.random() < 0.5
+    ? generatedRandomTheme()
+    : hueRotatedPresetTheme();
+}
+
+function generatedRandomTheme() {
   const candidates = [];
 
   for (let index = 0; index < 96; index += 1) {
@@ -4435,6 +4477,58 @@ function randomTheme() {
   }
 
   return candidates[candidates.length - 1].theme;
+}
+
+function hueRotatedPresetTheme() {
+  const presets = THEME_PRESETS
+    .map((preset) => normalizeTheme(preset))
+    .filter((preset) => preset && themeHasHueRotatableColor(preset));
+  if (presets.length <= 0) {
+    return generatedRandomTheme();
+  }
+
+  const preset = presets[Math.floor(Math.random() * presets.length)];
+  return hueRotateTheme(
+    preset,
+    randomBetween(THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES, 360 - THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES)
+  );
+}
+
+function hueRotateTheme(theme, degrees) {
+  const normalized = normalizeTheme(theme);
+  if (!normalized) {
+    return defaultTheme();
+  }
+
+  return {
+    background: hueRotateHex(normalized.background, degrees),
+    foreground: hueRotateHex(normalized.foreground, degrees),
+    backing: hueRotateHex(normalized.backing, degrees)
+  };
+}
+
+function themeHasHueRotatableColor(theme) {
+  return [theme.background, theme.foreground, theme.backing].some((color) => {
+    const rgb = hexToRgb(color);
+    if (!rgb) {
+      return false;
+    }
+
+    return rgbToHsl(rgb).s > 0;
+  });
+}
+
+function hueRotateHex(value, degrees) {
+  const rgb = hexToRgb(value);
+  if (!rgb) {
+    return value;
+  }
+
+  const hsl = rgbToHsl(rgb);
+  if (hsl.s <= 0) {
+    return value;
+  }
+  return hslToHex(hsl.h + degrees, hsl.s, hsl.l);
 }
 
 function randomThemeCandidate() {
@@ -4629,6 +4723,40 @@ function hslToHex(hue, saturation, lightness) {
   return rgbToHex(hslToRgb(hue, saturation, lightness));
 }
 
+function rgbToHsl(color) {
+  const r = clamp(color.r, 0, 255) / 255;
+  const g = clamp(color.g, 0, 255) / 255;
+  const b = clamp(color.b, 0, 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  const delta = max - min;
+
+  if (delta <= 0) {
+    return {
+      h: 0,
+      s: 0,
+      l: lightness * 100
+    };
+  }
+
+  const saturation = delta / (1 - Math.abs(2 * lightness - 1));
+  let hue = 0;
+  if (max === r) {
+    hue = 60 * (((g - b) / delta) % 6);
+  } else if (max === g) {
+    hue = 60 * ((b - r) / delta + 2);
+  } else {
+    hue = 60 * ((r - g) / delta + 4);
+  }
+
+  return {
+    h: normalizeHue(hue),
+    s: saturation * 100,
+    l: lightness * 100
+  };
+}
+
 function hslToRgb(hue, saturation, lightness) {
   const h = normalizeHue(hue) / 360;
   const s = clamp(saturation, 0, 100) / 100;
@@ -4682,6 +4810,21 @@ function hexToRgb(value) {
     g: Number.parseInt(value.slice(3, 5), 16),
     b: Number.parseInt(value.slice(5, 7), 16)
   };
+}
+
+function mixHexColor(from, to, t) {
+  const a = hexToRgb(from);
+  const b = hexToRgb(to);
+  if (!a || !b) {
+    return to;
+  }
+
+  const amount = clamp(Number(t), 0, 1);
+  return rgbToHex({
+    r: a.r + (b.r - a.r) * amount,
+    g: a.g + (b.g - a.g) * amount,
+    b: a.b + (b.b - a.b) * amount
+  });
 }
 
 function relativeLuminance(color) {
