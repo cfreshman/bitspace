@@ -141,6 +141,7 @@ const THEME_BACK_ID = "menu-theme-back";
 const THEME_SWATCH_EFFECT_HOLD_MS = 1000;
 const THEME_SWATCH_EFFECT_FADE_MS = 150;
 const THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES = 15;
+const THEME_REPEAT_RANDOM_MIN_HUE_DISTANCE_DEGREES = 30;
 const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
@@ -159,7 +160,7 @@ const THEME_PRESETS = Object.freeze([
   // { id: "honey", label: "HONEY", background: "#D19B3D", foreground: "#F7E2B1", backing: "#9C743B" },
   // { id: "honey", label: "HONEY", background: "#9C743B", foreground: "#F7E2B1", backing: "#2E2214" },
   // { id: "test", label: "TEST", background: "#5a5353", foreground: "#e6ccbe", backing: "#101010" },
-  { id: "matrix", label: "MATRIX", background: "#181818", foreground: "#00ff00" },
+  { id: "matrix", label: "MATRIX", background: "#182018", foreground: "#00ff00" },
   { id: "love", label: "LOVE", background: "#2e2234", foreground: "#ff72b6", backing: '#10080a' },
   { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
   { id: "honey", label: "HONEY", background: "#d0942f", foreground: "#F7E2B1", backing: "#9C743B" },
@@ -363,6 +364,8 @@ const state = {
   deferredMenuRoom: null,
   resumeFallbackTimer: null
 };
+
+state.menu.themeBaseId = themePresetIdForTheme(state.theme);
 
 setBotDebugEnabled(state.botDebugOverlay);
 installControlHandles();
@@ -1873,6 +1876,7 @@ function createMenuState() {
     themeFocusStartedMs: 0,
     themeFocusUntilMs: 0,
     themeFocusTheme: null,
+    themeBaseId: null,
     player: createMenuPlayer(asteroid)
   };
 }
@@ -2805,7 +2809,7 @@ function activateMenuEntity(entity) {
   }
 
   if (entity.action === "random-theme") {
-    setTheme(randomTheme());
+    setTheme(randomTheme(), null);
     focusSelectedThemeSwatch(state.theme);
     return;
   }
@@ -2815,7 +2819,7 @@ function activateMenuEntity(entity) {
     if (!preset) {
       return;
     }
-    setTheme(preset);
+    setTheme(themePresetIsSelected(preset) ? randomizedThemeVariant(preset) : preset, preset.id);
     focusSelectedThemeSwatch(state.theme);
     return;
   }
@@ -3820,7 +3824,8 @@ function menuButton(id, action, label, x, y, width) {
 function themeSwatchEntities(center) {
   const startAngle = -Math.PI / 2;
   const presetItems = THEME_PRESETS.map((preset, index) => ({ type: "preset", preset, themeNumber: index + 1 }));
-  const themeMatchesKnownPreset = THEME_PRESETS.some((preset) => themeMatchesPreset(state.theme, preset));
+  const selectedPresetId = selectedThemePresetId();
+  const themeMatchesKnownPreset = Boolean(selectedPresetId);
   const ringItems = [
     // { type: "home" },
     ...presetItems,
@@ -3887,7 +3892,7 @@ function themeSwatchEntities(center) {
       y,
       radius: THEME_SWATCH_RADIUS,
       active: state.menu.activeTargetId === id,
-      selected: themeMatchesPreset(state.theme, preset)
+      selected: selectedPresetId === preset.id
     });
   });
 
@@ -4428,11 +4433,13 @@ function resetTheme() {
 }
 
 function cycleThemePreset(direction = 1) {
-  setTheme(adjacentThemePreset(state.theme, direction));
+  const preset = adjacentThemePreset(state.theme, direction);
+  setTheme(preset, preset.id);
 }
 
-function setTheme(theme) {
+function setTheme(theme, baseId = themePresetIdForTheme(theme)) {
   state.theme = normalizeTheme(theme);
+  state.menu.themeBaseId = validThemePresetId(baseId);
   applyThemeToSource(state.theme);
   saveTheme();
 }
@@ -4489,10 +4496,7 @@ function hueRotatedPresetTheme() {
   }
 
   const preset = presets[Math.floor(Math.random() * presets.length)];
-  return hueRotateTheme(
-    preset,
-    randomBetween(THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES, 360 - THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES)
-  );
+  return randomizedThemeHueFrame(preset, preset, THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES);
 }
 
 function hueRotateTheme(theme, degrees) {
@@ -4508,6 +4512,62 @@ function hueRotateTheme(theme, degrees) {
   };
 }
 
+function randomizedThemeVariant(theme) {
+  const randomized = themeHasHueRotatableColor(theme)
+    ? randomizedThemeHueFrame(theme, state.theme, THEME_REPEAT_RANDOM_MIN_HUE_DISTANCE_DEGREES)
+    : generatedRandomTheme();
+  return themeMatchesPreset(randomized, theme) ? generatedRandomTheme() : randomized;
+}
+
+function randomizedThemeHueFrame(baseTheme, currentTheme, minDegrees) {
+  const baseHue = themeAverageHue(baseTheme);
+  const currentHue = themeAverageHue(currentTheme);
+  if (!Number.isFinite(baseHue) || !Number.isFinite(currentHue)) {
+    return hueRotateTheme(baseTheme, randomThemeHueDelta(minDegrees));
+  }
+
+  const targetHue = normalizeHue(currentHue + randomThemeHueDelta(minDegrees));
+  return transformThemeHueFrame(baseTheme, baseHue, targetHue, false);
+}
+
+function randomThemeHueDelta(minDegrees = THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES) {
+  const min = clamp(minDegrees, 0, 179.999);
+  const magnitude = randomBetween(min, 180);
+  return (Math.random() < 0.5 ? -1 : 1) * magnitude;
+}
+
+function transformThemeHueFrame(theme, sourceAverageHue, targetAverageHue, flipOffsets) {
+  const normalized = normalizeTheme(theme);
+  if (!normalized) {
+    return defaultTheme();
+  }
+
+  return {
+    background: transformHueFrameHex(normalized.background, sourceAverageHue, targetAverageHue, flipOffsets),
+    foreground: transformHueFrameHex(normalized.foreground, sourceAverageHue, targetAverageHue, flipOffsets),
+    backing: transformHueFrameHex(normalized.backing, sourceAverageHue, targetAverageHue, flipOffsets)
+  };
+}
+
+function transformHueFrameHex(value, sourceAverageHue, targetAverageHue, flipOffsets) {
+  const rgb = hexToRgb(value);
+  if (!rgb) {
+    return value;
+  }
+
+  const hsl = rgbToHsl(rgb);
+  if (hsl.s <= 0) {
+    return value;
+  }
+
+  const offset = signedHueDelta(sourceAverageHue, hsl.h) * (flipOffsets ? -1 : 1);
+  return hslToHex(targetAverageHue + offset, hsl.s, hsl.l);
+}
+
+function signedHueDelta(fromHue, toHue) {
+  return ((toHue - fromHue + 540) % 360) - 180;
+}
+
 function themeHasHueRotatableColor(theme) {
   return [theme.background, theme.foreground, theme.backing].some((color) => {
     const rgb = hexToRgb(color);
@@ -4517,6 +4577,40 @@ function themeHasHueRotatableColor(theme) {
 
     return rgbToHsl(rgb).s > 0;
   });
+}
+
+function themeAverageHue(theme) {
+  const normalized = normalizeTheme(theme);
+  if (!normalized) {
+    return null;
+  }
+
+  let x = 0;
+  let y = 0;
+  let totalWeight = 0;
+  for (const color of [normalized.background, normalized.foreground, normalized.backing]) {
+    const rgb = hexToRgb(color);
+    if (!rgb) {
+      continue;
+    }
+
+    const hsl = rgbToHsl(rgb);
+    if (hsl.s <= 0) {
+      continue;
+    }
+
+    const radians = normalizeHue(hsl.h) * Math.PI / 180;
+    const weight = hsl.s;
+    x += Math.cos(radians) * weight;
+    y += Math.sin(radians) * weight;
+    totalWeight += weight;
+  }
+
+  if (totalWeight <= 0 || (Math.abs(x) <= 0.0001 && Math.abs(y) <= 0.0001)) {
+    return null;
+  }
+
+  return normalizeHue(Math.atan2(y, x) * 180 / Math.PI);
 }
 
 function hueRotateHex(value, degrees) {
@@ -4621,12 +4715,31 @@ function themeCandidateScore(theme) {
 }
 
 function adjacentThemePreset(theme, direction) {
-  const currentIndex = THEME_PRESETS.findIndex((preset) => themeMatchesPreset(theme, preset));
+  const selectedPreset = selectedThemePresetId();
+  const currentIndex = selectedPreset
+    ? THEME_PRESETS.findIndex((preset) => preset.id === selectedPreset)
+    : THEME_PRESETS.findIndex((preset) => themeMatchesPreset(theme, preset));
   const step = direction < 0 ? -1 : 1;
   const nextIndex = currentIndex === -1
     ? 0
     : (currentIndex + step + THEME_PRESETS.length) % THEME_PRESETS.length;
   return THEME_PRESETS[nextIndex];
+}
+
+function themePresetIsSelected(preset) {
+  return selectedThemePresetId() === preset?.id;
+}
+
+function selectedThemePresetId() {
+  return validThemePresetId(state.menu?.themeBaseId) || themePresetIdForTheme(state.theme);
+}
+
+function themePresetIdForTheme(theme) {
+  return THEME_PRESETS.find((preset) => themeMatchesPreset(theme, preset))?.id || null;
+}
+
+function validThemePresetId(id) {
+  return THEME_PRESETS.some((preset) => preset.id === id) ? id : null;
 }
 
 function themeMatchesPreset(theme, preset) {
@@ -4638,7 +4751,9 @@ function themeMatchesPreset(theme, preset) {
 }
 
 function themeLabelForTheme(theme) {
-  const preset = THEME_PRESETS.find((candidate) => themeMatchesPreset(theme, candidate));
+  const baseId = theme === state.theme ? selectedThemePresetId() : null;
+  const preset = THEME_PRESETS.find((candidate) => candidate.id === baseId) ||
+    THEME_PRESETS.find((candidate) => themeMatchesPreset(theme, candidate));
   return preset?.label || "RANDOM";
 }
 
@@ -4655,6 +4770,7 @@ function syncThemeFromCss() {
     theme.backing !== state.theme.backing
   ) {
     state.theme = theme;
+    state.menu.themeBaseId = themePresetIdForTheme(theme);
     applyThemeBacking(state.theme);
   }
 }
