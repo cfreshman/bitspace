@@ -162,11 +162,12 @@ const THEME_PRESETS = Object.freeze([
   { id: "matrix", label: "MATRIX", background: "#181818", foreground: "#00ff00" },
   { id: "love", label: "LOVE", background: "#2e2234", foreground: "#ff72b6", backing: '#10080a' },
   { id: "blood", label: "BLOOD", background: "#300810", foreground: "#ff0000", backing: "#180008" },
-  { id: "blue-angel", label: "BLUE ANGEL", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
-  { id: "plant", label: "PLANT", background: "#3ba94d", foreground: "#77ff77", backing: "#2d7949" },
   { id: "honey", label: "HONEY", background: "#d0942f", foreground: "#F7E2B1", backing: "#9C743B" },
+  { id: "plant", label: "PLANT", background: "#3ba94d", foreground: "#77ff77", backing: "#2d7949" },
+  { id: "blue-angel", label: "BLUE ANGEL", background: "#004168", foreground: "#ffbc3d", backing: '#2a292b' },
   // { id: "blossom", label: "BLOSSOM", background: "#A4133C", foreground: "#FFCCD5", backing: "#590D22" },
   { id: "hyper", label: "HYPER", background: "#007fff", foreground: "#f87cff", backing: "#005fbe" },
+  { id: "berry", label: "BERRY", background: "#3b67a9", foreground: "#efaeff", backing: "#494758" },
 ]);
 const UPGRADE_MENU_LAYOUT = Object.freeze({
   x: 8,
