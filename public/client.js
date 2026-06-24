@@ -8938,9 +8938,9 @@ function applyHuckRockRecoil(player, direction) {
   player.vy -= direction.y * impulse;
 }
 
-function applyShipFriction(player, dtSeconds) {
+function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.friction) {
   const fixedStepSeconds = 1 / ENGINE.tickRate;
-  const friction = Math.pow(ENGINE.ship.friction, dtSeconds / fixedStepSeconds);
+  const friction = Math.pow(frictionPerTick, dtSeconds / fixedStepSeconds);
   player.vx *= friction;
   player.vy *= friction;
 }
@@ -9157,11 +9157,12 @@ function updatePrediction(timeSeconds) {
     : readMoveVector();
   const effects = aggregateUpgradeEffects(predicted.upgrades);
   predicted.huckRockEngineCutoutSeconds = 0;
-  applyShipFriction(predicted, dtSeconds);
+  const gameMode = activeGameMode();
+  applyShipFriction(predicted, dtSeconds, gameMode === GAME_MODES.cars ? ENGINE.car.friction : ENGINE.ship.friction);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
 
-  if (activeGameMode() === GAME_MODES.cars) {
+  if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(predicted, move, effects, dtSeconds);
   } else {
     updateShipFacing(predicted, move, dtSeconds);

@@ -29,7 +29,7 @@ import {
 
 const ENTITY_PIXEL_SIZE = 1;
 const CAR_MODE_COLORS = Object.freeze({
-  foreground: "#ffd38a",
+  foreground: "#ffe2b4",
   background: "#b64d15",
   backing: "#4a2118",
   ore: "#8f8a80",
@@ -58,13 +58,16 @@ const CAR_BODY_COLORS = Object.freeze([
 const CAR_TIRE_COLOR = "#000000";
 const CAR_TIRE_LENGTH = 6;
 const CAR_TIRE_WIDTH = 3;
+const CAR_CENTER_TIRE_LENGTH_SCALE = 1.36;
+const CAR_CENTER_TIRE_RADIUS_SCALE = 0.32;
+const CAR_CENTER_TIRE_TREAD_SPACING = 4;
 const CAR_BODY_LIGHT_MIX = 0.34;
 const CAR_BODY_MID_LIGHT_MIX = 0.14;
 const CAR_BODY_MID_DARKEN = 0.76;
 const CAR_BODY_DARKEN = 0.54;
 const CAR_ENGINE_NOZZLE_LENGTH = 4;
 const CAR_ENGINE_NOZZLE_WIDTH = 2;
-const CAR_ENGINE_SIDE_OFFSET_SCALE = 0.38;
+const CAR_ENGINE_SIDE_OFFSET_SCALE = 0.52;
 const GROUND_DEBRIS_CELL_SIZE = 8;
 const GROUND_DEBRIS_DENSITY_MOD = 5;
 const GROUND_GRASS_DENSITY_MOD = 53;
@@ -3854,12 +3857,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
     }
 
-    measureBucket("entitiesMs", () => {
-      for (const entity of snapshot.entities || []) {
-        drawEntity(ctx, entity, camera, options, colors, textRenderer);
-      }
-    });
-
     measureBucket("particleEmitMs", () => {
       for (const renderPlayer of worldRenderPlayers) {
         if (options.gameMode === GAME_MODES.cars) {
@@ -3883,6 +3880,15 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       if (options.gameMode === GAME_MODES.cars) {
         drawTireTrackParticles(ctx, particleState.tireTrackParticles, camera, colors);
       }
+    });
+
+    measureBucket("entitiesMs", () => {
+      for (const entity of snapshot.entities || []) {
+        drawEntity(ctx, entity, camera, options, colors, textRenderer);
+      }
+    });
+
+    measureBucket("particlesMs", () => {
       drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
     });
 
@@ -10165,17 +10171,89 @@ function drawHuckRockEntity(ctx, entity, camera, colors) {
 
 function drawCarModeHuckRockEntity(ctx, entity, camera, colors) {
   const screen = worldToScreen(entity, camera);
-  const radius = Math.max(2, Math.round(Number(entity.radius || ENGINE.huckRock.radius)));
-  const x = Math.round(screen.x);
-  const y = Math.round(screen.y);
-  const age = Number(entity.ageSeconds || 0);
-  const lifetime = Math.max(0.001, Number(entity.lifetimeSeconds || ENGINE.huckRock.lifetimeSeconds || 1));
-  const arc = Math.sin(clamp(age / lifetime, 0, 1) * Math.PI);
-  const lift = Math.round(4 + arc * 10);
+  const radius = Number(entity.radius || ENGINE.huckRock.radius);
+  const seed = entity.shapeSeed || entity.id || "huck-rock";
+  const centerX = Math.round(screen.x);
+  const centerY = Math.round(screen.y);
+  const yaw = Number(entity.angleY) || 0;
+  const pitch = Number(entity.angleX) || 0;
+  const roll = Number(entity.angleZ) || 0;
+  const hull = huckRockHullNative(seed, centerX, centerY, radius, yaw, pitch, roll) ||
+    convexHull(projectedHuckRockPoints(seed, centerX, centerY, radius, yaw, pitch, roll));
+
+  if (hull.length < 2) {
+    return;
+  }
+
+  drawCarHuckRockShadow(ctx, hull, colors);
+
+  drawCarHuckRockOuterOutline(ctx, hull, colors);
+
+  fillConvexPolygon(ctx, hull, colors.backing);
+
+  ctx.fillStyle = colors.backing;
+  for (let index = 0; index < hull.length; index += 1) {
+    const from = hull[index];
+    const to = hull[(index + 1) % hull.length];
+    drawPixelLine(ctx, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y));
+  }
+}
+
+function drawCarHuckRockOuterOutline(ctx, hull, colors) {
+  const expandedHull = expandHullFromCenter(hull, 2);
+  ctx.fillStyle = colors.rockLine || colors.foreground;
+  for (let index = 0; index < expandedHull.length; index += 1) {
+    const from = expandedHull[index];
+    const to = expandedHull[(index + 1) % expandedHull.length];
+    drawPixelLine(ctx, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y));
+  }
+}
+
+function expandHullFromCenter(hull, amount) {
+  if (!hull.length || amount <= 0) {
+    return hull;
+  }
+
+  let centerX = 0;
+  let centerY = 0;
+  for (const point of hull) {
+    centerX += point.x;
+    centerY += point.y;
+  }
+  centerX /= hull.length;
+  centerY /= hull.length;
+
+  return hull.map((point) => {
+    const dx = point.x - centerX;
+    const dy = point.y - centerY;
+    const length = Math.hypot(dx, dy);
+    if (length <= 0.0001) {
+      return point;
+    }
+    return {
+      x: point.x + (dx / length) * amount,
+      y: point.y + (dy / length) * amount
+    };
+  });
+}
+
+function drawCarHuckRockShadow(ctx, hull, colors) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const point of hull) {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return;
+  }
 
   ctx.fillStyle = colors.backing || "#000000";
-  fillRotatedRect(ctx, x + 2, y + 3, { x: 1, y: 0 }, { x: 0, y: 1 }, radius * 2, Math.max(1, radius * 0.75));
-  drawHuckRockEntity(ctx, { ...entity, y: entity.y - lift }, camera, colors);
+  drawPixelLine(ctx, Math.round(minX), Math.round(maxY + 2), Math.round(maxX), Math.round(maxY + 2));
 }
 
 function projectedHuckRockPoints(seed, centerX, centerY, radius, yaw, pitch, roll) {
@@ -10452,7 +10530,7 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   };
 
   if (gameMode === GAME_MODES.cars) {
-    drawCarBody(ctx, x, y, player, mainRadius, carBodyAngle(player), colors, () => {
+    drawCarBody(ctx, x, y, player, mainRadius, carBodyAngle(player), colors, timeSeconds, () => {
       if (player.mining) {
         drawWithoutWorldMask(ctx, () => {
           drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameMode);
@@ -10460,7 +10538,6 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
       }
     });
     drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
-    drawShipHealthIndicator(ctx, x, y, player, colors, carBodyAngle(player));
     drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
     return;
   }
@@ -10485,9 +10562,8 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
 }
 
-function drawCarBody(ctx, x, y, player, radius, angle, colors, drawMiddleLayer = null) {
+function drawCarBody(ctx, x, y, player, radius, angle, colors, timeSeconds, drawMiddleLayer = null) {
   const bodyColor = carBodyColor(player);
-  const frontWheelAngle = normalizeAngle(angle + carVisualSteerAngle(player, angle));
   const forward = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -10496,30 +10572,16 @@ function drawCarBody(ctx, x, y, player, radius, angle, colors, drawMiddleLayer =
     x: -forward.y,
     y: forward.x
   };
-  const frontWheelForward = {
-    x: Math.cos(frontWheelAngle),
-    y: Math.sin(frontWheelAngle)
-  };
-  const frontWheelSide = {
-    x: -frontWheelForward.y,
-    y: frontWheelForward.x
-  };
-
-  ctx.fillStyle = CAR_TIRE_COLOR;
-  drawCarAxle(ctx, x, y, forward, side, radius * ENGINE.car.frontAxleOffsetScale, radius * 0.82);
-  drawCarAxle(ctx, x, y, forward, side, radius * ENGINE.car.rearAxleOffsetScale, radius * 0.78);
-  drawCarWheel(ctx, x, y, forward, side, frontWheelForward, frontWheelSide, radius * ENGINE.car.frontAxleOffsetScale, -radius * ENGINE.car.frontTrackOffsetScale);
-  drawCarWheel(ctx, x, y, forward, side, frontWheelForward, frontWheelSide, radius * ENGINE.car.frontAxleOffsetScale, radius * ENGINE.car.frontTrackOffsetScale);
-  drawCarWheel(ctx, x, y, forward, side, forward, side, radius * ENGINE.car.rearAxleOffsetScale, -radius * ENGINE.car.rearTrackOffsetScale);
-  drawCarWheel(ctx, x, y, forward, side, forward, side, radius * ENGINE.car.rearAxleOffsetScale, radius * ENGINE.car.rearTrackOffsetScale);
 
   drawCarEngineNozzles(ctx, x, y, forward, side, radius);
+
+  fillCarBodySphere(ctx, x, y, radius, bodyColor);
+  drawCenterCarTire(ctx, x, y, player, radius, forward, side, timeSeconds);
 
   if (typeof drawMiddleLayer === "function") {
     drawMiddleLayer();
   }
 
-  fillCarBodySphere(ctx, x, y, radius, bodyColor);
   ctx.fillStyle = CAR_TIRE_COLOR;
   drawCircle(ctx, x, y, radius);
 }
@@ -10547,6 +10609,48 @@ function carVisualSteerAngle(player, bodyAngle) {
     -ENGINE.car.maxSteerAngle,
     ENGINE.car.maxSteerAngle
   );
+}
+
+function drawCenterCarTire(ctx, x, y, player, radius, forward, side, timeSeconds) {
+  const halfLength = Math.max(4, radius * CAR_CENTER_TIRE_LENGTH_SCALE * 0.5);
+  const tireRadius = Math.max(2, radius * CAR_CENTER_TIRE_RADIUS_SCALE);
+  const from = {
+    x: x - forward.x * halfLength,
+    y: y - forward.y * halfLength
+  };
+  const to = {
+    x: x + forward.x * halfLength,
+    y: y + forward.y * halfLength
+  };
+
+  ctx.fillStyle = CAR_TIRE_COLOR;
+  drawFilledCapsule(ctx, from, to, tireRadius);
+
+  const speed = Math.hypot(Number(player.vx) || 0, Number(player.vy) || 0);
+  const thrustAmount = player.thrusting ? 1 : 0;
+  const phase = positiveModulo(timeSeconds * (10 + speed * 0.08) * thrustAmount, CAR_CENTER_TIRE_TREAD_SPACING);
+  const first = -halfLength + phase;
+  const last = halfLength;
+  ctx.fillStyle = colorsForCarTread(player);
+
+  for (let offset = first; offset <= last; offset += CAR_CENTER_TIRE_TREAD_SPACING) {
+    const center = {
+      x: x + forward.x * offset,
+      y: y + forward.y * offset
+    };
+    const width = tireRadius * 0.82;
+    drawPixelLine(
+      ctx,
+      Math.round(center.x - side.x * width),
+      Math.round(center.y - side.y * width),
+      Math.round(center.x + side.x * width),
+      Math.round(center.y + side.y * width)
+    );
+  }
+}
+
+function colorsForCarTread(player) {
+  return darkenHexColor(carBodyColor(player), 0.42);
 }
 
 function carBodyColor(player) {
@@ -11961,36 +12065,15 @@ function emitTireTrackParticles(state, player, dtSeconds) {
 function carTireTrackWheels(player) {
   const radius = shipMainRadius(player);
   const angle = carBodyAngle(player);
-  const forward = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
   const side = {
-    x: -forward.y,
-    y: forward.x
+    x: -Math.sin(angle),
+    y: Math.cos(angle)
   };
-  const wheelSpecs = [
-    {
-      forwardOffset: radius * ENGINE.car.frontAxleOffsetScale,
-      sideOffset: -radius * ENGINE.car.frontTrackOffsetScale
-    },
-    {
-      forwardOffset: radius * ENGINE.car.frontAxleOffsetScale,
-      sideOffset: radius * ENGINE.car.frontTrackOffsetScale
-    },
-    {
-      forwardOffset: radius * ENGINE.car.rearAxleOffsetScale,
-      sideOffset: -radius * ENGINE.car.rearTrackOffsetScale
-    },
-    {
-      forwardOffset: radius * ENGINE.car.rearAxleOffsetScale,
-      sideOffset: radius * ENGINE.car.rearTrackOffsetScale
-    }
-  ];
+  const trackHalfWidth = Math.max(1, radius * CAR_CENTER_TIRE_RADIUS_SCALE * 0.58);
 
-  return wheelSpecs.map((wheel) => ({
-    x: player.x + forward.x * wheel.forwardOffset + side.x * wheel.sideOffset,
-    y: player.y + forward.y * wheel.forwardOffset + side.y * wheel.sideOffset
+  return [-trackHalfWidth, 0, trackHalfWidth].map((offset) => ({
+    x: player.x + side.x * offset,
+    y: player.y + side.y * offset
   }));
 }
 
@@ -12342,6 +12425,12 @@ function drawSideMiningRayEmitter(ctx, from, to, normal, offset, radius, colors)
     x: dx / length,
     y: dy / length
   };
+
+  if (colors.solidEmitter === true) {
+    drawSolidSideMiningRayEmitter(ctx, to, normal, unit, length, radius, colors);
+    return;
+  }
+
   const minX = Math.floor(Math.min(from.x, to.x) - radius - 1);
   const maxX = Math.ceil(Math.max(from.x, to.x) + radius + 1);
   const minY = Math.floor(Math.min(from.y, to.y) - radius - 1);
@@ -12392,6 +12481,29 @@ function drawSideMiningRayEmitter(ctx, from, to, normal, offset, radius, colors)
     Math.round(to.x - normal.x * radius),
     Math.round(to.y - normal.y * radius)
   );
+}
+
+function drawSolidSideMiningRayEmitter(ctx, to, normal, unit, length, radius, colors) {
+  const steps = Math.max(8, Math.ceil(length * 2));
+  const hull = [];
+  for (let step = 0; step <= steps; step += 1) {
+    const theta = -Math.PI / 2 + (Math.PI * step) / steps;
+    const behindMouth = length * Math.cos(theta);
+    const cross = radius * Math.sin(theta);
+    hull.push({
+      x: to.x - unit.x * behindMouth + normal.x * cross,
+      y: to.y - unit.y * behindMouth + normal.y * cross
+    });
+  }
+
+  fillConvexPolygon(ctx, hull, colors.background);
+
+  ctx.fillStyle = colors.foreground;
+  for (let index = 0; index < hull.length; index += 1) {
+    const from = hull[index];
+    const next = hull[(index + 1) % hull.length];
+    drawPixelLine(ctx, Math.round(from.x), Math.round(from.y), Math.round(next.x), Math.round(next.y));
+  }
 }
 
 function drawMiningRayBeam(ctx, from, to, direction, normal, colors, timeSeconds, hit, sideOffset = 0) {
@@ -12624,7 +12736,8 @@ function miningRayEmitterRenderColors(colors, gameMode) {
   return {
     ...colors,
     foreground: CAR_TIRE_COLOR,
-    background: CAR_TIRE_COLOR
+    background: CAR_TIRE_COLOR,
+    solidEmitter: true
   };
 }
 
