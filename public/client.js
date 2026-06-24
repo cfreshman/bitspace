@@ -124,7 +124,9 @@ const DEBUG_FEATURES = {
 const MENU_PLAYER_ID = "menu-player";
 const LOCAL_BOT_ROOM_ID = "local-bots";
 const LOCAL_BOT_PLAYER_ID = "local-player";
-const LOCAL_BOT_COUNT = 7;
+const LOCAL_BOT_MIN_COUNT = 1;
+const LOCAL_BOT_MAX_COUNT = 7;
+const LOCAL_BOT_DEFAULT_COUNT = 5;
 const LOCAL_BOT_SAVE_VERSION = 2;
 const LOCAL_BOT_SAVE_INTERVAL_SECONDS = 1;
 const LOCAL_BOT_PLAN_INTERVAL_TICKS = 12;
@@ -312,6 +314,8 @@ const state = {
     active: false,
     arena: null,
     bots: new Map(),
+    botCount: LOCAL_BOT_DEFAULT_COUNT,
+    lobbySeed: null,
     lastStepTimeSeconds: 0,
     accumulatorSeconds: 0,
     inputSeq: 0,
@@ -1251,6 +1255,10 @@ function runControlAction(action, options = {}) {
       return false;
     case "leave":
       return handleLeaveShortcut();
+    case "botsFewer":
+      return adjustLocalBotLobbyCount(-1);
+    case "botsMore":
+      return adjustLocalBotLobbyCount(1);
     case "themeBack":
       leaveThemeMenuRoom();
       return true;
@@ -1274,8 +1282,15 @@ function mobileActionAtPoint(x, y) {
   }
 
   if (state.room?.state === "waiting") {
+    const localBotLobby = isLocalBotLobby();
     if (pointInRect(x, y, mobileWaitingLeaveActionRect())) {
       return "leave";
+    }
+    if (localBotLobby && pointInRect(x, y, mobileWaitingFewerActionRect())) {
+      return "botsFewer";
+    }
+    if (localBotLobby && pointInRect(x, y, mobileWaitingMoreActionRect())) {
+      return "botsMore";
     }
     if (canStartWaitingRoom() && pointInRect(x, y, mobileWaitingStartActionRect())) {
       return "start";
@@ -1384,21 +1399,27 @@ function mobileThemeLeaveActionRect() {
 }
 
 function mobileWaitingLeaveActionRect() {
-  const actionY = mobileWaitingActionsY();
-  return {
-    x: 10,
-    y: actionY,
-    width: 96,
-    height: MOBILE_HUD_ACTION_HEIGHT
-  };
+  return mobileWaitingActionRect(0);
+}
+
+function mobileWaitingFewerActionRect() {
+  return mobileWaitingActionRect(1, 128);
+}
+
+function mobileWaitingMoreActionRect() {
+  return mobileWaitingActionRect(2, 128);
 }
 
 function mobileWaitingStartActionRect() {
+  return mobileWaitingActionRect(isLocalBotLobby() ? 3 : 1);
+}
+
+function mobileWaitingActionRect(index, width = 96) {
   const actionY = mobileWaitingActionsY();
   return {
     x: 10,
-    y: actionY + 12,
-    width: 96,
+    y: actionY + 12 * index,
+    width,
     height: MOBILE_HUD_ACTION_HEIGHT
   };
 }
@@ -2623,6 +2644,7 @@ function createControllerState() {
     upgradesPressed: false,
     mapPressed: false,
     spectatorCycleDirection: 0,
+    waitingBotCountDirection: 0,
     mousePointerHidden: false,
     lastTimeSeconds: 0,
     upgradeNavDirection: 0,
@@ -3582,7 +3604,7 @@ function activateMenuEntity(entity) {
   }
 
   if (entity.action === "bots") {
-    startLocalBotGame();
+    startLocalBotLobby();
     return;
   }
 
@@ -3664,17 +3686,120 @@ function joinNamedRoomFromMenu(value = state.menu.roomNameDraft) {
   releaseSpaceUntilKeyup();
 }
 
-function startLocalBotGame() {
+function startLocalBotLobby() {
   forgetRegisteredRoom();
+  clearLocalBotSave();
+  const botCount = LOCAL_BOT_DEFAULT_COUNT;
+  const seed = `local-bots-lobby:${Date.now().toString(36)}`;
+  const arena = createLocalBotLobbyArena(botCount, seed);
+
+  state.localGame.active = true;
+  state.localGame.arena = arena;
+  state.localGame.bots = new Map();
+  state.localGame.botCount = botCount;
+  state.localGame.lobbySeed = seed;
+  state.localGame.lastStepTimeSeconds = 0;
+  state.localGame.accumulatorSeconds = 0;
+  state.localGame.inputSeq = 0;
+  state.localGame.lastSaveTimeSeconds = 0;
+  state.playerId = LOCAL_BOT_PLAYER_ID;
+  state.room = localBotRoomFromArena(arena, { state: "waiting", botCount });
+  state.lastRoomId = LOCAL_BOT_ROOM_ID;
+  state.lastActiveMatchKey = null;
+  resetControlStateForNewMatch();
+  resetLocalDamageAudioState();
+  resetEntitySmoothing();
+  state.prediction.player = null;
+  state.prediction.huckRockCooldownSeconds = 0;
+  clearPredictedHuckRocks();
+  state.eliminationNotices = [];
+  state.playerAliveById.clear();
+  setSpectatorTarget(null);
+  setClientAsteroid(snapshotAsteroid(arena));
+  syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
+}
+
+function createLocalBotLobbyArena(botCount, seed, preservePlayer = null) {
+  const asteroid = createThemeAsteroid({
+    seed: `${seed}:theme-lobby`,
+    createLobbyPockets: true,
+    playerCount: ENGINE.maxPlayers
+  });
+  const arena = createArena({
+    id: `${LOCAL_BOT_ROOM_ID}:waiting`,
+    seed,
+    asteroid,
+    playerDamage: false,
+    storm: false
+  });
+  const playerName = getPlayerName();
+  const localPlayerId = LOCAL_BOT_PLAYER_ID;
+  const localResult = addPlayer(arena, {
+    id: localPlayerId,
+    name: playerName || "Pilot",
+    spawnNumber: 1,
+    resources: {
+      rock: ENGINE.lobby.startingRock
+    }
+  });
+  const center = localBotLobbyCenter(asteroid);
+  const localPlayer = localResult.player;
+  if (localPlayer) {
+    if (preservePlayer) {
+      localPlayer.x = preservePlayer.x;
+      localPlayer.y = preservePlayer.y;
+      localPlayer.vx = preservePlayer.vx || 0;
+      localPlayer.vy = preservePlayer.vy || 0;
+      localPlayer.angle = preservePlayer.angle || localPlayer.angle;
+      localPlayer.aimAngle = preservePlayer.aimAngle || localPlayer.aimAngle;
+      localPlayer.resources = {
+        ...localPlayer.resources,
+        ...(preservePlayer.resources || {})
+      };
+    } else {
+      localPlayer.x = center.x;
+      localPlayer.y = center.y;
+      localPlayer.angle = -Math.PI / 2;
+      localPlayer.aimAngle = -Math.PI / 2;
+    }
+    localPlayer.lobbyHost = true;
+  }
+
+  for (let index = 0; index < botCount; index += 1) {
+    const id = `bot-${index + 1}`;
+    const result = addPlayer(arena, {
+      id,
+      name: `Bot ${index + 1}`,
+      spawnNumber: index + 2
+    });
+    const bot = result.player;
+    if (!bot) {
+      continue;
+    }
+    const position = localBotLobbyBotPosition(index, center);
+    bot.x = position.x;
+    bot.y = position.y;
+    bot.vx = 0;
+    bot.vy = 0;
+    bot.angle = position.angle;
+    bot.aimAngle = position.angle;
+  }
+
+  return arena;
+}
+
+function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFAULT_COUNT) {
+  forgetRegisteredRoom();
+  botCount = clampLocalBotCount(botCount);
   const seed = `local-bots:${Date.now().toString(36)}`;
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed,
-    playerCount: LOCAL_BOT_COUNT + 1,
+    playerCount: botCount + 1,
     playerDamage: true,
     storm: true
   });
-  const spawnNumbers = shuffledSpawnNumbers(LOCAL_BOT_COUNT + 1, seed);
+  const spawnNumbers = shuffledSpawnNumbers(botCount + 1, seed);
   const playerName = getPlayerName();
   const localPlayerId = LOCAL_BOT_PLAYER_ID;
   addPlayer(arena, {
@@ -3684,7 +3809,7 @@ function startLocalBotGame() {
   });
 
   const bots = new Map();
-  for (let index = 0; index < LOCAL_BOT_COUNT; index += 1) {
+  for (let index = 0; index < botCount; index += 1) {
     const id = `bot-${index + 1}`;
     addPlayer(arena, {
       id,
@@ -3697,6 +3822,8 @@ function startLocalBotGame() {
   state.localGame.active = true;
   state.localGame.arena = arena;
   state.localGame.bots = bots;
+  state.localGame.botCount = botCount;
+  state.localGame.lobbySeed = null;
   state.localGame.lastStepTimeSeconds = 0;
   state.localGame.accumulatorSeconds = 0;
   state.localGame.inputSeq = 0;
@@ -3718,10 +3845,61 @@ function startLocalBotGame() {
   syncLocalArenaSnapshot(performance.now() / 1000);
 }
 
+function localBotLobbyCenter(asteroid) {
+  return {
+    x: (asteroid.widthTiles * asteroid.tileSize) / 2,
+    y: (asteroid.heightTiles * asteroid.tileSize) / 2
+  };
+}
+
+function localBotLobbyBotPosition(index, center) {
+  const radius = RENDER.tileSize * 4;
+  const angle = -Math.PI / 2 + index * (Math.PI * 2 / LOCAL_BOT_MAX_COUNT);
+  const x = center.x + Math.cos(angle) * radius;
+  const y = center.y + Math.sin(angle) * radius;
+  return {
+    x,
+    y,
+    angle: Math.atan2(center.y - y, center.x - x)
+  };
+}
+
+function clampLocalBotCount(value) {
+  const count = Math.floor(Number(value));
+  return clamp(Number.isFinite(count) ? count : LOCAL_BOT_DEFAULT_COUNT, LOCAL_BOT_MIN_COUNT, LOCAL_BOT_MAX_COUNT);
+}
+
+function adjustLocalBotLobbyCount(delta) {
+  if (!isLocalBotLobby()) {
+    return false;
+  }
+
+  const currentCount = clampLocalBotCount(state.localGame.botCount);
+  const nextCount = clampLocalBotCount(currentCount + delta);
+  if (nextCount === currentCount) {
+    return false;
+  }
+
+  const currentPlayer = state.localGame.arena?.players.get(LOCAL_BOT_PLAYER_ID) || null;
+  const seed = state.localGame.lobbySeed || `local-bots-lobby:${Date.now().toString(36)}`;
+  const arena = createLocalBotLobbyArena(nextCount, seed, currentPlayer);
+  state.localGame.arena = arena;
+  state.localGame.bots = new Map();
+  state.localGame.botCount = nextCount;
+  state.localGame.lobbySeed = seed;
+  state.room = localBotRoomFromArena(arena, { state: "waiting", botCount: nextCount });
+  setClientAsteroid(snapshotAsteroid(arena));
+  syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
+  requestMechanicalBeep();
+  return true;
+}
+
 function leaveLocalBotGame() {
   state.localGame.active = false;
   state.localGame.arena = null;
   state.localGame.bots.clear();
+  state.localGame.botCount = LOCAL_BOT_DEFAULT_COUNT;
+  state.localGame.lobbySeed = null;
   state.localGame.lastStepTimeSeconds = 0;
   state.localGame.accumulatorSeconds = 0;
   state.localGame.inputSeq = 0;
@@ -3966,6 +4144,10 @@ function primePlayerAliveState(snapshot) {
 }
 
 function updateLocalRoomEndState(arena) {
+  if (state.room?.state !== "active") {
+    return;
+  }
+
   const alive = Array.from(arena.players.values()).filter((player) => player.alive);
   if (alive.length > 1 || state.room?.state === "ended") {
     return;
@@ -3984,6 +4166,12 @@ function isLocalBotGame() {
   return state.localGame.active === true;
 }
 
+function isLocalBotLobby() {
+  return state.localGame.active === true &&
+    state.room?.localBots === true &&
+    state.room?.state === "waiting";
+}
+
 function shuffledSpawnNumbers(count, seed) {
   const random = createSeededRandom(`${seed}:spawns`);
   const numbers = Array.from({ length: count }, (_, index) => index + 1);
@@ -3997,6 +4185,9 @@ function shuffledSpawnNumbers(count, seed) {
 function saveLocalBotGame(options = {}) {
   const localGame = state.localGame;
   if (!localGame.active || !localGame.arena) {
+    return;
+  }
+  if (state.room?.state === "waiting") {
     return;
   }
 
@@ -4131,7 +4322,7 @@ function restoreLocalBotGame() {
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed: save.seed,
-    playerCount: LOCAL_BOT_COUNT + 1,
+    playerCount: Math.max(1, (save.players || []).length),
     playerDamage: true,
     storm: true,
     asteroid
@@ -4182,6 +4373,8 @@ function restoreLocalBotGame() {
   state.localGame.active = true;
   state.localGame.arena = arena;
   state.localGame.bots = bots;
+  state.localGame.botCount = clampLocalBotCount(bots.size || LOCAL_BOT_DEFAULT_COUNT);
+  state.localGame.lobbySeed = null;
   state.localGame.lastStepTimeSeconds = 0;
   state.localGame.accumulatorSeconds = 0;
   state.localGame.inputSeq = numberOr(save.inputSeq, 0);
@@ -4423,16 +4616,40 @@ function restoreLocalBotEntities(arena, entities) {
 }
 
 function localBotRoomFromArena(arena, options = {}) {
+  const roomState = options.state === "waiting"
+    ? "waiting"
+    : options.state === "ended"
+      ? "ended"
+      : "active";
+  const botCount = clampLocalBotCount(
+    options.botCount ?? state.localGame.botCount ?? Math.max(0, arena.players.size - 1)
+  );
+  const players = Array.from(arena.players.values()).map((player) => ({
+    id: player.id,
+    clientId: player.id === LOCAL_BOT_PLAYER_ID ? state.clientId : player.id,
+    name: player.name,
+    alive: player.alive,
+    connected: true,
+    host: player.id === LOCAL_BOT_PLAYER_ID,
+    playerSlot: true
+  }));
+
   return {
-    state: options.state === "ended" ? "ended" : "active",
+    state: roomState,
     roomId: LOCAL_BOT_ROOM_ID,
     local: true,
-    winnerId: options.state === "ended" ? options.winnerId ?? null : null,
-    players: Array.from(arena.players.values()).map((player) => ({
-      id: player.id,
-      name: player.name,
-      alive: player.alive
-    }))
+    localBots: true,
+    roomName: roomState === "waiting" ? "BOTS" : "",
+    maxPlayers: LOCAL_BOT_MAX_COUNT + 1,
+    minPlayers: 1,
+    playerSlots: botCount + 1,
+    botCount,
+    isHost: true,
+    countdownArmed: false,
+    countdownSeconds: ENGINE.lobby.countdownSeconds,
+    autoStartAtMs: null,
+    winnerId: roomState === "ended" ? options.winnerId ?? null : null,
+    players
   };
 }
 
@@ -9177,6 +9394,11 @@ function handleRoomUiClick(buttonId) {
     return;
   }
 
+  if (buttonId === "start" && isLocalBotLobby()) {
+    requestWaitingRoomStart();
+    return;
+  }
+
   if (!socket.connected) {
     return;
   }
@@ -9210,6 +9432,18 @@ function handleWaitingRoomShortcutKey(event) {
     return true;
   }
 
+  if (event.code === "KeyQ" && isLocalBotLobby()) {
+    event.preventDefault();
+    adjustLocalBotLobbyCount(-1);
+    return true;
+  }
+
+  if (event.code === "KeyE" && isLocalBotLobby()) {
+    event.preventDefault();
+    adjustLocalBotLobbyCount(1);
+    return true;
+  }
+
   return false;
 }
 
@@ -9236,7 +9470,24 @@ function handleMenuRoomShortcutKey(event) {
 
 function handleWaitingRoomControllerActions(input) {
   if (state.room?.state !== "waiting") {
+    state.controller.waitingBotCountDirection = 0;
     return false;
+  }
+
+  if (isLocalBotLobby()) {
+    const direction = Math.abs(input.dpad.x) >= CONTROLLER_DPAD_NAV_THRESHOLD
+      ? Math.sign(input.dpad.x)
+      : 0;
+    if (direction === 0) {
+      state.controller.waitingBotCountDirection = 0;
+    } else if (direction !== state.controller.waitingBotCountDirection) {
+      state.controller.waitingBotCountDirection = direction;
+      adjustLocalBotLobbyCount(direction);
+      unlockAudio();
+      return true;
+    }
+  } else {
+    state.controller.waitingBotCountDirection = 0;
   }
 
   if (input.pressed.reset) {
@@ -9271,6 +9522,11 @@ function leaveThemeMenuRoom() {
 }
 
 function requestWaitingRoomStart() {
+  if (isLocalBotLobby()) {
+    startLocalBotGame(state.localGame.botCount);
+    return;
+  }
+
   if (!socket.connected || !canStartWaitingRoom()) {
     return;
   }
@@ -9279,6 +9535,10 @@ function requestWaitingRoomStart() {
 }
 
 function canStartWaitingRoom() {
+  if (isLocalBotLobby()) {
+    return true;
+  }
+
   if (state.room?.state !== "waiting" || state.room.countdownArmed || !state.room.isHost) {
     return false;
   }

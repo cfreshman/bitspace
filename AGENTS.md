@@ -42,6 +42,8 @@ LLM instructions
 - if you truly think there are multiple ways to interpret something and ur not sure, ASK. DO NOT BLINDLY START IN UR 'BEST GUESS', BECAUSE YOU ARE LITERALLY ALWAYS WRONG
 - do not overcorrect
 - if an edit/patch fails, dont tell me why. i dont care. its your fault and i dont care why it happened from ur end. just fix it
+- if you have an actionable thing to do out of what im saying, DO IT. dont just conversate with me
+- desktop controls always need controller/keyboard equivalents unless explicitly stated otherwise, and you must state what equivalents you made these. mobile is usually a tap control
 
 ## LLM ERRATA
 

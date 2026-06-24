@@ -4030,6 +4030,7 @@ function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
     panel.x + 2,
     panel.y + panel.height + 7,
     false,
+    null,
     options,
     colors,
     textRenderer
@@ -4042,7 +4043,10 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer, localPlaye
   const maxPlayers = room.maxPlayers || ENGINE.maxPlayers;
   const minPlayers = room.minPlayers || ENGINE.lobby.minPlayers || 2;
   const secondsLeft = Math.max(0, Math.ceil(((room.autoStartAtMs || 0) - Date.now()) / 1000));
-  const status = room.countdownArmed
+  const botCount = Math.max(0, Math.floor(Number(room.botCount) || 0));
+  const status = room.localBots
+    ? `${botCount} ${botCount === 1 ? "BOT" : "BOTS"}`
+    : room.countdownArmed
     ? `STARTING ${formatClock(secondsLeft)}`
     : room.queued
       ? `QUEUE ${room.queuePosition || 1}`
@@ -4098,6 +4102,7 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
     panel.x + 2,
     panel.y + panel.height + HUD_PANEL_ACTION_GAP,
     canStart,
+    room,
     options,
     colors,
     textRenderer
@@ -4105,19 +4110,29 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
   drawWaitingDisabledFlash(ctx, warningPosition.x, warningPosition.y, options, colors, textRenderer);
 }
 
-function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRenderer) {
+function drawWaitingTerminalActions(ctx, x, y, canStart, room, options, colors, textRenderer) {
   const keyboardLineStep = 12;
   const controllerLineStep = 15;
   const labelOffsetY = 2;
+  const isLocalBotLobby = room?.localBots === true;
 
   if (options.controllerActive) {
-    drawControllerHudAction(ctx, "faceRight", "LEAVE", x, y, colors, textRenderer);
+    let lineCount = 0;
+    drawControllerHudAction(ctx, "faceRight", "LEAVE", x, y + controllerLineStep * lineCount, colors, textRenderer);
+    lineCount += 1;
+    if (isLocalBotLobby) {
+      drawControllerDpadHudAction(ctx, "dpadLeft", "FEWER BOTS", x, y + controllerLineStep * lineCount, colors, textRenderer);
+      lineCount += 1;
+      drawControllerDpadHudAction(ctx, "dpadRight", "MORE BOTS", x, y + controllerLineStep * lineCount, colors, textRenderer);
+      lineCount += 1;
+    }
     if (canStart) {
-      drawControllerHudAction(ctx, "faceBottom", "START", x, y + 15, colors, textRenderer);
+      drawControllerHudAction(ctx, "faceBottom", "START", x, y + controllerLineStep * lineCount, colors, textRenderer);
+      lineCount += 1;
     }
     return {
       x: x + 19,
-      y: y + labelOffsetY + controllerLineStep * (canStart ? 2 : 1)
+      y: y + labelOffsetY + controllerLineStep * lineCount
     };
   }
 
@@ -4130,19 +4145,34 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRe
   const firstLineY = y + labelOffsetY;
 
   if (options.mobileActive) {
-    textRenderer.draw(ctx, "LEAVE", x, firstLineY, {
+    let lineCount = 0;
+    textRenderer.draw(ctx, "LEAVE", x, firstLineY + keyboardLineStep * lineCount, {
       ...textOptions,
       width: 96
     });
+    lineCount += 1;
+    if (isLocalBotLobby) {
+      textRenderer.draw(ctx, "FEWER BOTS", x, firstLineY + keyboardLineStep * lineCount, {
+        ...textOptions,
+        width: 128
+      });
+      lineCount += 1;
+      textRenderer.draw(ctx, "MORE BOTS", x, firstLineY + keyboardLineStep * lineCount, {
+        ...textOptions,
+        width: 128
+      });
+      lineCount += 1;
+    }
     if (canStart) {
-      textRenderer.draw(ctx, "START", x, firstLineY + keyboardLineStep, {
+      textRenderer.draw(ctx, "START", x, firstLineY + keyboardLineStep * lineCount, {
         ...textOptions,
         width: 96
       });
+      lineCount += 1;
     }
     return {
       x,
-      y: firstLineY + keyboardLineStep * (canStart ? 2 : 1)
+      y: firstLineY + keyboardLineStep * lineCount
     };
   }
 
@@ -4150,15 +4180,29 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, options, colors, textRe
     ...textOptions,
     width: 96
   });
+  let lineCount = 1;
+  if (isLocalBotLobby) {
+    textRenderer.draw(ctx, "Q - FEWER BOTS", x, firstLineY + keyboardLineStep * lineCount, {
+      ...textOptions,
+      width: 128
+    });
+    lineCount += 1;
+    textRenderer.draw(ctx, "E - MORE BOTS", x, firstLineY + keyboardLineStep * lineCount, {
+      ...textOptions,
+      width: 128
+    });
+    lineCount += 1;
+  }
   if (canStart) {
-    textRenderer.draw(ctx, "ENTER - START", x, firstLineY + keyboardLineStep, {
+    textRenderer.draw(ctx, "ENTER - START", x, firstLineY + keyboardLineStep * lineCount, {
       ...textOptions,
       width: 112
     });
+    lineCount += 1;
   }
   return {
     x,
-    y: firstLineY + keyboardLineStep * (canStart ? 2 : 1)
+    y: firstLineY + keyboardLineStep * lineCount
   };
 }
 
