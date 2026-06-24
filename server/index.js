@@ -74,6 +74,7 @@ app.get("*", (_request, response) => {
 
 let lastTickTime = performance.now();
 const roomSnapshotBaselines = new Map();
+const voiceClientsByRoom = new Map();
 
 io.on("connection", (socket) => {
   const requestedName = sanitizePlayerName(socket.handshake.auth?.name || "");
@@ -287,6 +288,7 @@ io.on("connection", (socket) => {
     }
 
     const roomBeforeLeave = roomManager.clientRoom(clientId);
+    leaveVoiceRoom(clientId, roomBeforeLeave);
     const result = roomManager.leaveClient(clientId);
     socket.emit(SERVER_EVENTS.beep, { kind: "button" });
     if (roomBeforeLeave) {
@@ -304,8 +306,43 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on(CLIENT_EVENTS.voiceJoin, () => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
+
+    const room = roomManager.clientRoom(clientId);
+    if (!room?.participants.has(clientId) || room.state === ROOM_STATES.ended) {
+      socket.emit(SERVER_EVENTS.voicePeers, { roomId: null, peers: [] });
+      return;
+    }
+
+    const peers = joinVoiceRoom(clientId, room);
+    socket.emit(SERVER_EVENTS.voicePeers, {
+      roomId: room.id,
+      peers
+    });
+  });
+
+  socket.on(CLIENT_EVENTS.voiceLeave, () => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
+
+    leaveVoiceRoom(clientId, roomManager.clientRoom(clientId));
+  });
+
+  socket.on(CLIENT_EVENTS.voiceSignal, (payload = {}) => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
+
+    relayVoiceSignal(clientId, payload);
+  });
+
   socket.on("disconnect", () => {
     const room = roomManager.clientRoom(clientId);
+    leaveVoiceRoom(clientId, room);
     roomManager.disconnectClient(clientId, socket.id);
     if (room) {
       broadcastRoom(room);
@@ -322,6 +359,7 @@ setInterval(() => {
   for (const event of events) {
     if (event.type === "waiting-expired") {
       for (const removed of event.removed || []) {
+        leaveVoiceRoom(removed.clientId, event.room);
         const staleSocket = removed.socketId ? io.sockets.sockets.get(removed.socketId) : null;
         staleSocket?.leave(roomChannel(event.room));
         staleSocket && emitRoom(staleSocket);
@@ -335,6 +373,7 @@ setInterval(() => {
 
     if (event.type === "left") {
       const leavingSocket = event.socketId ? io.sockets.sockets.get(event.socketId) : null;
+      leaveVoiceRoom(event.clientId, event.room);
       if (event.beep) {
         broadcastBeep(event.room, "button");
       }
@@ -447,6 +486,104 @@ function broadcastBeep(room, kind = "button") {
   }
 
   io.to(roomChannel(room)).emit(SERVER_EVENTS.beep, { kind });
+}
+
+function joinVoiceRoom(clientId, room) {
+  const roomId = room?.id || "";
+  if (!roomId) {
+    return [];
+  }
+
+  leaveVoiceRoomsExcept(clientId, roomId);
+
+  const peers = voiceClientsByRoom.get(roomId) || new Set();
+  const currentPeers = Array.from(peers)
+    .filter((peerId) => peerId !== clientId && room.participants.has(peerId));
+  const alreadyJoined = peers.has(clientId);
+  peers.add(clientId);
+  voiceClientsByRoom.set(roomId, peers);
+
+  if (!alreadyJoined) {
+    for (const peerId of currentPeers) {
+      const peerSocket = socketForRoomParticipant(room, peerId);
+      peerSocket?.emit(SERVER_EVENTS.voicePeerJoined, {
+        roomId,
+        clientId
+      });
+    }
+  }
+
+  return currentPeers;
+}
+
+function leaveVoiceRoomsExcept(clientId, keptRoomId) {
+  for (const [roomId, peers] of voiceClientsByRoom.entries()) {
+    if (roomId === keptRoomId || !peers.has(clientId)) {
+      continue;
+    }
+
+    const room = roomManager.allRooms().find((candidate) => candidate.id === roomId);
+    leaveVoiceRoom(clientId, room);
+  }
+}
+
+function leaveVoiceRoom(clientId, expectedRoom = null) {
+  for (const [roomId, peers] of voiceClientsByRoom.entries()) {
+    if (expectedRoom && expectedRoom.id !== roomId) {
+      continue;
+    }
+
+    if (!peers.delete(clientId)) {
+      continue;
+    }
+
+    const room = expectedRoom?.id === roomId ? expectedRoom : roomManager.allRooms().find((candidate) => candidate.id === roomId);
+    for (const peerId of peers) {
+      const peerSocket = room ? socketForRoomParticipant(room, peerId) : null;
+      peerSocket?.emit(SERVER_EVENTS.voicePeerLeft, {
+        roomId,
+        clientId
+      });
+    }
+
+    if (peers.size <= 0) {
+      voiceClientsByRoom.delete(roomId);
+    }
+  }
+}
+
+function relayVoiceSignal(clientId, payload = {}) {
+  const targetId = typeof payload.targetId === "string" ? payload.targetId : "";
+  const signal = payload.signal;
+  if (!targetId || targetId === clientId || !signal || typeof signal !== "object") {
+    return;
+  }
+
+  const room = roomManager.clientRoom(clientId);
+  if (!room?.participants.has(clientId) || !room.participants.has(targetId)) {
+    return;
+  }
+
+  const peers = voiceClientsByRoom.get(room.id);
+  if (!peers?.has(clientId) || !peers.has(targetId)) {
+    return;
+  }
+
+  const targetSocket = socketForRoomParticipant(room, targetId);
+  targetSocket?.emit(SERVER_EVENTS.voiceSignal, {
+    roomId: room.id,
+    fromId: clientId,
+    signal
+  });
+}
+
+function socketForRoomParticipant(room, clientId) {
+  const participant = room?.participants.get(clientId);
+  if (!participant?.socketId) {
+    return null;
+  }
+
+  return io.sockets.sockets.get(participant.socketId) || null;
 }
 
 function isCurrentSocket(socket) {

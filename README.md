@@ -43,31 +43,33 @@ Override with `BITSPACE_REMOTE_HOST`, `BITSPACE_REMOTE_SSH_PORT`, `BITSPACE_REMO
 
 ### DigitalOcean
 
-The DigitalOcean path is separate from the Pi path and targets Ubuntu 24 droplets over normal SSH. Set the droplet SSH target, then deploy:
+The DigitalOcean path is separate from the Pi path and targets Ubuntu 24 droplets over normal SSH. The default target is configured in `scripts/config.sh`, so deploy with:
 
 ```sh
-BITSPACE_DO_HOST=root@203.0.113.10 ./scripts/deploy-digitalocean.sh
+./scripts/deploy-digitalocean.sh
 ```
 
 or:
 
 ```sh
-BITSPACE_DO_HOST=root@203.0.113.10 npm run deploy:do
+npm run deploy:do
 ```
 
 Defaults:
 
-- SSH target: required via `BITSPACE_DO_HOST`, such as `root@<ip>` or `ubuntu@<ip>`
+- SSH target: `root@142.93.122.18`
+- Domain: `bitspace.freshman.dev`
 - SSH port: `22`
 - Remote directory: `/opt/bitspace` for `root`, otherwise `/home/<user>/bitspace`
 - App port: `7024`
 - PM2 process name: `bitspace`
-- Bootstrap: enabled, installs Node 20 and `pm2` if missing
+- Bootstrap: enabled, installs Node 20, `pm2`, nginx, UFW, certbot, and PM2 systemd startup if missing
+- Web bootstrap: enabled, configures nginx to proxy HTTPS to `127.0.0.1:7024`, redirects HTTP to HTTPS, and opens SSH/80/443 in UFW
 
-Override with `BITSPACE_DO_SSH_PORT`, `BITSPACE_DO_REMOTE_DIR`, `BITSPACE_DO_PORT`, `BITSPACE_DO_PM2_NAME`, and `BITSPACE_DO_BOOTSTRAP=0`.
+Override with `BITSPACE_DO_SSH_PORT`, `BITSPACE_DO_REMOTE_DIR`, `BITSPACE_DO_PORT`, `BITSPACE_DO_PM2_NAME`, `BITSPACE_DO_CERTBOT_EMAIL`, `BITSPACE_DO_BOOTSTRAP=0`, and `BITSPACE_DO_CONFIGURE_WEB=0`.
 
 Check the deployed process with:
 
 ```sh
-BITSPACE_DO_HOST=root@203.0.113.10 ./scripts/remote-status-digitalocean.sh
+./scripts/remote-status-digitalocean.sh
 ```

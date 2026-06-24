@@ -9,7 +9,10 @@ export const CLIENT_EVENTS = Object.freeze({
   joinNamedRoom: "client:join-named-room",
   resume: "client:resume",
   start: "client:start",
-  leave: "client:leave"
+  leave: "client:leave",
+  voiceJoin: "client:voice-join",
+  voiceLeave: "client:voice-leave",
+  voiceSignal: "client:voice-signal"
 });
 
 export const SERVER_EVENTS = Object.freeze({
@@ -21,5 +24,9 @@ export const SERVER_EVENTS = Object.freeze({
   snapshot: "server:snapshot",
   notice: "server:notice",
   beep: "server:beep",
+  voicePeers: "server:voice-peers",
+  voicePeerJoined: "server:voice-peer-joined",
+  voicePeerLeft: "server:voice-peer-left",
+  voiceSignal: "server:voice-signal",
   error: "server:error"
 });
