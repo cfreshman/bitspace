@@ -92,8 +92,8 @@ const AUDIO_COLLISION_CLUNK_SPEED = 18;
 const AUDIO_ROCK_THUMP_COOLDOWN_SECONDS = 0.14;
 const AUDIO_ROCK_THUMP_SPEED = 10;
 const VOICE_REMOTE_GAIN = 0.82;
-const VOICE_GAIN_FADE_SECONDS = 0.08;
-const VOICE_VISIBILITY_FADE_IN_MS = 450;
+const VOICE_GAIN_FADE_IN_SECONDS = 0.25;
+const VOICE_GAIN_FADE_OUT_SECONDS = 1;
 const VOICE_RETRY_DELAY_MS = 5000;
 const VOICE_PEER_REFRESH_MS = 2500;
 const VOICE_MAX_TARGET_CHECKS = 5;
@@ -6490,6 +6490,12 @@ function ensureVoicePeer(peerId, options = {}) {
     audioNodes: null,
     audibleSinceMs: null,
     audibleUntilMs: 0,
+    voiceCurrentGain: 0,
+    voiceRampStartGain: 0,
+    voiceRampTargetGain: 0,
+    voiceRampStartTime: 0,
+    voiceRampEndTime: 0,
+    voiceTargetGain: 0,
     pendingCandidates: []
   };
   voice.peers.set(peerId, peer);
@@ -6718,17 +6724,21 @@ function updateVoiceVisibility(snapshot, cameraPlayerId, timeSeconds) {
     if (!voicePeerAudible(observer, target, peer.id)) {
       peer.audibleSinceMs = null;
       peer.audibleUntilMs = 0;
-      setVoicePeerGain(peer, 0);
+      if (Math.abs((peer.voiceTargetGain || 0) - 0) > 0.001) {
+        setVoicePeerGain(peer, 0, { fadeSeconds: VOICE_GAIN_FADE_OUT_SECONDS });
+        peer.voiceTargetGain = 0;
+      }
       continue;
     }
 
     if (peer.audibleSinceMs == null) {
       peer.audibleSinceMs = nowMs;
     }
-    const visibleMs = Math.max(0, nowMs - peer.audibleSinceMs);
-    const fadeProgress = clamp(visibleMs / VOICE_VISIBILITY_FADE_IN_MS, 0, 1);
-    peer.audibleUntilMs = nowMs + Math.max(0, VOICE_VISIBILITY_FADE_IN_MS - visibleMs);
-    setVoicePeerGain(peer, VOICE_REMOTE_GAIN * fadeProgress, { immediate: true });
+    peer.audibleUntilMs = nowMs;
+    if (Math.abs((peer.voiceTargetGain || 0) - VOICE_REMOTE_GAIN) > 0.001) {
+      setVoicePeerGain(peer, VOICE_REMOTE_GAIN, { fadeSeconds: VOICE_GAIN_FADE_IN_SECONDS });
+      peer.voiceTargetGain = VOICE_REMOTE_GAIN;
+    }
   }
 }
 
@@ -6830,12 +6840,47 @@ function setVoicePeerGain(peer, targetGain, options = {}) {
 
   const gain = peer.gain.gain;
   const now = context.currentTime;
+  const currentGain = voicePeerCurrentGain(peer, now);
+  const nextGain = Math.max(0, Math.min(VOICE_REMOTE_GAIN, Number(targetGain) || 0));
+
   gain.cancelScheduledValues(now);
   if (options.immediate) {
-    gain.setValueAtTime(targetGain, now);
+    gain.setValueAtTime(nextGain, now);
+    peer.voiceCurrentGain = nextGain;
+    peer.voiceRampStartGain = nextGain;
+    peer.voiceRampTargetGain = nextGain;
+    peer.voiceRampStartTime = now;
+    peer.voiceRampEndTime = now;
+    peer.voiceTargetGain = nextGain;
     return;
   }
-  gain.setTargetAtTime(targetGain, now, VOICE_GAIN_FADE_SECONDS);
+
+  const baseFadeSeconds = Math.max(0.001, Number(options.fadeSeconds) || VOICE_GAIN_FADE_OUT_SECONDS);
+  const gainDelta = Math.abs(nextGain - currentGain);
+  const fadeSeconds = Math.max(0.001, baseFadeSeconds * clamp(gainDelta / VOICE_REMOTE_GAIN, 0, 1));
+  gain.setValueAtTime(currentGain, now);
+  gain.linearRampToValueAtTime(nextGain, now + fadeSeconds);
+  peer.voiceCurrentGain = currentGain;
+  peer.voiceRampStartGain = currentGain;
+  peer.voiceRampTargetGain = nextGain;
+  peer.voiceRampStartTime = now;
+  peer.voiceRampEndTime = now + fadeSeconds;
+  peer.voiceTargetGain = nextGain;
+}
+
+function voicePeerCurrentGain(peer, now) {
+  const startGain = Number(peer?.voiceRampStartGain ?? peer?.voiceCurrentGain ?? 0);
+  const targetGain = Number(peer?.voiceRampTargetGain ?? peer?.voiceTargetGain ?? 0);
+  const startTime = Number(peer?.voiceRampStartTime ?? 0);
+  const endTime = Number(peer?.voiceRampEndTime ?? 0);
+  if (endTime > startTime && now > startTime && now < endTime) {
+    const progress = clamp((now - startTime) / (endTime - startTime), 0, 1);
+    return startGain + (targetGain - startGain) * progress;
+  }
+  if (endTime > 0 && now >= endTime) {
+    return targetGain;
+  }
+  return Number(peer?.voiceCurrentGain ?? 0);
 }
 
 function voiceDebugSnapshot() {
