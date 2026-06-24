@@ -93,7 +93,7 @@ const AUDIO_ROCK_THUMP_COOLDOWN_SECONDS = 0.14;
 const AUDIO_ROCK_THUMP_SPEED = 10;
 const VOICE_REMOTE_GAIN = 0.82;
 const VOICE_GAIN_FADE_SECONDS = 0.08;
-const VOICE_AUDIBLE_HOLD_MS = 450;
+const VOICE_VISIBILITY_FADE_IN_MS = 450;
 const VOICE_RETRY_DELAY_MS = 5000;
 const VOICE_PEER_REFRESH_MS = 2500;
 const VOICE_MAX_TARGET_CHECKS = 5;
@@ -6111,7 +6111,11 @@ function voiceRoomJoinAllowed() {
     return false;
   }
 
-  if (state.room.state !== "waiting" && state.room.state !== "active") {
+  if (
+    state.room.state !== "waiting" &&
+    state.room.state !== "active" &&
+    state.room.state !== "ended"
+  ) {
     return false;
   }
 
@@ -6124,11 +6128,12 @@ function voiceRoomTransmitAllowed() {
     return false;
   }
 
-  if (state.room?.state === "waiting") {
+  if (state.room?.state === "waiting" || state.room?.state === "ended") {
     return true;
   }
 
-  return localPlayerFromSnapshot()?.alive === true;
+  const localPlayer = localPlayerFromSnapshot();
+  return Boolean(localPlayer && (localPlayer.alive === true || localPlayer.alive === false));
 }
 
 function expectedVoicePeerIds() {
@@ -6483,6 +6488,7 @@ function ensureVoicePeer(peerId, options = {}) {
     gain: null,
     analyser: null,
     audioNodes: null,
+    audibleSinceMs: null,
     audibleUntilMs: 0,
     pendingCandidates: []
   };
@@ -6709,11 +6715,20 @@ function updateVoiceVisibility(snapshot, cameraPlayerId, timeSeconds) {
   const nowMs = timeSeconds * 1000;
   for (const peer of voice.peers.values()) {
     const target = snapshot?.players?.find((candidate) => candidate.id === peer.id) || null;
-    if (voicePeerAudible(observer, target)) {
-      peer.audibleUntilMs = nowMs + VOICE_AUDIBLE_HOLD_MS;
+    if (!voicePeerAudible(observer, target, peer.id)) {
+      peer.audibleSinceMs = null;
+      peer.audibleUntilMs = 0;
+      setVoicePeerGain(peer, 0);
+      continue;
     }
 
-    setVoicePeerGain(peer, nowMs <= peer.audibleUntilMs ? VOICE_REMOTE_GAIN : 0);
+    if (peer.audibleSinceMs == null) {
+      peer.audibleSinceMs = nowMs;
+    }
+    const visibleMs = Math.max(0, nowMs - peer.audibleSinceMs);
+    const fadeProgress = clamp(visibleMs / VOICE_VISIBILITY_FADE_IN_MS, 0, 1);
+    peer.audibleUntilMs = nowMs + Math.max(0, VOICE_VISIBILITY_FADE_IN_MS - visibleMs);
+    setVoicePeerGain(peer, VOICE_REMOTE_GAIN * fadeProgress, { immediate: true });
   }
 }
 
@@ -6729,7 +6744,19 @@ function voiceObserverPlayer(snapshot, cameraPlayerId) {
   return snapshot.players?.find((candidate) => candidate.id === cameraPlayerId) || null;
 }
 
-function voicePeerAudible(observer, target) {
+function voicePeerAudible(observer, target, peerId = "") {
+  if (state.room?.state === "ended") {
+    return Boolean(peerId && peerId !== state.clientId);
+  }
+
+  const localPlayer = localPlayerFromSnapshot();
+  if (
+    state.room?.state === "active" &&
+    localPlayer?.alive === false
+  ) {
+    return Boolean(target && target.alive === false && target.id !== localPlayer.id);
+  }
+
   if (!observer || !target || target.alive === false || observer.id === target.id) {
     return false;
   }
@@ -6791,7 +6818,7 @@ function voiceLineOfSightClear(startX, startY, endX, endY) {
   return !hit?.hit || hit.distance >= distance - 1;
 }
 
-function setVoicePeerGain(peer, targetGain) {
+function setVoicePeerGain(peer, targetGain, options = {}) {
   if (!peer?.gain) {
     return;
   }
@@ -6804,6 +6831,10 @@ function setVoicePeerGain(peer, targetGain) {
   const gain = peer.gain.gain;
   const now = context.currentTime;
   gain.cancelScheduledValues(now);
+  if (options.immediate) {
+    gain.setValueAtTime(targetGain, now);
+    return;
+  }
   gain.setTargetAtTime(targetGain, now, VOICE_GAIN_FADE_SECONDS);
 }
 

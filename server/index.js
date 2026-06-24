@@ -312,7 +312,7 @@ io.on("connection", (socket) => {
     }
 
     const room = roomManager.clientRoom(clientId);
-    if (!room?.participants.has(clientId) || room.state === ROOM_STATES.ended) {
+    if (!room?.participants.has(clientId)) {
       socket.emit(SERVER_EVENTS.voicePeers, { roomId: null, peers: [] });
       return;
     }
