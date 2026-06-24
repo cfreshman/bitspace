@@ -36,7 +36,7 @@ body {
 
 body.mobile-controls #scene,
 body.mobile-controls #scene-present {
-  object-position: bottom center;
+  object-position: top center;
 }
 
 #scene-present {

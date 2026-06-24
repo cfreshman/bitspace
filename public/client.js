@@ -205,7 +205,8 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
   bottomPadding: 8
 });
 const MOBILE_POINTER_QUERY = "(pointer: coarse)";
-const MOBILE_HUD_SCALE = 1.5;
+const MOBILE_HUD_SCALE = 1.75;
+const MOBILE_HUD_EDGE_INSET = 8;
 const MOBILE_JOYSTICK_DEADZONE_RATIO = 0.22;
 const MOBILE_JOYSTICK_MIN_DEADZONE = 8;
 const MOBILE_JOYSTICK_MIN_RADIUS = 42;
@@ -224,6 +225,7 @@ const HUD_PANEL_ACTION_GAP = 7;
 const MOBILE_HUD_ACTION_X = 10;
 const MOBILE_HUD_ACTION_WIDTH = 118;
 const MOBILE_HUD_ACTION_HEIGHT = 12;
+const MOBILE_CONTROL_LINE_STEP = MOBILE_HUD_ACTION_HEIGHT + 8;
 const TERMINAL_LEAVE_ACTION = Object.freeze({
   x: 10,
   eliminatedY: 41,
@@ -1157,6 +1159,36 @@ function handleMobilePointerDown(event) {
   updateMouse(event);
   const hudPoint = mobileHudFramePointFromEvent(event);
 
+  if (state.upgrades.active) {
+    if (
+      pointInRect(hudPoint.x, hudPoint.y, mobileUpgradeCloseActionRect()) ||
+      !pointInRect(hudPoint.x, hudPoint.y, mobileUpgradePanelRect())
+    ) {
+      closeUpgrades();
+      return true;
+    }
+
+    updateUpgradeSelectionFromPoint(hudPoint.x, hudPoint.y);
+    buySelectedUpgrade();
+    return true;
+  }
+
+  const moveJoystickRect = mobileJoystickCssRect("move");
+  if (pointInCssRect(event.clientX, event.clientY, moveJoystickRect)) {
+    state.mobile.moveJoystick.pointerId = event.pointerId;
+    state.mobile.moveJoystick.active = true;
+    updateMobileJoystickFromPointer(event, "move");
+    return true;
+  }
+
+  const aimJoystickRect = mobileJoystickCssRect("aim");
+  if (pointInCssRect(event.clientX, event.clientY, aimJoystickRect)) {
+    state.mobile.aimJoystick.pointerId = event.pointerId;
+    state.mobile.aimJoystick.active = true;
+    updateMobileJoystickFromPointer(event, "aim");
+    return true;
+  }
+
   const mobileAction = mobileActionAtPoint(hudPoint.x, hudPoint.y);
   if (mobileAction) {
     handleMobileAction(mobileAction);
@@ -1175,35 +1207,9 @@ function handleMobilePointerDown(event) {
     return true;
   }
 
-  if (state.upgrades.active) {
-    if (pointInRect(hudPoint.x, hudPoint.y, mobileUpgradeCloseActionRect())) {
-      closeUpgrades();
-      return true;
-    }
-    updateUpgradeSelectionFromPoint(hudPoint.x, hudPoint.y);
-    buySelectedUpgrade();
-    return true;
-  }
-
   if (state.build.active && state.mouse.inFrame && !state.chat.active && !isRoomUiBlocking()) {
     state.mouse.down = true;
     buildWallAtMouse({ force: true });
-    return true;
-  }
-
-  const moveJoystickRect = mobileJoystickCssRect("move");
-  if (pointInCssRect(event.clientX, event.clientY, moveJoystickRect)) {
-    state.mobile.moveJoystick.pointerId = event.pointerId;
-    state.mobile.moveJoystick.active = true;
-    updateMobileJoystickFromPointer(event, "move");
-    return true;
-  }
-
-  const aimJoystickRect = mobileJoystickCssRect("aim");
-  if (pointInCssRect(event.clientX, event.clientY, aimJoystickRect)) {
-    state.mobile.aimJoystick.pointerId = event.pointerId;
-    state.mobile.aimJoystick.active = true;
-    updateMobileJoystickFromPointer(event, "aim");
     return true;
   }
 
@@ -1356,15 +1362,11 @@ function menuEntityContainsPoint(entity, x, y) {
 }
 
 function mobileHudActionRect(kind) {
-  const yByKind = {
-    upgrades: 74,
-    build: 88,
-    map: 102,
-    leave: 116
-  };
+  const index = mobileArenaActionKinds().indexOf(kind);
+  const y = mobileArenaControlsY() + Math.max(0, index) * MOBILE_CONTROL_LINE_STEP;
   return {
     x: MOBILE_HUD_ACTION_X,
-    y: yByKind[kind] || 0,
+    y,
     width: MOBILE_HUD_ACTION_WIDTH,
     height: MOBILE_HUD_ACTION_HEIGHT
   };
@@ -1374,16 +1376,25 @@ function mobileUpgradeCloseActionRect() {
   const height = approximateUpgradeMenuHeight();
   return {
     x: UPGRADE_MENU_LAYOUT.x + 2,
-    y: UPGRADE_MENU_LAYOUT.y + height + MOBILE_UPGRADE_CLOSE_ACTION.gap,
+    y: upgradeMenuY() + height + MOBILE_UPGRADE_CLOSE_ACTION.gap,
     width: MOBILE_UPGRADE_CLOSE_ACTION.width,
     height: MOBILE_UPGRADE_CLOSE_ACTION.height
+  };
+}
+
+function mobileUpgradePanelRect() {
+  return {
+    x: UPGRADE_MENU_LAYOUT.x,
+    y: upgradeMenuY(),
+    width: approximateUpgradeMenuWidth(true),
+    height: approximateUpgradeMenuHeight()
   };
 }
 
 function mobileConfirmLeaveActionRect() {
   return {
     x: 10,
-    y: 8 + hudPanelHeightForRows(2) + HUD_PANEL_ACTION_GAP,
+    y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
     width: 112,
     height: MOBILE_HUD_ACTION_HEIGHT
   };
@@ -1392,7 +1403,7 @@ function mobileConfirmLeaveActionRect() {
 function mobileThemeLeaveActionRect() {
   return {
     x: 10,
-    y: 8 + hudPanelHeightForRows(1) + 7,
+    y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
     width: 96,
     height: MOBILE_HUD_ACTION_HEIGHT
   };
@@ -1418,16 +1429,67 @@ function mobileWaitingActionRect(index, width = 96) {
   const actionY = mobileWaitingActionsY();
   return {
     x: 10,
-    y: actionY + 12 * index,
+    y: actionY + MOBILE_CONTROL_LINE_STEP * index,
     width,
     height: MOBILE_HUD_ACTION_HEIGHT
   };
 }
 
 function mobileWaitingActionsY() {
-  const playerHudHeight = localPlayerFromSnapshot() ? 58 : 0;
-  const waitingPanelY = playerHudHeight ? 8 + playerHudHeight + 6 : 8;
-  return waitingPanelY + hudPanelHeightForRows(2) + HUD_PANEL_ACTION_GAP;
+  return mobileHudControlBlockY(mobileControlListHeight(mobileWaitingActionCount()));
+}
+
+function mobileWaitingActionCount() {
+  let count = 1;
+  if (isLocalBotLobby()) {
+    count += 2;
+  }
+  if (canStartWaitingRoom()) {
+    count += 1;
+  }
+  return count;
+}
+
+function mobileArenaControlsY() {
+  return mobileHudControlBlockY(mobileControlListHeight(mobileArenaActionKinds().length));
+}
+
+function mobileArenaActionKinds() {
+  const kinds = ["upgrades", "build"];
+  if (playerMapAllowed()) {
+    kinds.push("map");
+  }
+  if (canLeaveWithShortcut()) {
+    kinds.push("leave");
+  }
+  return kinds;
+}
+
+function mobileControlListHeight(lineCount, lineStep = MOBILE_CONTROL_LINE_STEP) {
+  return Math.max(
+    MOBILE_HUD_ACTION_HEIGHT,
+    Math.max(0, Math.floor(lineCount) - 1) * lineStep + MOBILE_HUD_ACTION_HEIGHT
+  );
+}
+
+function mobileHudControlBlockY(blockHeight) {
+  const frame = mobileHudContentCssRect();
+  return Math.max(
+    MOBILE_HUD_EDGE_INSET,
+    frame.logicalHeight - MOBILE_HUD_EDGE_INSET - Math.max(MOBILE_HUD_ACTION_HEIGHT, blockHeight)
+  );
+}
+
+function upgradeMenuY() {
+  if (!mobileControlsActive()) {
+    return UPGRADE_MENU_LAYOUT.y;
+  }
+
+  return mobileHudControlBlockY(
+    approximateUpgradeMenuHeight() +
+    MOBILE_UPGRADE_CLOSE_ACTION.gap +
+    MOBILE_UPGRADE_CLOSE_ACTION.height
+  );
 }
 
 function hudPanelHeightForRows(rowCount) {
@@ -1564,9 +1626,23 @@ function updateMobileControlUi() {
     return;
   }
 
-  const active = mobileControlsActive() && !shouldIgnorePagePointerEvent();
+  const modalActive = state.upgrades.active === true;
+  const active = mobileControlsActive() && !shouldIgnorePagePointerEvent() && !modalActive;
   mobileControlsRoot.hidden = !active;
   if (!active) {
+    if (modalActive) {
+      state.mobile.moveJoystick.pointerId = null;
+      state.mobile.moveJoystick.active = false;
+      state.mobile.moveJoystick.engaged = false;
+      state.mobile.moveJoystick.x = 0;
+      state.mobile.moveJoystick.y = 0;
+      state.mobile.aimJoystick.pointerId = null;
+      state.mobile.aimJoystick.active = false;
+      state.mobile.aimJoystick.engaged = false;
+      state.mobile.aimJoystick.x = 0;
+      state.mobile.aimJoystick.y = 0;
+      state.mobile.move = { x: 0, y: 0 };
+    }
     return;
   }
 
@@ -1637,24 +1713,16 @@ function drawMobileJoystickCanvas(joystickCanvas, diameter, joystick, foreground
 }
 
 function mobileJoystickCssRect(kind = "aim") {
-  const frame = canvasContentCssRect(canvas);
-  const viewport = window.visualViewport;
-  const viewportTop = viewport?.offsetTop || 0;
-  const viewportHeight = viewport?.height || window.innerHeight || frame.bottom;
-  const viewportBottom = viewportTop + viewportHeight - canvasEdgePaddingPxClient();
-  const availableTop = frame.bottom + 4;
-  const availableHeight = Math.max(1, viewportBottom - availableTop);
+  const drawer = mobileControlDrawerCssRect();
   const radius = Math.round(clamp(
-    Math.min(frame.width * 0.18, availableHeight * 0.36),
+    Math.min(drawer.width * 0.18, drawer.height * 0.36),
     MOBILE_JOYSTICK_MIN_RADIUS,
     MOBILE_JOYSTICK_MAX_RADIUS
   ));
   const centerX = kind === "move"
-    ? frame.left + frame.width * 0.28
-    : frame.left + frame.width * 0.72;
-  const centerY = availableHeight >= radius * 2
-    ? availableTop + availableHeight / 2
-    : viewportBottom - radius;
+    ? drawer.left + drawer.width * 0.28
+    : drawer.left + drawer.width * 0.72;
+  const centerY = drawer.top + drawer.height / 2;
   const roundedCenterX = Math.round(centerX);
   const roundedCenterY = Math.round(centerY);
 
@@ -1669,6 +1737,26 @@ function mobileJoystickCssRect(kind = "aim") {
   };
 }
 
+function mobileControlDrawerCssRect() {
+  const viewport = window.visualViewport;
+  const viewportLeft = viewport?.offsetLeft || 0;
+  const viewportTop = viewport?.offsetTop || 0;
+  const viewportWidth = viewport?.width || window.innerWidth || RENDER.width;
+  const viewportHeight = viewport?.height || window.innerHeight || RENDER.height;
+  const drawerHeight = Math.min(
+    mobileControlDrawerHeightPxClient(),
+    Math.max(1, viewportHeight)
+  );
+  return {
+    left: viewportLeft,
+    top: viewportTop + viewportHeight - drawerHeight,
+    width: viewportWidth,
+    height: drawerHeight,
+    right: viewportLeft + viewportWidth,
+    bottom: viewportTop + viewportHeight
+  };
+}
+
 function canvasContentCssRect(targetCanvas) {
   const rect = targetCanvas.getBoundingClientRect();
   const canvasWidth = targetCanvas.width || RENDER.width;
@@ -1678,7 +1766,7 @@ function canvasContentCssRect(targetCanvas) {
   const height = canvasHeight * scale;
   const offsetX = (rect.width - width) / 2;
   const offsetY = mobileControlsActive() && targetCanvas === canvas
-    ? rect.height - height
+    ? 0
     : (rect.height - height) / 2;
 
   return {
@@ -1703,8 +1791,8 @@ function mobileHudFramePointFromEvent(event) {
   const x = event.clientX - frame.left;
   const y = event.clientY - frame.top;
   return {
-    x: clamp(x / scale, 0, canvas.width || RENDER.width),
-    y: clamp(y / scale, 0, canvas.height || RENDER.height),
+    x: clamp(x / scale, 0, frame.logicalWidth),
+    y: clamp(y / scale, 0, frame.logicalHeight),
     inFrame: x >= 0 && x <= frame.width && y >= 0 && y <= frame.height
   };
 }
@@ -1716,16 +1804,35 @@ function mobileHudContentCssRect() {
   }
 
   const canvasRect = canvas.getBoundingClientRect();
+  const edgeX = Math.max(0, canvasRect.left);
+  const edgeY = Math.max(0, canvasRect.top);
   const scale = frame.scale * MOBILE_HUD_SCALE;
+  const width = canvasRect.width + edgeX * 2;
+  const height = canvasRect.height + edgeY * 2;
+  const logicalSize = mobileHudLogicalSize(width, height, scale);
   return {
-    left: frame.left,
-    top: canvasRect.top,
-    width: frame.width * MOBILE_HUD_SCALE,
-    height: frame.height * MOBILE_HUD_SCALE,
-    right: frame.left + frame.width * MOBILE_HUD_SCALE,
-    bottom: canvasRect.top + frame.height * MOBILE_HUD_SCALE,
+    left: 0,
+    top: 0,
+    width,
+    height,
+    right: width,
+    bottom: height,
+    logicalWidth: logicalSize.width,
+    logicalHeight: logicalSize.height,
     scale
   };
+}
+
+function mobileHudLogicalSize(width, height, scale) {
+  const safeScale = Math.max(0.0001, scale);
+  return {
+    width: mobileHudRoundEven(width / safeScale),
+    height: mobileHudRoundEven(height / safeScale)
+  };
+}
+
+function mobileHudRoundEven(value) {
+  return Math.max(2, Math.round(value / 2) * 2);
 }
 
 function canvasEdgePaddingPxClient() {
@@ -1735,6 +1842,17 @@ function canvasEdgePaddingPxClient() {
     return (Number.parseFloat(value) || 0) * rootFontSize;
   }
   return Number.parseFloat(value) || 0;
+}
+
+function mobileControlDrawerHeightPxClient() {
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue("--mobile-control-drawer-height")
+    .trim();
+  if (value.endsWith("em")) {
+    const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    return (Number.parseFloat(value) || 0) * rootFontSize;
+  }
+  return Math.max(1, Number.parseFloat(value) || 0);
 }
 
 function pointInRect(x, y, rect) {
@@ -3659,7 +3777,7 @@ function promptNamedRoomFromMenu() {
   const initial = normalizedRoomNameDraft() || pathRoomName();
   cancelMiningRay();
   releaseSpaceUntilKeyup();
-  const value = window.prompt("ROOM", initial);
+  const value = window.prompt("ROOM KEY", initial);
   if (value === null) {
     return;
   }
@@ -6154,6 +6272,7 @@ function activateUpgrades(options = {}) {
   if (!options.controller) {
     updateUpgradeSelectionFromMouse();
   }
+  updateMobileControlUi();
 }
 
 function toggleUpgrades(options = {}) {
@@ -6168,6 +6287,7 @@ function toggleUpgrades(options = {}) {
 function closeUpgrades() {
   state.upgrades.active = false;
   resetControllerUpgradeNav();
+  updateMobileControlUi();
 }
 
 function toggleBuildMode() {
@@ -9765,12 +9885,25 @@ function activeRoomButtons() {
 }
 
 function terminalLeaveActionRect() {
+  if (mobileControlsActive()) {
+    return mobileTerminalLeaveActionRect();
+  }
+
   const ended = state.room?.state === "ended";
   return {
     x: TERMINAL_LEAVE_ACTION.x,
     y: ended ? endedTerminalLeaveActionY() : TERMINAL_LEAVE_ACTION.eliminatedY,
     width: TERMINAL_LEAVE_ACTION.width,
     height: TERMINAL_LEAVE_ACTION.height
+  };
+}
+
+function mobileTerminalLeaveActionRect() {
+  return {
+    x: 10,
+    y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
+    width: 96,
+    height: MOBILE_HUD_ACTION_HEIGHT
   };
 }
 
@@ -11303,7 +11436,7 @@ function upgradeIndexAtPoint(x, y) {
 function upgradeRowsRect() {
   return {
     x: UPGRADE_MENU_LAYOUT.x + UPGRADE_MENU_LAYOUT.rowInset,
-    y: UPGRADE_MENU_LAYOUT.y + UPGRADE_MENU_LAYOUT.rowTopOffset,
+    y: upgradeMenuY() + UPGRADE_MENU_LAYOUT.rowTopOffset,
     width: upgradeMenuRowWidth(),
     height: UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight
   };

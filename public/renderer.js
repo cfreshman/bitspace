@@ -29,7 +29,10 @@ import {
 
 const ENTITY_PIXEL_SIZE = 1;
 const CANVAS_EDGE_PADDING_EM = 1;
-const MOBILE_HUD_SCALE = 1.5;
+const MOBILE_HUD_SCALE = 1.75;
+const MOBILE_HUD_EDGE_INSET = 8;
+const MOBILE_HUD_ACTION_HEIGHT = 12;
+const MOBILE_CONTROL_LINE_STEP = MOBILE_HUD_ACTION_HEIGHT + 8;
 const MIN_RENDER_ASPECT = 2 / 3;
 const MAX_RENDER_ASPECT = 3 / 2;
 const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
@@ -374,7 +377,8 @@ export function createRenderer(canvas, minimapCanvas = null) {
       presentCanvas.style.height = `${sceneViewport.height}px`;
     }
     if (hudPresentCanvas) {
-      const hudRect = hudCanvasCssRect(viewport);
+      const sceneSize = renderSizeForViewport(viewport);
+      const hudRect = hudCanvasCssRect(viewport, sceneSize);
       hudPresentCanvas.style.left = `${hudRect.left}px`;
       hudPresentCanvas.style.top = `${hudRect.top}px`;
       hudPresentCanvas.style.width = `${hudRect.width}px`;
@@ -395,7 +399,10 @@ export function createRenderer(canvas, minimapCanvas = null) {
 
   function resizeRenderSurface(viewport = getViewportSize()) {
     const size = renderSizeForViewport(viewport);
-    if (canvas.width === size.width && canvas.height === size.height && surface && textRenderer) {
+    const hudSize = hudRenderSizeForViewport(viewport, size);
+    const hudReady = !hudPresentCanvas ||
+      (hudPresentCanvas.width === hudSize.width && hudPresentCanvas.height === hudSize.height && hudSurface);
+    if (canvas.width === size.width && canvas.height === size.height && surface && textRenderer && hudReady) {
       syncFramePresenterVisibility();
       return;
     }
@@ -403,15 +410,15 @@ export function createRenderer(canvas, minimapCanvas = null) {
     canvas.width = size.width;
     canvas.height = size.height;
     if (hudPresentCanvas) {
-      hudPresentCanvas.width = size.width;
-      hudPresentCanvas.height = size.height;
+      hudPresentCanvas.width = hudSize.width;
+      hudPresentCanvas.height = hudSize.height;
       if (hudPresentContext) {
         hudPresentContext.imageSmoothingEnabled = false;
       }
     }
     surface = createPixelSurface(canvasContext, size.width, size.height);
     overlaySurface = createPixelSurface(canvasContext, size.width, size.height);
-    hudSurface = createPixelSurface(hudPresentContext || canvasContext, size.width, size.height);
+    hudSurface = createPixelSurface(hudPresentContext || canvasContext, hudSize.width, hudSize.height);
     textRenderer = createPixelTextRenderer(size.width, size.height, () => colors);
     gpuStormRenderer = createGpuStormRenderer(size.width, size.height);
     framePresenter = createGpuFramePresenter(presentCanvas, size.width, size.height);
@@ -500,25 +507,64 @@ export function createRenderer(canvas, minimapCanvas = null) {
     };
   }
 
-  function hudCanvasCssRect(viewport = getViewportSize()) {
-    const sceneRect = sceneContentRect(viewport);
-    const scale = mobileControlsActiveForRender() ? MOBILE_HUD_SCALE : 1;
+  function hudCanvasCssRect(viewport = getViewportSize(), sceneSize = null) {
+    if (mobileControlsActiveForRender()) {
+      return mobileHudMetrics(viewport, sceneSize).cssRect;
+    }
+
+    const sceneRect = sceneContentRect(viewport, sceneSize);
     return {
       left: Math.round(sceneRect.left),
-      top: Math.round(mobileControlsActiveForRender() ? canvasEdgePaddingPx() : sceneRect.top),
-      width: Math.round(sceneRect.width * scale),
-      height: Math.round(sceneRect.height * scale)
+      top: Math.round(sceneRect.top),
+      width: Math.round(sceneRect.width),
+      height: Math.round(sceneRect.height)
     };
   }
 
-  function sceneContentRect(viewport = getViewportSize()) {
+  function hudRenderSizeForViewport(viewport, sceneSize) {
+    if (!mobileControlsActiveForRender()) {
+      return sceneSize;
+    }
+
+    const metrics = mobileHudMetrics(viewport, sceneSize);
+    return {
+      width: roundEven(metrics.cssWidth / metrics.scale),
+      height: roundEven(metrics.cssHeight / metrics.scale)
+    };
+  }
+
+  function mobileHudMetrics(viewport = getViewportSize(), sceneSize = null) {
+    const sceneRect = sceneContentRect(viewport, sceneSize);
     const padding = canvasEdgePaddingPx();
     const sceneViewport = sceneBoxViewport(viewport);
-    const scale = Math.min(sceneViewport.width / canvas.width, sceneViewport.height / canvas.height);
-    const width = canvas.width * scale;
-    const height = canvas.height * scale;
+    const scale = Math.max(0.0001, sceneRect.scale * MOBILE_HUD_SCALE);
+    const cssWidth = sceneViewport.width + padding * 2;
+    const cssHeight = sceneViewport.height + padding * 2;
+    return {
+      cssWidth,
+      cssHeight,
+      scale,
+      visibleLogicalWidth: cssWidth / scale,
+      visibleLogicalHeight: cssHeight / scale,
+      cssRect: {
+        left: 0,
+        top: 0,
+        width: Math.round(cssWidth),
+        height: Math.round(cssHeight)
+      }
+    };
+  }
+
+  function sceneContentRect(viewport = getViewportSize(), sceneSize = null) {
+    const padding = canvasEdgePaddingPx();
+    const sceneViewport = sceneBoxViewport(viewport);
+    const renderWidth = sceneSize?.width || canvas.width;
+    const renderHeight = sceneSize?.height || canvas.height;
+    const scale = Math.min(sceneViewport.width / renderWidth, sceneViewport.height / renderHeight);
+    const width = renderWidth * scale;
+    const height = renderHeight * scale;
     const offsetY = mobileControlsActiveForRender()
-      ? sceneViewport.height - height
+      ? 0
       : (sceneViewport.height - height) / 2;
     return {
       left: padding + (sceneViewport.width - width) / 2,
@@ -560,8 +606,9 @@ export function createRenderer(canvas, minimapCanvas = null) {
         minimapSizeKey = nextMinimapSizeKey;
         sizeCanvasBox();
       }
-      resizeRenderSurface();
-      resizeMinimapSurface();
+      const renderViewport = getViewportSize();
+      resizeRenderSurface(renderViewport);
+      resizeMinimapSurface(renderViewport);
       const timeSeconds = options.timeSeconds ?? snapshot?.tick / 60 ?? performance.now() / 1000;
       const dtSeconds =
         lastFrameTime === null ? 1 / 60 : clamp(timeSeconds - lastFrameTime, 0, 1 / 15);
@@ -642,6 +689,13 @@ export function createRenderer(canvas, minimapCanvas = null) {
         transparentBacking: true,
         renderState: sharedRenderState
       };
+      if (hudSurface) {
+        const hudMetrics = mobileControlsActiveForRender()
+          ? mobileHudMetrics(renderViewport, { width: canvas.width, height: canvas.height })
+          : null;
+        hudSurface.mobileHudVisibleWidth = hudMetrics?.visibleLogicalWidth || hudSurface.width;
+        hudSurface.mobileHudVisibleHeight = hudMetrics?.visibleLogicalHeight || hudSurface.height;
+      }
       drawFrame(hudSurface, snapshot, hudFrameOptions, colors, textRenderer, frameParticleState);
       const hudBuckets = hudFrameOptions.perfBuckets || null;
       if (worldBuckets) {
@@ -3522,6 +3576,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   const shouldDrawWorldOverlay = renderPhase === "full" || renderPhase === "world" || renderPhase === "worldOverlay";
   const shouldDrawWorld = shouldDrawWorldBase || shouldDrawWorldOverlay;
   const shouldDrawHud = renderPhase === "full" || renderPhase === "hud";
+  const mobileUpgradeModal = options.mobileActive === true && options.upgrades?.active === true;
   const roomState = options.room?.state || "";
   const gpuWorldEffectsAllowed = roomState === "active" || roomState === "ended";
 
@@ -3748,7 +3803,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       }
     });
 
-    if (options.build?.active && localPlayer?.alive && options.asteroid) {
+    if (!mobileUpgradeModal && options.build?.active && localPlayer?.alive && options.asteroid) {
       drawWithoutWorldMask(ctx, () => {
         drawBuildPreview(ctx, options.asteroid, localPlayer, renderPlayers, camera, options.build, colors);
       });
@@ -3761,6 +3816,11 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     endWorldViewport(ctx);
   }
   if (shouldDrawHud) measureBucket("hudMs", () => {
+    if (mobileUpgradeModal) {
+      drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, true);
+      return;
+    }
+
     const leaveConfirmActive = options.leaveConfirm?.active === true;
     if (options.room?.state === "active" && !leaveConfirmActive) {
       if (!localPlayer || !localPlayer.alive) {
@@ -3774,10 +3834,11 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           textRenderer,
           options.hudFlash,
           options.timeSeconds,
-          playersLeft
+          playersLeft,
+          mobilePlayerHudLayout(ctx, options)
         );
-        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive);
-        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive);
+        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
+        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
         drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
         drawMobileLeaveHud(ctx, localPlayer, options, colors, textRenderer);
       }
@@ -3785,7 +3846,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     drawRoomOverlay(ctx, { ...options, snapshot }, localPlayer, colors, textRenderer);
     drawLeaveConfirmHud(ctx, options.leaveConfirm, options, colors, textRenderer);
     drawBotChunkMap(ctx, options.botChunkMap, colors, textRenderer);
-    drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds);
+    drawEliminationNotices(ctx, options.eliminationNotices || [], colors, textRenderer, options.timeSeconds, options.mobileActive);
     drawChatOverlay(ctx, options.chat, colors, textRenderer, options.timeSeconds);
     drawControllerCursor(ctx, options.controllerCursor, colors);
     drawBotDebugPanel(ctx, options.botDebugOverlay, textRenderer);
@@ -4060,7 +4121,7 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer, localPlaye
   }
 
   const playerHudPanel = localPlayer
-    ? drawPlayerHud(ctx, localPlayer, colors, textRenderer, options.hudFlash, options.timeSeconds, count)
+    ? drawPlayerHud(ctx, localPlayer, colors, textRenderer, options.hudFlash, options.timeSeconds, count, mobilePlayerHudLayout(ctx, options))
     : null;
   drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer, playerHudPanel);
 }
@@ -4085,7 +4146,9 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
   );
   if (playerHudPanel) {
     panel.x = playerHudPanel.x;
-    panel.y = playerHudPanel.y + playerHudPanel.height + 6;
+    panel.y = options.mobileActive
+      ? Math.max(8, playerHudPanel.y - panel.height - 6)
+      : playerHudPanel.y + playerHudPanel.height + 6;
   }
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
@@ -4145,34 +4208,38 @@ function drawWaitingTerminalActions(ctx, x, y, canStart, room, options, colors, 
   const firstLineY = y + labelOffsetY;
 
   if (options.mobileActive) {
+    const mobileX = 10;
+    const mobileLineStep = MOBILE_CONTROL_LINE_STEP;
+    const mobileLineCount = 1 + (isLocalBotLobby ? 2 : 0) + (canStart ? 1 : 0);
+    const mobileFirstLineY = mobileHudControlBlockY(ctx, mobileControlListHeight(mobileLineCount)) + labelOffsetY;
     let lineCount = 0;
-    textRenderer.draw(ctx, "LEAVE", x, firstLineY + keyboardLineStep * lineCount, {
+    textRenderer.draw(ctx, "LEAVE", mobileX, mobileFirstLineY + mobileLineStep * lineCount, {
       ...textOptions,
       width: 96
     });
     lineCount += 1;
     if (isLocalBotLobby) {
-      textRenderer.draw(ctx, "FEWER BOTS", x, firstLineY + keyboardLineStep * lineCount, {
+      textRenderer.draw(ctx, "FEWER BOTS", mobileX, mobileFirstLineY + mobileLineStep * lineCount, {
         ...textOptions,
         width: 128
       });
       lineCount += 1;
-      textRenderer.draw(ctx, "MORE BOTS", x, firstLineY + keyboardLineStep * lineCount, {
+      textRenderer.draw(ctx, "MORE BOTS", mobileX, mobileFirstLineY + mobileLineStep * lineCount, {
         ...textOptions,
         width: 128
       });
       lineCount += 1;
     }
     if (canStart) {
-      textRenderer.draw(ctx, "START", x, firstLineY + keyboardLineStep * lineCount, {
+      textRenderer.draw(ctx, "START", mobileX, mobileFirstLineY + mobileLineStep * lineCount, {
         ...textOptions,
         width: 96
       });
       lineCount += 1;
     }
     return {
-      x,
-      y: firstLineY + keyboardLineStep * lineCount
+      x: mobileX,
+      y: Math.max(8, mobileFirstLineY - mobileLineStep)
     };
   }
 
@@ -4242,16 +4309,21 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
     color: colors.foreground
   };
   const textWidth = textRenderer.measure(label, textOptions);
-  const panelWidth = Math.min(ctx.width - 24, textWidth + 24);
+  const visibleWidth = options.mobileActive ? mobileHudVisibleWidth(ctx) : ctx.width;
+  const panelWidth = Math.min(visibleWidth - 24, textWidth + 24);
+  const panelHeight = 39;
+  const panelX = options.mobileActive
+    ? Math.max(8, visibleWidth - panelWidth - 8)
+    : Math.round((visibleWidth - panelWidth) / 2);
   const panel = {
-    x: Math.round((ctx.width - panelWidth) / 2),
-    y: 18,
+    x: panelX,
+    y: options.mobileActive ? mobileHudBottomY(ctx, panelHeight) : 18,
     width: panelWidth,
-    height: 39
+    height: panelHeight
   };
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
-  drawCenteredText(ctx, textRenderer, label, ctx.width / 2, panel.y + 9, textOptions);
+  drawCenteredText(ctx, textRenderer, label, panel.x + panel.width / 2, panel.y + 9, textOptions);
 }
 
 function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, textRenderer, snapshot) {
@@ -4263,6 +4335,8 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
   }
 
   if (spectatedPlayer && spectatedPlayer.id !== localPlayer?.id) {
+    const header = spectatorHeaderForPlayer(spectatedPlayer);
+    const spectatedHeight = playerHudPanelHeight(header);
     stackPanel = drawPlayerHud(
       ctx,
       spectatedPlayer,
@@ -4272,8 +4346,12 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
       options.timeSeconds,
       playersLeft,
       {
-        header: spectatorHeaderForPlayer(spectatedPlayer),
-        y: stackPanel ? stackPanel.y + stackPanel.height + 6 : undefined
+        header,
+        y: stackPanel
+          ? options.mobileActive
+            ? Math.max(8, stackPanel.y - spectatedHeight - 6)
+            : stackPanel.y + stackPanel.height + 6
+          : undefined
       }
     );
   } else if (!stackPanel) {
@@ -5863,7 +5941,7 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
   };
 
   if (options.mobileActive) {
-    textRenderer.draw(ctx, "LEAVE", x, y + 2, {
+    textRenderer.draw(ctx, "LEAVE", 10, mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT) + 2, {
       ...textOptions,
       width: 96
     });
@@ -5883,7 +5961,7 @@ function drawTerminalConfirmLeaveAction(ctx, x, y, options, colors, textRenderer
   }
 
   if (options.mobileActive) {
-    textRenderer.draw(ctx, "CONFIRM", x, y + 2, {
+    textRenderer.draw(ctx, "CONFIRM", 10, mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT) + 2, {
       fontSize: 8,
       color: colors.foreground,
       ...HUD_CONTROL_TEXT_BORDER,
@@ -5900,7 +5978,7 @@ function drawTerminalConfirmLeaveAction(ctx, x, y, options, colors, textRenderer
   });
 }
 
-function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds = 0) {
+function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds = 0, mobileActive = false) {
   const activeNotices = notices
     .filter((notice) => notice.expiresAt > timeSeconds)
     .slice(-3)
@@ -5912,10 +5990,13 @@ function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds 
 
   activeNotices.forEach((notice, index) => {
     const textWidth = textRenderer.measure(notice.text, textOptions);
-    const panelWidth = Math.min(ctx.width - 16, textWidth + 10);
+    const visibleWidth = mobileActive ? mobileHudVisibleWidth(ctx) : ctx.width;
+    const panelWidth = Math.min(visibleWidth - 16, textWidth + 10);
     const panelHeight = 15;
-    const x = ctx.width - panelWidth - 8;
-    const y = ctx.height - 8 - panelHeight - index * (panelHeight + 3);
+    const x = visibleWidth - panelWidth - 8;
+    const y = mobileActive
+      ? 8 + index * (panelHeight + 3)
+      : ctx.height - 8 - panelHeight - index * (panelHeight + 3);
 
     drawPanel(ctx, x, y, panelWidth, panelHeight, colors);
     textRenderer.draw(ctx, notice.text, x + 5, y + 4, {
@@ -10060,7 +10141,7 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   const header = String(layout.header || "").trim().toUpperCase();
   const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
   const width = HUD_PANEL_MIN_WIDTH;
-  const height = 58 + headerOffset;
+  const height = playerHudPanelHeight(header);
   const panel = mainHudPanelRect(ctx, width, height);
   if (Number.isFinite(layout.x)) {
     panel.x = Math.round(layout.x);
@@ -10125,13 +10206,70 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   return panel;
 }
 
-function mainHudPanelRect(ctx, width, height) {
+function mobilePlayerHudLayout(ctx, options = {}) {
+  if (!options.mobileActive) {
+    return {};
+  }
+
   return {
-    x: 8,
-    y: 8,
+    x: Math.max(8, mobileHudVisibleWidth(ctx) - HUD_PANEL_MIN_WIDTH - 8),
+    y: mobileHudBottomY(ctx, playerHudPanelHeight())
+  };
+}
+
+function mainHudPanelRect(ctx, width, height) {
+  const right = mobileControlsActiveForRender() ? mobileHudVisibleWidth(ctx) : ctx.width;
+  return {
+    x: mobileControlsActiveForRender() ? Math.max(8, right - width - 8) : 8,
+    y: mobileControlsActiveForRender() ? mobileHudBottomY(ctx, height) : 8,
     width,
     height
   };
+}
+
+function mobileHudVisibleWidth(ctx) {
+  return Math.max(1, Math.min(ctx.width, ctx.mobileHudVisibleWidth || ctx.width));
+}
+
+function mobileHudVisibleHeight(ctx) {
+  return Math.max(1, Math.min(ctx.height, ctx.mobileHudVisibleHeight || ctx.height));
+}
+
+function mobileHudBottomY(ctx, height, inset = MOBILE_HUD_EDGE_INSET) {
+  return Math.max(inset, mobileHudVisibleHeight(ctx) - inset - height);
+}
+
+function mobileHudControlBlockY(ctx, blockHeight) {
+  return mobileHudBottomY(ctx, Math.max(MOBILE_HUD_ACTION_HEIGHT, blockHeight));
+}
+
+function mobileControlListHeight(lineCount, lineStep = MOBILE_CONTROL_LINE_STEP) {
+  return Math.max(
+    MOBILE_HUD_ACTION_HEIGHT,
+    Math.max(0, Math.floor(lineCount) - 1) * lineStep + MOBILE_HUD_ACTION_HEIGHT
+  );
+}
+
+function mobileArenaControlY(ctx, kind, mapFeatureEnabled = true, leaveVisible = true) {
+  const kinds = mobileArenaActionKinds(mapFeatureEnabled, leaveVisible);
+  const index = Math.max(0, kinds.indexOf(kind));
+  return mobileHudControlBlockY(ctx, mobileControlListHeight(kinds.length)) +
+    index * MOBILE_CONTROL_LINE_STEP;
+}
+
+function mobileArenaActionKinds(mapFeatureEnabled = true, leaveVisible = true) {
+  const kinds = ["upgrades", "build"];
+  if (mapFeatureEnabled) {
+    kinds.push("map");
+  }
+  if (leaveVisible) {
+    kinds.push("leave");
+  }
+  return kinds;
+}
+
+function playerHudPanelHeight(header = "") {
+  return 58 + (String(header || "").trim() ? HUD_PANEL_ROW_STEP : 0);
 }
 
 function hudPanelHeightForRows(rowCount) {
@@ -10140,14 +10278,14 @@ function hudPanelHeightForRows(rowCount) {
     Math.max(0, Math.floor(rowCount) - 1) * HUD_PANEL_ROW_STEP;
 }
 
-function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
+function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true) {
   if (!player) {
     return;
   }
 
   if (!upgradesUi?.active) {
     if (mobileActive) {
-      drawMobileHudAction(ctx, "UPGRADES", 10, 74, colors, textRenderer);
+      drawMobileHudAction(ctx, "UPGRADES", 10, mobileArenaControlY(ctx, "upgrades", mapFeatureEnabled), colors, textRenderer);
       return;
     }
 
@@ -10167,13 +10305,20 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
   drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive, mobileActive);
 }
 
-function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
+function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true) {
   if (!player || upgradesUi?.active) {
     return;
   }
 
   if (mobileActive) {
-    drawMobileHudAction(ctx, buildUi?.active ? "MINING RAY" : "BUILDER ARM", 10, 88, colors, textRenderer);
+    drawMobileHudAction(
+      ctx,
+      buildUi?.active ? "MINING RAY" : "BUILDER ARM",
+      10,
+      mobileArenaControlY(ctx, "build", mapFeatureEnabled),
+      colors,
+      textRenderer
+    );
     return;
   }
 
@@ -10203,7 +10348,7 @@ function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerAct
   }
 
   if (mobileActive) {
-    drawMobileHudAction(ctx, "MAP", 10, 102, colors, textRenderer);
+    drawMobileHudAction(ctx, "MAP", 10, mobileArenaControlY(ctx, "map", mapFeatureEnabled), colors, textRenderer);
     return;
   }
 
@@ -10224,11 +10369,11 @@ function drawMobileLeaveHud(ctx, player, options, colors, textRenderer) {
     return;
   }
 
-  drawMobileHudAction(ctx, "LEAVE", 10, 116, colors, textRenderer);
+  drawMobileHudAction(ctx, "LEAVE", 10, mobileArenaControlY(ctx, "leave", options.playerMapFeatureEnabled, true), colors, textRenderer);
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
-  const layout = upgradeMenuLayout(textRenderer, controllerActive, mobileActive);
+  const layout = upgradeMenuLayout(textRenderer, controllerActive, mobileActive, ctx);
   const { panel, metrics } = layout;
   const resources = player.resources || {};
   const selectedIndex = Number.isInteger(upgradesUi.selectedIndex)
@@ -10473,13 +10618,16 @@ function upgradeMenuMetrics(textRenderer, controllerActive = false, mobileActive
   };
 }
 
-function upgradeMenuLayout(textRenderer, controllerActive = false, mobileActive = false) {
+function upgradeMenuLayout(textRenderer, controllerActive = false, mobileActive = false, ctx = null) {
   const metrics = upgradeMenuMetrics(textRenderer, controllerActive, mobileActive);
+  const panelHeight = upgradeMenuPanelHeight(mobileActive);
   const panel = {
     x: UPGRADE_MENU_LAYOUT.x,
-    y: UPGRADE_MENU_LAYOUT.y,
+    y: mobileActive && ctx
+      ? mobileUpgradeMenuY(ctx, panelHeight)
+      : UPGRADE_MENU_LAYOUT.y,
     width: metrics.width,
-    height: 0
+    height: panelHeight
   };
   const contentX = panel.x + UPGRADE_MENU_LAYOUT.padding;
   const contentWidth = panel.width - UPGRADE_MENU_LAYOUT.padding * 2;
@@ -10494,12 +10642,6 @@ function upgradeMenuLayout(textRenderer, controllerActive = false, mobileActive 
   const rowsBottom = lastRowTop + UPGRADE_MENU_LAYOUT.rowHeight;
   const dividerY = rowsBottom + UPGRADE_MENU_LAYOUT.dividerTopGap;
   const detailY = dividerY + UPGRADE_MENU_DIVIDER.thickness + UPGRADE_MENU_LAYOUT.dividerBottomGap;
-  const detailHeight = UPGRADE_MENU_LAYOUT.rowTextHeight +
-    Math.max(0, UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
-
-  panel.height = mobileActive
-    ? rowsBottom - panel.y + UPGRADE_MENU_LAYOUT.bottomPadding
-    : detailY - panel.y + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
 
   return {
     panel,
@@ -10515,6 +10657,27 @@ function upgradeMenuLayout(textRenderer, controllerActive = false, mobileActive 
     dividerY,
     detailY
   };
+}
+
+function upgradeMenuPanelHeight(mobileActive = false) {
+  const rowsHeight = UPGRADE_MENU_LAYOUT.rowTopOffset +
+    UPGRADE_DEFINITIONS.length * UPGRADE_MENU_LAYOUT.rowHeight;
+  if (mobileActive) {
+    return rowsHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
+  }
+
+  const dividerY = rowsHeight + UPGRADE_MENU_LAYOUT.dividerTopGap;
+  const detailY = dividerY + UPGRADE_MENU_DIVIDER.thickness + UPGRADE_MENU_LAYOUT.dividerBottomGap;
+  const detailHeight = UPGRADE_MENU_LAYOUT.rowTextHeight +
+    Math.max(0, UPGRADE_MENU_LAYOUT.detailLineCount - 1) * UPGRADE_MENU_LAYOUT.detailLineHeight;
+  return detailY + detailHeight + UPGRADE_MENU_LAYOUT.bottomPadding;
+}
+
+function mobileUpgradeMenuY(ctx, panelHeight) {
+  return mobileHudControlBlockY(
+    ctx,
+    panelHeight + MOBILE_UPGRADE_CLOSE_ACTION.gap + MOBILE_UPGRADE_CLOSE_ACTION.height
+  );
 }
 
 function expandPixelTableColumns(columns, rowWidth) {
