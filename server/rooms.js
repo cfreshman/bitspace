@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { ENGINE, RENDER } from "../shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER } from "../shared/constants.js";
 import { createThemeAsteroid } from "../shared/asteroid.js";
 import { createSeededRandom } from "../shared/math.js";
 import {
@@ -154,7 +154,7 @@ export function createRoomManager(options = {}) {
     return { ok: Boolean(client), room };
   }
 
-  function readyClient(clientId) {
+  function readyClient(clientId, options = {}) {
     const client = clients.get(clientId);
     if (!client) {
       return { ok: false, reason: "unknown_client" };
@@ -173,7 +173,8 @@ export function createRoomManager(options = {}) {
       return { ok: true, room: existingRoom, rejoined: true };
     }
 
-    const room = availableWaitingRoom();
+    const mode = normalizeGameMode(options.mode);
+    const room = availableWaitingRoom(mode);
     if (!room) {
       return { ok: false, reason: "no_waiting_room" };
     }
@@ -456,15 +457,17 @@ export function createRoomManager(options = {}) {
     return Array.from(rooms.values());
   }
 
-  function availableWaitingRoom() {
+  function availableWaitingRoom(mode = GAME_MODES.bitspace) {
+    const normalizedMode = normalizeGameMode(mode);
     return Array.from(rooms.values())
       .filter((room) =>
         room.kind === ROOM_KIND.public &&
+        room.mode === normalizedMode &&
         room.state === ROOM_STATES.waiting &&
         !room.countdownArmed &&
         room.participants.size < ENGINE.maxPlayers
       )
-      .sort((a, b) => a.createdAtMs - b.createdAtMs)[0] || createWaitingRoom();
+      .sort((a, b) => a.createdAtMs - b.createdAtMs)[0] || createWaitingRoom({ mode: normalizedMode });
   }
 
   function namedRoomForKey(nameKey) {
@@ -525,12 +528,14 @@ export function createRoomManager(options = {}) {
     const seed = seedFactory(roomNumber);
     nextRoomNumber += 1;
     const kind = options.kind === ROOM_KIND.named ? ROOM_KIND.named : ROOM_KIND.public;
+    const mode = kind === ROOM_KIND.public ? normalizeGameMode(options.mode) : GAME_MODES.bitspace;
     const name = kind === ROOM_KIND.named ? sanitizeNamedRoomName(options.name) : "";
     const nameKey = kind === ROOM_KIND.named ? namedRoomNameKey(options.nameKey || name) : "";
 
     const room = {
       id: `room-${roomNumber}`,
       kind,
+      mode,
       name,
       nameKey,
       cycle: 1,
@@ -542,7 +547,7 @@ export function createRoomManager(options = {}) {
       hostClientId: null,
       participants: new Map(),
       lobbySpawnNumbers: randomizedSpawnNumbers(`${seed}:lobby`, ENGINE.maxPlayers),
-      arena: createLobbyArena(`room-${roomNumber}:waiting`, `${seed}:waiting`),
+      arena: createLobbyArena(`room-${roomNumber}:waiting`, `${seed}:waiting`, mode),
       startedAtMs: null,
       endedAtMs: null,
       startReason: null,
@@ -653,6 +658,7 @@ export function createRoomManager(options = {}) {
     room.arena = createArena({
       id: room.id,
       seed: matchSeed,
+      mode: room.mode,
       playerCount: participants.length
     });
 
@@ -1018,18 +1024,28 @@ export function createRoomManager(options = {}) {
   };
 }
 
-function createLobbyArena(id, seed) {
+function createLobbyArena(id, seed, mode = GAME_MODES.bitspace) {
+  const normalizedMode = normalizeGameMode(mode);
+  const tileSize = normalizedMode === GAME_MODES.cars
+    ? RENDER.tileSize * ENGINE.car.tileScale
+    : RENDER.tileSize;
   const asteroid = createThemeAsteroid({
     seed: `${seed}:theme-lobby`,
+    tileSize,
     createLobbyPockets: true,
     playerCount: ENGINE.maxPlayers
   });
   return createArena({
     id,
     seed,
+    mode: normalizedMode,
     asteroid,
     playerDamage: false
   });
+}
+
+function normalizeGameMode(mode) {
+  return mode === GAME_MODES.cars ? GAME_MODES.cars : GAME_MODES.bitspace;
 }
 
 function syncLobbyHosts(room) {
@@ -1148,6 +1164,7 @@ function snapshotRoom(room, clientId) {
     state: room.state,
     roomId: room.id,
     roomKind: room.kind || ROOM_KIND.public,
+    mode: normalizeGameMode(room.mode),
     roomName: room.name || "",
     roomPath: room.nameKey ? `/${room.nameKey}` : "",
     clientId,

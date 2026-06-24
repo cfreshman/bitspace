@@ -2,6 +2,11 @@ export const BRAND = Object.freeze({
   name: "BITSPACE"
 });
 
+export const GAME_MODES = Object.freeze({
+  bitspace: "bitspace",
+  cars: "cars"
+});
+
 export const RENDER = Object.freeze({
   width: 384,
   height: 384,
@@ -58,6 +63,22 @@ export const ENGINE = Object.freeze({
     friction: SHIP_FRICTION,
     audioSpeedReference: SHIP_BASE_TERMINAL_SPEED,
     directionKeyGraceSeconds: 0.05
+  },
+  car: {
+    maxSteerAngle: 0.72,
+    steerRate: 8.5,
+    wheelBase: 9,
+    tileScale: 2,
+    speedMultiplier: 3,
+    frontAxleOffsetScale: 0.82,
+    rearAxleOffsetScale: -0.82,
+    frontTrackOffsetScale: 0.92,
+    rearTrackOffsetScale: 0.88,
+    tireGrip: 0.88,
+    idleTireGrip: 0.72,
+    driveMultiplier: 1,
+    turnRate: 6.5,
+    lateralFriction: 0.88
   },
   player: {
     startingHealthBars: 3,

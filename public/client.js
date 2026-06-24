@@ -1,4 +1,4 @@
-import { ENGINE, RENDER } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -15,6 +15,7 @@ import {
 } from "/shared/asteroid.js";
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
+import { simulateCarMovement } from "/shared/car-physics.js";
 import { createSeededRandom, inheritedVelocityLaunchAngle } from "/shared/math.js";
 import {
   addPlayer,
@@ -3807,6 +3808,11 @@ function activateMenuEntity(entity) {
     return;
   }
 
+  if (entity.action === "cars") {
+    activateReadyFromMenu(GAME_MODES.cars);
+    return;
+  }
+
   requestMechanicalBeep();
 
   if (entity.action === "theme") {
@@ -3865,13 +3871,16 @@ function activateMenuEntity(entity) {
   }
 }
 
-function activateReadyFromMenu() {
+function activateReadyFromMenu(mode = GAME_MODES.bitspace) {
   if (state.menu.readySent || !socket.connected) {
     return;
   }
 
   state.menu.readySent = true;
-  socket.emit(CLIENT_EVENTS.ready, { button: true });
+  socket.emit(CLIENT_EVENTS.ready, {
+    button: true,
+    mode
+  });
   cancelMiningRay();
   releaseSpaceUntilKeyup();
 }
@@ -4994,6 +5003,7 @@ function menuEntities() {
   const titleY = center.y - 80;
   const readyY = center.y + 38;
   const controlsY = readyY + MENU_BUTTON_HEIGHT + 9;
+  const carsY = controlsY + controlsRows.length * 11 + 8;
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
@@ -5002,6 +5012,7 @@ function menuEntities() {
     menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, titleY),
     menuButton("menu-ready", "ready", "READY", center.x - buttonWidth / 2, readyY, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
+    menuButton("menu-cars", "cars", "CARS", center.x - buttonWidth / 2, carsY, buttonWidth),
     menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
@@ -9099,6 +9110,9 @@ function reconcilePrediction(snapshot, timeSeconds) {
     vx: predicted.vx + (authoritative.vx - predicted.vx) * PREDICTION_VELOCITY_CORRECTION,
     vy: predicted.vy + (authoritative.vy - predicted.vy) * PREDICTION_VELOCITY_CORRECTION,
     angle: predicted.angle,
+    carHeading: Number.isFinite(predicted.carHeading) ? predicted.carHeading : predicted.angle,
+    carSteerAngle: Number.isFinite(predicted.carSteerAngle) ? predicted.carSteerAngle : 0,
+    carAngularVelocity: Number.isFinite(predicted.carAngularVelocity) ? predicted.carAngularVelocity : 0,
     facingMoveX: predicted.facingMoveX,
     facingMoveY: predicted.facingMoveY,
     pendingFacingSignX: predicted.pendingFacingSignX,
@@ -9114,6 +9128,9 @@ function reconcilePrediction(snapshot, timeSeconds) {
 function resetPredictedFacingState(player) {
   return {
     ...player,
+    carHeading: Number.isFinite(player.carHeading) ? player.carHeading : player.angle,
+    carSteerAngle: Number.isFinite(player.carSteerAngle) ? player.carSteerAngle : 0,
+    carAngularVelocity: Number.isFinite(player.carAngularVelocity) ? player.carAngularVelocity : 0,
     facingMoveX: 0,
     facingMoveY: 0,
     pendingFacingSignX: 0,
@@ -9144,10 +9161,13 @@ function updatePrediction(timeSeconds) {
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
 
-  updateShipFacing(predicted, move, dtSeconds);
-
-  if (canThrust) {
-    applyThrusterAcceleration(predicted, move, effects, dtSeconds);
+  if (activeGameMode() === GAME_MODES.cars) {
+    simulateCarMovement(predicted, move, effects, dtSeconds);
+  } else {
+    updateShipFacing(predicted, move, dtSeconds);
+    if (canThrust) {
+      applyThrusterAcceleration(predicted, move, effects, dtSeconds);
+    }
   }
 
   if (!isInputBlocked()) {
@@ -9170,6 +9190,10 @@ function updatePrediction(timeSeconds) {
   resolvePredictionCollisions(predicted);
 }
 
+function activeGameMode() {
+  return state.snapshot?.mode || state.room?.mode || GAME_MODES.bitspace;
+}
+
 function predictedLocalPlayer() {
   const predicted = state.prediction.player;
   const authoritative = localPlayerFromSnapshot();
@@ -9184,6 +9208,9 @@ function predictedLocalPlayer() {
     vx: predicted.vx,
     vy: predicted.vy,
     angle: predicted.angle,
+    carHeading: predicted.carHeading,
+    carSteerAngle: predicted.carSteerAngle,
+    carAngularVelocity: predicted.carAngularVelocity,
     aimAngle: predicted.aimAngle,
     moveX: predicted.moveX,
     moveY: predicted.moveY,
@@ -10266,7 +10293,10 @@ function handleRoomUiClick(buttonId) {
   }
 
   if (buttonId === "ready") {
-    socket.emit(CLIENT_EVENTS.ready, { button: true });
+    socket.emit(CLIENT_EVENTS.ready, {
+      button: true,
+      mode: GAME_MODES.bitspace
+    });
     return;
   }
 

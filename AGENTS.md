@@ -49,7 +49,8 @@ LLM instructions
   > "we added padding to the entire screen. we we dont actually need padding for the HUD"
   > "I’ll separate the HUD overlay from the scene padding. The game canvas can keep its padded placement, but the HUD canvas should cover the full viewport and map clicks/drawing in that HUD coordinate space."
   > "what? no. bro. im saying the site has padding (which we added later) AND the HUD has padding"
-  if you notice, you OVERCOMPENSATE - i say one thing and you go fucking somewhere else. stop doing this  
+  if you notice, you OVERCOMPENSATE - i say one thing and you go fucking somewhere else. stop doing this
+- implement things in a way that will stand the test of time. dont name functions based on their current implementation, unless that is why the function exists. dont make mistakes
 
 ## LLM ERRATA
 

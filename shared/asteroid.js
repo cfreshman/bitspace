@@ -116,19 +116,20 @@ export function createNaturalAsteroid(options = {}) {
   }, options.playerCount);
   const seed = options.seed || "bitspace-natural";
   const random = createSeededRandom(seed);
+  const tileSize = Math.max(1, Math.floor(Number(options.tileSize) || RENDER.tileSize));
   const widthTiles = options.widthTiles || Math.floor(ENGINE.world.width / RENDER.tileSize);
   const heightTiles = options.heightTiles || Math.floor(ENGINE.world.height / RENDER.tileSize);
   const tiles = new Array(widthTiles * heightTiles).fill(ASTEROID_TILE.empty);
   const amounts = new Uint8Array(widthTiles * heightTiles);
 
   generateSimplexAsteroidField(tiles, widthTiles, heightTiles, random, config, seed);
-  clearAsteroidCircles(tiles, amounts, widthTiles, heightTiles, RENDER.tileSize, options.clearCircles || []);
+  clearAsteroidCircles(tiles, amounts, widthTiles, heightTiles, tileSize, options.clearCircles || []);
 
   const playable = createPlayableBoundary(tiles, widthTiles, heightTiles, config);
-  markPlayableCircles(playable, widthTiles, heightTiles, RENDER.tileSize, options.playableCircles || options.clearCircles || []);
+  markPlayableCircles(playable, widthTiles, heightTiles, tileSize, options.playableCircles || options.clearCircles || []);
   const pockets = options.createPockets === false
     ? []
-    : createPlayerPockets(tiles, playable, widthTiles, heightTiles, config);
+    : createPlayerPockets(tiles, playable, widthTiles, heightTiles, config, tileSize);
 
   if (options.seedResources !== false) {
     seedResourceNodes(tiles, amounts, widthTiles, heightTiles, random, config, seed);
@@ -138,7 +139,7 @@ export function createNaturalAsteroid(options = {}) {
     seed,
     widthTiles,
     heightTiles,
-    tileSize: RENDER.tileSize,
+    tileSize,
     generation: {
       resourceGraphKeepDegradation: config.resourceGraphKeepDegradation,
       resourceGraphMinKeepChance: config.resourceGraphMinKeepChance,
@@ -274,6 +275,7 @@ export function createLobbyAsteroid(options = {}) {
   const seed = options.seed || "bitspace-lobby";
   const widthTiles = options.widthTiles || 48;
   const heightTiles = options.heightTiles || 48;
+  const tileSize = Math.max(1, Math.floor(Number(options.tileSize) || RENDER.tileSize));
   const tiles = new Array(widthTiles * heightTiles).fill(ASTEROID_TILE.empty);
   const amounts = new Uint8Array(widthTiles * heightTiles);
   const playable = new Array(widthTiles * heightTiles).fill(false);
@@ -289,15 +291,15 @@ export function createLobbyAsteroid(options = {}) {
     }
   }
 
-  const centerX = ((minTileX + maxTileX + 1) / 2) * RENDER.tileSize;
-  const centerY = ((minTileY + maxTileY + 1) / 2) * RENDER.tileSize;
+  const centerX = ((minTileX + maxTileX + 1) / 2) * tileSize;
+  const centerY = ((minTileY + maxTileY + 1) / 2) * tileSize;
   const orbitRadius = options.spawnRadius || 92;
   const pockets = Array.from({ length: ENGINE.maxPlayers }, (_unused, index) => {
     const angle = Math.PI / 4 + (index * Math.PI * 2) / ENGINE.maxPlayers;
     return {
       playerNumber: index + 1,
-      tileX: Math.round(centerX / RENDER.tileSize),
-      tileY: Math.round(centerY / RENDER.tileSize),
+      tileX: Math.round(centerX / tileSize),
+      tileY: Math.round(centerY / tileSize),
       radius: 0,
       spawnX: centerX + Math.cos(angle) * orbitRadius,
       spawnY: centerY + Math.sin(angle) * orbitRadius
@@ -308,7 +310,7 @@ export function createLobbyAsteroid(options = {}) {
     seed,
     widthTiles,
     heightTiles,
-    tileSize: RENDER.tileSize,
+    tileSize,
     generation: {
       mode: "lobby"
     },
@@ -322,20 +324,22 @@ export function createLobbyAsteroid(options = {}) {
 export function createThemeAsteroid(options = {}) {
   const widthTiles = options.widthTiles || 48;
   const heightTiles = options.heightTiles || 48;
+  const tileSize = Math.max(1, Math.floor(Number(options.tileSize) || RENDER.tileSize));
   const clearRadius = options.clearRadius ?? 116;
   const center = {
-    x: (widthTiles * RENDER.tileSize) / 2,
-    y: (heightTiles * RENDER.tileSize) / 2
+    x: (widthTiles * tileSize) / 2,
+    y: (heightTiles * tileSize) / 2
   };
   const asteroid = createNaturalAsteroid({
     seed: options.seed || "bitspace-theme",
     widthTiles,
     heightTiles,
+    tileSize,
     playerCount: options.playerCount,
     createPockets: false,
     seedResources: options.seedResources,
     clearCircles: [{ x: center.x, y: center.y, radius: clearRadius }],
-    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + RENDER.tileSize * 2 }],
+    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + tileSize * 2 }],
     generation: {
       ...THEME_ASTEROID_GENERATION,
       ...(options.generation || {})
@@ -1129,7 +1133,7 @@ function isPlayableCell(asteroid, index) {
   return asteroid.playable[index] === true || asteroid.playable[index] === "1";
 }
 
-function createPlayerPockets(tiles, playable, widthTiles, heightTiles, config) {
+function createPlayerPockets(tiles, playable, widthTiles, heightTiles, config, tileSize = RENDER.tileSize) {
   const centerX = (widthTiles - 1) / 2;
   const centerY = (heightTiles - 1) / 2;
   const players = ENGINE.maxPlayers;
@@ -1165,8 +1169,8 @@ function createPlayerPockets(tiles, playable, widthTiles, heightTiles, config) {
       x: spawn.x,
       y: spawn.y,
       radius: spawn.clearance,
-      spawnX: (spawn.x + 0.5) * RENDER.tileSize,
-      spawnY: (spawn.y + 0.5) * RENDER.tileSize
+      spawnX: (spawn.x + 0.5) * tileSize,
+      spawnY: (spawn.y + 0.5) * tileSize
     });
   }
 

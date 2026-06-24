@@ -1,4 +1,4 @@
-import { ENGINE, RENDER } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin } from "/shared/build.js";
 import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
@@ -28,6 +28,67 @@ import {
 } from "/shared/core/bitspace-core.js";
 
 const ENTITY_PIXEL_SIZE = 1;
+const CAR_MODE_COLORS = Object.freeze({
+  foreground: "#ffd38a",
+  background: "#b64d15",
+  backing: "#4a2118",
+  ore: "#8f8a80",
+  diamond: "#3fb8ff",
+  diamondLight: "#b9f2ff",
+  rockFill: "#9d512f",
+  rockLine: "#f2b86f",
+  wallFill: "#783624",
+  wallLine: "#d78a52",
+  rock: "#9d512f",
+  rockDark: "#5d2a1d",
+  rockLight: "#dc8951",
+  wall: "#783624",
+  health: "#28100c"
+});
+const CAR_BODY_COLORS = Object.freeze([
+  "#ff0000",
+  "#ff7f00",
+  "#ffff00",
+  "#00ff00",
+  "#00ffff",
+  "#0060ff",
+  "#7f00ff",
+  "#ff00a8"
+]);
+const CAR_TIRE_COLOR = "#000000";
+const CAR_TIRE_LENGTH = 6;
+const CAR_TIRE_WIDTH = 3;
+const CAR_BODY_LIGHT_MIX = 0.34;
+const CAR_BODY_MID_LIGHT_MIX = 0.14;
+const CAR_BODY_MID_DARKEN = 0.76;
+const CAR_BODY_DARKEN = 0.54;
+const CAR_ENGINE_NOZZLE_LENGTH = 4;
+const CAR_ENGINE_NOZZLE_WIDTH = 2;
+const CAR_ENGINE_SIDE_OFFSET_SCALE = 0.38;
+const GROUND_DEBRIS_CELL_SIZE = 8;
+const GROUND_DEBRIS_DENSITY_MOD = 5;
+const GROUND_GRASS_DENSITY_MOD = 53;
+const GROUND_GRASS_COLORS = Object.freeze(["#5f7d37", "#6b8d3f", "#4f6f32"]);
+const GROUND_GRASS_SWAY_SPEED = 2.8;
+const TIRE_TRACK_LIFE_SECONDS = 8;
+const TIRE_TRACK_DARKEN_LEVELS = Object.freeze([0.86, 0.82, 0.78]);
+const TIRE_TRACK_STAMP_SIZE = 3;
+
+function renderGameMode(snapshot, options = {}) {
+  return snapshot?.mode || options.room?.mode || GAME_MODES.bitspace;
+}
+
+function colorsForGameMode(colors, gameMode) {
+  if (gameMode !== GAME_MODES.cars) {
+    return colors;
+  }
+
+  return {
+    ...colors,
+    ...CAR_MODE_COLORS
+  };
+}
+
 const CANVAS_EDGE_PADDING_EM = 1;
 const MOBILE_HUD_SCALE = 1.75;
 const HUD_EDGE_INSET = 0;
@@ -126,6 +187,7 @@ const MINING_RAY_SIDE_WAVE_SPEED = 18;
 const MINING_RAY_EMITTER_RADIUS = 1;
 const MINING_RAY_EMITTER_LENGTH = 8;
 const MINING_RAY_HIT_FLARE_RADIUS = 3;
+const CAR_MODE_MINING_RAY_GRADIENT = Object.freeze(["#00a83a", "#7cff00", "#dfff00", "#7cff00", "#00a83a"]);
 const HUD_FLASH_MODE = Object.freeze({
   additive: "additive",
   subtractive: "subtractive"
@@ -175,6 +237,7 @@ const REMOTE_PLAYER_MAX_EXTRAPOLATION_SECONDS = 0.14;
 const ORE_RING_STEPS = 16;
 const ORE_MINING_ROTATION = 0.26;
 const ORE_OCCLUSION_PADDING = 0.85;
+const RESOURCE_BASE_TILE_SIZE = RENDER.tileSize;
 const BOT_CHUNK_MAP_DOT_SIZE = 1;
 const BOT_CHUNK_MAP_DOT_GAP = 1;
 const BOT_CHUNK_MAP_ACTIVE_SIZE = 3;
@@ -363,8 +426,10 @@ export function createRenderer(canvas, minimapCanvas = null) {
     background: RENDER.background,
     backing: "#000000"
   };
+  let currentTextColors = colors;
   const particles = [];
   const miningParticles = [];
+  const tireTrackParticles = [];
   const emitCarry = new Map();
   let minimapSurface = null;
   let minimapTextRenderer = null;
@@ -378,6 +443,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   let gpuStormRenderer = null;
   let framePresenter = null;
   const visualShipAngles = new Map();
+  let syncedPageBacking = "";
 
   function sizeCanvasBox() {
     const viewport = getViewportSize();
@@ -433,7 +499,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
     surface = createPixelSurface(canvasContext, size.width, size.height);
     overlaySurface = createPixelSurface(canvasContext, size.width, size.height);
     hudSurface = createPixelSurface(hudPresentContext || canvasContext, hudSize.width, hudSize.height);
-    textRenderer = createPixelTextRenderer(size.width, size.height, () => colors);
+    textRenderer = createPixelTextRenderer(size.width, size.height, () => currentTextColors);
     gpuStormRenderer = createGpuStormRenderer(size.width, size.height);
     framePresenter = createGpuFramePresenter(presentCanvas, size.width, size.height);
     syncFramePresenterVisibility();
@@ -446,6 +512,19 @@ export function createRenderer(canvas, minimapCanvas = null) {
     }
     canvas.style.opacity = gpuPresent ? "0" : "1";
     canvas.style.pointerEvents = gpuPresent ? "none" : "";
+  }
+
+  function syncPageBackingColor(backing) {
+    const color = backing || "#000000";
+    if (color === syncedPageBacking || typeof document === "undefined") {
+      return;
+    }
+
+    syncedPageBacking = color;
+    document.documentElement.style.setProperty("--bitspace-backing", color);
+    document.documentElement.style.backgroundColor = color;
+    document.body.style.backgroundColor = color;
+    canvas.style.backgroundColor = color;
   }
 
   function resizeMinimapSurface(viewport = getViewportSize()) {
@@ -466,7 +545,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
     minimapCanvas.width = width;
     minimapCanvas.height = height;
     minimapSurface = createPixelSurface(minimapContext, width, height);
-    minimapTextRenderer = createPixelTextRenderer(width, height, () => colors);
+    minimapTextRenderer = createPixelTextRenderer(width, height, () => currentTextColors);
     if (minimapContext) {
       minimapContext.imageSmoothingEnabled = false;
     }
@@ -639,8 +718,13 @@ export function createRenderer(canvas, minimapCanvas = null) {
         colors.background = options.theme.background || colors.background;
         colors.backing = options.theme.backing || colors.backing;
       }
+      const gameMode = renderGameMode(snapshot, options);
+      const frameColors = colorsForGameMode(colors, gameMode);
+      currentTextColors = frameColors;
+      syncPageBackingColor(frameColors.backing);
       const frameOptions = {
         ...options,
+        gameMode,
         timeSeconds,
         dtSeconds,
         visualShipAngles,
@@ -651,6 +735,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
       const frameParticleState = {
         particles,
         miningParticles,
+        tireTrackParticles,
         emitCarry,
         nextSeed() {
           particleSeed += 1;
@@ -687,7 +772,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         renderPhase: "worldBase",
         renderState: sharedRenderState
       };
-      drawFrame(surface, snapshot, worldFrameOptions, colors, textRenderer, frameParticleState);
+      drawFrame(surface, snapshot, worldFrameOptions, frameColors, textRenderer, frameParticleState);
       const worldBuckets = worldFrameOptions.perfBuckets || null;
       overlaySurface?.clear?.();
       const overlayFrameOptions = {
@@ -696,7 +781,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         transparentBacking: true,
         renderState: sharedRenderState
       };
-      drawFrame(overlaySurface, snapshot, overlayFrameOptions, colors, textRenderer, frameParticleState);
+      drawFrame(overlaySurface, snapshot, overlayFrameOptions, frameColors, textRenderer, frameParticleState);
       const overlayBuckets = overlayFrameOptions.perfBuckets || null;
       hudSurface?.clear?.();
       const hudFrameOptions = {
@@ -712,7 +797,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         hudSurface.mobileHudVisibleWidth = hudMetrics?.visibleLogicalWidth || hudSurface.width;
         hudSurface.mobileHudVisibleHeight = hudMetrics?.visibleLogicalHeight || hudSurface.height;
       }
-      drawFrame(hudSurface, snapshot, hudFrameOptions, colors, textRenderer, frameParticleState);
+      drawFrame(hudSurface, snapshot, hudFrameOptions, frameColors, textRenderer, frameParticleState);
       const hudBuckets = hudFrameOptions.perfBuckets || null;
       if (worldBuckets) {
         mergeFramePerfBuckets(worldBuckets, overlayBuckets, hudBuckets);
@@ -748,7 +833,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
           minimapSurface,
           snapshot,
           frameOptions,
-          colors,
+          frameColors,
           minimapTextRenderer,
           frameParticleState
         );
@@ -760,7 +845,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
           minimapCanvas?.height ?? canvas.height,
           options.playerMap,
           options.asteroid,
-          colors,
+          frameColors,
           timeSeconds
         );
       }
@@ -3526,6 +3611,25 @@ function rgbFloatsForHex(hex) {
   ];
 }
 
+function darkenHexColor(hex, amount) {
+  const normalized = String(hex || "#000000").replace("#", "").padEnd(6, "0");
+  const factor = clamp(Number(amount), 0, 1);
+  const red = Math.round(Number.parseInt(normalized.slice(0, 2), 16) * factor);
+  const green = Math.round(Number.parseInt(normalized.slice(2, 4), 16) * factor);
+  const blue = Math.round(Number.parseInt(normalized.slice(4, 6), 16) * factor);
+  return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
+}
+
+function mixHexColors(fromHex, toHex, amount) {
+  const from = String(fromHex || "#000000").replace("#", "").padEnd(6, "0");
+  const to = String(toHex || "#000000").replace("#", "").padEnd(6, "0");
+  const t = clamp(Number(amount), 0, 1);
+  const red = Math.round(lerp(Number.parseInt(from.slice(0, 2), 16), Number.parseInt(to.slice(0, 2), 16), t));
+  const green = Math.round(lerp(Number.parseInt(from.slice(2, 4), 16), Number.parseInt(to.slice(2, 4), 16), t));
+  const blue = Math.round(lerp(Number.parseInt(from.slice(4, 6), 16), Number.parseInt(to.slice(4, 6), 16), t));
+  return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
+}
+
 function getViewportSize() {
   const viewport = window.visualViewport;
   const padding = canvasEdgePaddingPx();
@@ -3707,9 +3811,21 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         }
         measureBucket("backgroundMs", () => drawVisibleBackground(ctx, options.asteroid, camera, visibility, colors));
         ctx.fillStyle = colors.foreground;
-        measureBucket("starsMs", () => drawStars(ctx, snapshot, camera, visibility));
+        measureBucket("starsMs", () => {
+          if (options.gameMode === GAME_MODES.cars) {
+            drawGroundDebris(ctx, snapshot, camera, visibility, colors, options.timeSeconds ?? snapshot.tick / 60);
+          } else {
+            drawStars(ctx, snapshot, camera, visibility);
+          }
+        });
       } else {
-        measureBucket("starsMs", () => drawStars(ctx, snapshot, camera));
+        measureBucket("starsMs", () => {
+          if (options.gameMode === GAME_MODES.cars) {
+            drawGroundDebris(ctx, snapshot, camera, null, colors, options.timeSeconds ?? snapshot.tick / 60);
+          } else {
+            drawStars(ctx, snapshot, camera);
+          }
+        });
       }
       if (options.asteroid) {
         measureBucket("asteroidMs", () => drawAsteroid(
@@ -3722,7 +3838,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           visibility,
           options.gpuStormRenderer,
           cameraPlayer,
-          options.gpuFrameStormReady === true && gpuWorldEffectsAllowed
+          options.gpuFrameStormReady === true && gpuWorldEffectsAllowed,
+          options.gameMode
         ));
       } else {
         measureBucket("asteroidMs", () => drawWorldBounds(ctx, snapshot, camera));
@@ -3745,8 +3862,12 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
     measureBucket("particleEmitMs", () => {
       for (const renderPlayer of worldRenderPlayers) {
+        if (options.gameMode === GAME_MODES.cars) {
+          emitTireTrackParticles(particleState, renderPlayer, options.dtSeconds);
+        }
+
         if (renderPlayer.thrusting) {
-          emitThrusterParticles(particleState, renderPlayer, options.dtSeconds);
+          emitThrusterParticles(particleState, renderPlayer, options.dtSeconds, options.gameMode);
         }
 
         if (renderPlayer.mining && miningRayHasHit(renderPlayer.miningRay)) {
@@ -3756,16 +3877,20 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     });
 
     measureBucket("particlesMs", () => {
+      updateStaticParticles(particleState.tireTrackParticles, options.dtSeconds);
       updateParticles(particleState.particles, options.dtSeconds);
       updateParticles(particleState.miningParticles, options.dtSeconds);
+      if (options.gameMode === GAME_MODES.cars) {
+        drawTireTrackParticles(ctx, particleState.tireTrackParticles, camera, colors);
+      }
       drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
     });
 
     measureBucket("raysMs", () => {
       for (const renderPlayer of worldRenderPlayers) {
-        if (renderPlayer.mining) {
+        if (options.gameMode !== GAME_MODES.cars && renderPlayer.mining) {
           drawWithoutWorldMask(ctx, () => {
-            drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+            drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors, options.gameMode);
           });
         }
       }
@@ -3784,7 +3909,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
           textRenderer,
-          options.room?.state === "ended"
+          options.room?.state === "ended",
+          options.gameMode
         );
       }
     });
@@ -3801,7 +3927,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
           textRenderer,
-          options.room?.state === "ended"
+          options.room?.state === "ended",
+          options.gameMode
         );
       }));
     }
@@ -3814,7 +3941,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       for (const renderPlayer of worldRenderPlayers) {
         if (renderPlayer.mining) {
           drawWithoutWorldMask(ctx, () => {
-            drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors);
+            drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors, options.gameMode);
           });
         }
       }
@@ -6431,9 +6558,10 @@ function drawAsteroid(
   visibility = null,
   gpuStormRenderer = null,
   stormFocusPlayer = null,
-  gpuFrameStormReady = false
+  gpuFrameStormReady = false,
+  gameMode = GAME_MODES.bitspace
 ) {
-  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility);
+  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility, gameMode);
   const stormOverlayIncludesBoundary = drawStormOverlay(
     ctx,
     asteroid,
@@ -6917,7 +7045,8 @@ function drawAsteroidTiles(
   colors,
   timeSeconds,
   asteroidMiningTargets,
-  visibility = null
+  visibility = null,
+  gameMode = GAME_MODES.bitspace
 ) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
@@ -6943,7 +7072,7 @@ function drawAsteroidTiles(
 
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
-        drawRockFill(ctx, screenX, screenY, tileSize, colors);
+        drawRockFill(ctx, screenX, screenY, tileSize, colors, tile);
       }
     }
   }
@@ -6972,7 +7101,6 @@ function drawAsteroidTiles(
   drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility);
 
   const drawResources = () => {
-    ctx.fillStyle = colors.foreground;
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
         const index = tileY * asteroid.widthTiles + tileX;
@@ -6984,6 +7112,7 @@ function drawAsteroidTiles(
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
         if (tile === ASTEROID_TILE.ore) {
+          ctx.fillStyle = colors.ore || colors.foreground;
           const amount = amountAt(asteroid, index);
           drawOreRings(
             ctx,
@@ -6992,16 +7121,30 @@ function drawAsteroidTiles(
             tileSize,
             amount,
             hashCell(asteroid.seed, tileX, tileY),
-            oreMiningProgressFor(asteroidMiningTargets, index, amount)
+            oreMiningProgressFor(asteroidMiningTargets, index, amount),
+            gameMode === GAME_MODES.cars
+              ? {
+                  fillColor: colors.ore || colors.foreground,
+                  strokeColor: colors.backing || colors.foreground
+                }
+              : null
           );
         } else if (tile === ASTEROID_TILE.diamond) {
+          ctx.fillStyle = colors.diamond || colors.foreground;
           drawDiamondWireframe(
             ctx,
             screenX,
             screenY,
             tileSize,
             hashCell(asteroid.seed, tileX, tileY),
-            diamondMiningProgressFor(asteroidMiningTargets, index)
+            diamondMiningProgressFor(asteroidMiningTargets, index),
+            gameMode === GAME_MODES.cars
+              ? {
+                  fillColor: colors.diamond || colors.foreground,
+                  edgeColor: colors.backing || colors.foreground,
+                  hullOnly: true
+                }
+              : null
           );
         }
       }
@@ -8629,8 +8772,10 @@ function drawBuildTargetSquare(ctx, x, y, size) {
   drawPixelLine(ctx, left, bottom, left, top);
 }
 
-function drawRockFill(ctx, x, y, size, colors) {
-  ctx.fillStyle = colors.background;
+function drawRockFill(ctx, x, y, size, colors, tile = null) {
+  ctx.fillStyle = tile === ASTEROID_TILE.wall
+    ? colors.wallFill || colors.rockFill || colors.background
+    : colors.rockFill || colors.background;
   ctx.fillRect(x, y, size, size);
 }
 
@@ -8714,7 +8859,7 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibi
   if (visibility) {
     drawOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, visibleCorners);
   }
-  ctx.fillStyle = colors.foreground;
+  ctx.fillStyle = colors.rockLine || colors.foreground;
 
   if (topOpen && x + topTrimLeft <= right - topTrimRight) {
     drawPixelLine(
@@ -8831,7 +8976,7 @@ function drawRockArcPixel(ctx, drawn, x, y) {
 }
 
 function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
-  ctx.fillStyle = colors.foreground;
+  ctx.fillStyle = colors.wallLine || colors.rockLine || colors.foreground;
 
   const north = wallTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
   const east = wallTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
@@ -8884,7 +9029,7 @@ function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibi
 }
 
 function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility = null) {
-  ctx.fillStyle = colors.foreground;
+  ctx.fillStyle = colors.rockLine || colors.foreground;
 
   for (let tileY = minTileY - 1; tileY <= maxTileY + 1; tileY += 1) {
     for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
@@ -8960,15 +9105,19 @@ function diamondMiningProgressFor(targets, index) {
   return clamp(target.progress || 0, 0, 1);
 }
 
-function drawOreRings(ctx, tileX, tileY, size, amount, hash, miningProgress = null) {
+function drawOreRings(ctx, tileX, tileY, size, amount, hash, miningProgress = null, options = null) {
   const pieces = buildOrePieces(tileX, tileY, size, amount, hash, miningProgress);
   const drawOrder = [...pieces].sort((a, b) => a.depth - b.depth);
+  const strokeColor = options?.strokeColor || ctx.fillStyle;
 
   for (const piece of drawOrder) {
     const occluders = pieces
       .filter((other) => other.depth > piece.depth)
       .map(orePieceOccluder);
-    drawOrePiece(ctx, piece, occluders);
+    drawOrePiece(ctx, piece, occluders, {
+      fillColor: options?.fillColor || null,
+      strokeColor
+    });
   }
 }
 
@@ -8976,12 +9125,13 @@ function buildOrePieces(tileX, tileY, size, amount, hash, miningProgress) {
   const count = clamp(Math.round(amount), 1, 3);
   const activeIndex = count - 1;
   const progress = miningProgress === null ? 0 : clamp(miningProgress, 0, 1);
+  const scale = resourceGeometryScale(size);
   const pieces = [];
 
   for (let index = 0; index < count; index += 1) {
     const seed = hash ^ Math.imul(index + 1, 1597334677);
-    const radius = 2 + randomUnit(seed, 1) * 0.65;
-    const margin = Math.ceil(radius + 2);
+    const radius = (2 + randomUnit(seed, 1) * 0.65) * scale;
+    const margin = Math.ceil(radius + 2 * scale);
     const centerX = tileX + margin + Math.round(randomUnit(seed, 2) * (size - margin * 2));
     const centerY = tileY + margin + Math.round(randomUnit(seed, 3) * (size - margin * 2));
     const pieceProgress = index === activeIndex ? progress : 0;
@@ -8999,15 +9149,22 @@ function buildOrePieces(tileX, tileY, size, amount, hash, miningProgress) {
       tilt,
       tiltAxis,
       spin,
-      depth
+      depth,
+      scale
     });
   }
 
   return pieces;
 }
 
-function drawOrePiece(ctx, piece, occluders) {
+function drawOrePiece(ctx, piece, occluders, options = null) {
   const points = projectedRingPoints(piece);
+  if (options?.fillColor) {
+    fillConvexPolygon(ctx, points, options.fillColor);
+  }
+  if (options?.strokeColor) {
+    ctx.fillStyle = options.strokeColor;
+  }
 
   for (let index = 0; index < points.length; index += 1) {
     const from = points[index];
@@ -9017,6 +9174,7 @@ function drawOrePiece(ctx, piece, occluders) {
 }
 
 function orePieceOccluder(piece) {
+  const padding = ORE_OCCLUSION_PADDING * (piece.scale || 1);
   const axis = {
     x: Math.cos(piece.tiltAxis),
     y: Math.sin(piece.tiltAxis)
@@ -9032,8 +9190,8 @@ function orePieceOccluder(piece) {
     y: piece.centerY,
     axis,
     perpendicular,
-    radiusX: piece.radius + ORE_OCCLUSION_PADDING,
-    radiusY: piece.radius * Math.cos(piece.tilt) + ORE_OCCLUSION_PADDING
+    radiusX: piece.radius + padding,
+    radiusY: piece.radius * Math.cos(piece.tilt) + padding
   };
 }
 
@@ -9065,9 +9223,10 @@ function projectedRingPoints({ centerX, centerY, radius, tilt, tiltAxis, spin })
   return points;
 }
 
-function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = null) {
+function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = null, options = null) {
   const centerX = tileX + Math.floor(size / 2);
   const centerY = tileY + Math.floor(size / 2);
+  const scale = resourceGeometryScale(size);
   const progressOffset = miningProgress === null ? 0 : clamp(miningProgress, 0, 1);
   const yaw = ((hash & 255) / 255) * Math.PI * 2 + progressOffset * 0.18;
   const pitch = (((hash >>> 8) & 255) / 255) * Math.PI * 2 + progressOffset * 0.12;
@@ -9079,7 +9238,7 @@ function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = nu
     { x: -1, y: -1, z: 1 },
     { x: -1, y: 1, z: -1 },
     { x: 1, y: -1, z: -1 }
-  ].map((point) => projectPoint3D(rotatePoint3D(point, yaw, pitch, roll), centerX, centerY));
+  ].map((point) => projectPoint3D(rotatePoint3D(point, yaw, pitch, roll), centerX, centerY, scale));
   const edges = [
     [0, 1],
     [0, 2],
@@ -9089,10 +9248,84 @@ function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = nu
     [2, 3]
   ];
 
-  for (const [fromIndex, toIndex] of edges) {
-    const from = vertices[fromIndex];
-    const to = vertices[toIndex];
-    drawPixelLine(ctx, from.x, from.y, to.x, to.y);
+  const hull = options?.fillColor || options?.backingColor || options?.hullOnly
+    ? convexHull(vertices)
+    : null;
+  if (hull) {
+    if (options.fillColor) {
+      fillConvexPolygon(ctx, hull, options.fillColor);
+    }
+    if (options.backingColor) {
+      ctx.fillStyle = options.backingColor;
+      const seed = options.ditherSeed ?? hash;
+      fillConvexPolygonDither(ctx, hull, (px, py) => ((px + py + (seed & 3)) % 4) === 0);
+    }
+  }
+
+  if (options?.edgeColor) {
+    ctx.fillStyle = options.edgeColor;
+  }
+  if (options?.hullOnly && hull) {
+    for (let index = 0; index < hull.length; index += 1) {
+      const from = hull[index];
+      const to = hull[(index + 1) % hull.length];
+      drawPixelLine(ctx, from.x, from.y, to.x, to.y);
+    }
+  } else {
+    for (const [fromIndex, toIndex] of edges) {
+      const from = vertices[fromIndex];
+      const to = vertices[toIndex];
+      drawPixelLine(ctx, from.x, from.y, to.x, to.y);
+    }
+  }
+}
+
+function resourceGeometryScale(tileSize) {
+  return Math.max(1, tileSize / RESOURCE_BASE_TILE_SIZE);
+}
+
+function fillConvexPolygon(ctx, points, color) {
+  ctx.fillStyle = color;
+  fillConvexPolygonDither(ctx, points, () => true);
+}
+
+function fillConvexPolygonDither(ctx, points, paintPixel) {
+  if (!Array.isArray(points) || points.length < 3) {
+    return;
+  }
+
+  const minY = Math.floor(points.reduce((min, point) => Math.min(min, point.y), Infinity));
+  const maxY = Math.ceil(points.reduce((max, point) => Math.max(max, point.y), -Infinity));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    const intersections = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const from = points[index];
+      const to = points[(index + 1) % points.length];
+      if (from.y === to.y) {
+        continue;
+      }
+
+      const yMin = Math.min(from.y, to.y);
+      const yMax = Math.max(from.y, to.y);
+      if (y < yMin || y >= yMax) {
+        continue;
+      }
+
+      const t = (y - from.y) / (to.y - from.y);
+      intersections.push(from.x + (to.x - from.x) * t);
+    }
+
+    intersections.sort((a, b) => a - b);
+    for (let index = 0; index + 1 < intersections.length; index += 2) {
+      const x0 = Math.ceil(intersections[index]);
+      const x1 = Math.floor(intersections[index + 1]);
+      for (let x = x0; x <= x1; x += 1) {
+        if (paintPixel(x, y)) {
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
   }
 }
 
@@ -9121,9 +9354,9 @@ function rotatePoint3D(point, yaw, pitch, roll) {
   };
 }
 
-function projectPoint3D(point, centerX, centerY) {
+function projectPoint3D(point, centerX, centerY, geometryScale = 1) {
   const perspective = 3.1 / (3.1 - point.z);
-  const scale = 3.7 * perspective;
+  const scale = 3.7 * geometryScale * perspective;
 
   return {
     x: Math.round(centerX + point.x * scale),
@@ -9670,6 +9903,79 @@ function drawStars(ctx, snapshot, camera, visibility = null) {
   }, visibility, camera);
 }
 
+function drawGroundDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0) {
+  const padding = cameraCullPadding(camera);
+  const minCellX = Math.floor((camera.x - padding) / GROUND_DEBRIS_CELL_SIZE) - 1;
+  const maxCellX = Math.ceil((camera.x + ctx.width + padding) / GROUND_DEBRIS_CELL_SIZE) + 1;
+  const minCellY = Math.floor((camera.y - padding) / GROUND_DEBRIS_CELL_SIZE) - 1;
+  const maxCellY = Math.ceil((camera.y + ctx.height + padding) / GROUND_DEBRIS_CELL_SIZE) + 1;
+  const color = colors.rockDark || colors.wallFill || colors.foreground || RENDER.foreground;
+  let currentColor = color;
+  ctx.fillStyle = currentColor;
+
+  for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
+    for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+      const hash = hashCell(snapshot.arenaId || "ground", cellX, cellY);
+      const isGrass = hash % GROUND_GRASS_DENSITY_MOD === 0;
+      const isDebris = hash % GROUND_DEBRIS_DENSITY_MOD === 0;
+      if (!isGrass && !isDebris) {
+        continue;
+      }
+
+      const x = cellX * GROUND_DEBRIS_CELL_SIZE + (hash % GROUND_DEBRIS_CELL_SIZE);
+      const y = cellY * GROUND_DEBRIS_CELL_SIZE + ((hash >>> 8) % GROUND_DEBRIS_CELL_SIZE);
+      const screen = worldToScreen({ x, y }, camera);
+      if (
+        screen.x < -padding ||
+        screen.x >= ctx.width + padding ||
+        screen.y < -padding ||
+        screen.y >= ctx.height + padding
+      ) {
+        continue;
+      }
+      if (visibility && !starVisibleInAsteroidMask(visibility, camera, screen.x, screen.y)) {
+        continue;
+      }
+
+      if (isGrass) {
+        const grassColor = GROUND_GRASS_COLORS[(hash >>> 16) % GROUND_GRASS_COLORS.length];
+        if (grassColor !== currentColor) {
+          currentColor = grassColor;
+          ctx.fillStyle = currentColor;
+        }
+        drawGroundGrassTuft(ctx, screen.x, screen.y, hash, timeSeconds);
+      } else {
+        if (currentColor !== color) {
+          currentColor = color;
+          ctx.fillStyle = currentColor;
+        }
+      }
+
+      if (!isDebris) {
+        continue;
+      }
+
+      if (hash % 19 === 0) {
+        ctx.fillRect(screen.x, screen.y, 2, 1);
+      } else if (hash % 11 === 0) {
+        ctx.fillRect(screen.x, screen.y, 1, 2);
+      } else {
+        ctx.fillRect(screen.x, screen.y, 1, 1);
+      }
+    }
+  }
+}
+
+function drawGroundGrassTuft(ctx, x, y, hash, timeSeconds) {
+  const phase = timeSeconds * GROUND_GRASS_SWAY_SPEED + (hash % 997) * 0.013;
+  const sway = Math.round(Math.sin(phase));
+  const height = 3 + (hash & 1);
+  drawPixelLine(ctx, x, y, x + sway, y - height);
+  drawPixelLine(ctx, x - 1, y, x - 2 + sway, y - 2 - ((hash >>> 2) & 1));
+  drawPixelLine(ctx, x + 1, y, x + 2 + sway, y - 2 - ((hash >>> 3) & 1));
+  ctx.fillRect(x - 1, y, 3, 1);
+}
+
 function drawMenuStars(ctx, timeSeconds) {
   drawStarLayer(ctx, MENU_STAR_SEED, {
     x: timeSeconds * MENU_STAR_SCROLL_SPEED,
@@ -9769,7 +10075,11 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
   }
 
   if (entity.type === "huckRock") {
-    drawHuckRockEntity(ctx, entity, camera, colors);
+    if (options.gameMode === GAME_MODES.cars) {
+      drawCarModeHuckRockEntity(ctx, entity, camera, colors);
+    } else {
+      drawHuckRockEntity(ctx, entity, camera, colors);
+    }
     return;
   }
 
@@ -9851,6 +10161,21 @@ function drawHuckRockEntity(ctx, entity, camera, colors) {
     const to = hull[(index + 1) % hull.length];
     drawPixelLine(ctx, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y));
   }
+}
+
+function drawCarModeHuckRockEntity(ctx, entity, camera, colors) {
+  const screen = worldToScreen(entity, camera);
+  const radius = Math.max(2, Math.round(Number(entity.radius || ENGINE.huckRock.radius)));
+  const x = Math.round(screen.x);
+  const y = Math.round(screen.y);
+  const age = Number(entity.ageSeconds || 0);
+  const lifetime = Math.max(0.001, Number(entity.lifetimeSeconds || ENGINE.huckRock.lifetimeSeconds || 1));
+  const arc = Math.sin(clamp(age / lifetime, 0, 1) * Math.PI);
+  const lift = Math.round(4 + arc * 10);
+
+  ctx.fillStyle = colors.backing || "#000000";
+  fillRotatedRect(ctx, x + 2, y + 3, { x: 1, y: 0 }, { x: 0, y: 1 }, radius * 2, Math.max(1, radius * 0.75));
+  drawHuckRockEntity(ctx, { ...entity, y: entity.y - lift }, camera, colors);
 }
 
 function projectedHuckRockPoints(seed, centerX, centerY, radius, yaw, pitch, roll) {
@@ -10103,7 +10428,7 @@ function shipSmallOrbRadius(geometryScale) {
   return Math.max(1, SMALL_ORB_RADIUS * geometryScale);
 }
 
-function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false) {
+function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false, gameMode = GAME_MODES.bitspace) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -10126,6 +10451,20 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
     radius: mainRadius
   };
 
+  if (gameMode === GAME_MODES.cars) {
+    drawCarBody(ctx, x, y, player, mainRadius, carBodyAngle(player), colors, () => {
+      if (player.mining) {
+        drawWithoutWorldMask(ctx, () => {
+          drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameMode);
+        });
+      }
+    });
+    drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
+    drawShipHealthIndicator(ctx, x, y, player, colors, carBodyAngle(player));
+    drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+    return;
+  }
+
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
     const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
     const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
@@ -10146,7 +10485,176 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
   drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
 }
 
-function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim = false) {
+function drawCarBody(ctx, x, y, player, radius, angle, colors, drawMiddleLayer = null) {
+  const bodyColor = carBodyColor(player);
+  const frontWheelAngle = normalizeAngle(angle + carVisualSteerAngle(player, angle));
+  const forward = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const side = {
+    x: -forward.y,
+    y: forward.x
+  };
+  const frontWheelForward = {
+    x: Math.cos(frontWheelAngle),
+    y: Math.sin(frontWheelAngle)
+  };
+  const frontWheelSide = {
+    x: -frontWheelForward.y,
+    y: frontWheelForward.x
+  };
+
+  ctx.fillStyle = CAR_TIRE_COLOR;
+  drawCarAxle(ctx, x, y, forward, side, radius * ENGINE.car.frontAxleOffsetScale, radius * 0.82);
+  drawCarAxle(ctx, x, y, forward, side, radius * ENGINE.car.rearAxleOffsetScale, radius * 0.78);
+  drawCarWheel(ctx, x, y, forward, side, frontWheelForward, frontWheelSide, radius * ENGINE.car.frontAxleOffsetScale, -radius * ENGINE.car.frontTrackOffsetScale);
+  drawCarWheel(ctx, x, y, forward, side, frontWheelForward, frontWheelSide, radius * ENGINE.car.frontAxleOffsetScale, radius * ENGINE.car.frontTrackOffsetScale);
+  drawCarWheel(ctx, x, y, forward, side, forward, side, radius * ENGINE.car.rearAxleOffsetScale, -radius * ENGINE.car.rearTrackOffsetScale);
+  drawCarWheel(ctx, x, y, forward, side, forward, side, radius * ENGINE.car.rearAxleOffsetScale, radius * ENGINE.car.rearTrackOffsetScale);
+
+  drawCarEngineNozzles(ctx, x, y, forward, side, radius);
+
+  if (typeof drawMiddleLayer === "function") {
+    drawMiddleLayer();
+  }
+
+  fillCarBodySphere(ctx, x, y, radius, bodyColor);
+  ctx.fillStyle = CAR_TIRE_COLOR;
+  drawCircle(ctx, x, y, radius);
+}
+
+function carBodyAngle(player) {
+  return Number.isFinite(player?.carHeading)
+    ? player.carHeading
+    : shipControlAngle(player);
+}
+
+function carVisualSteerAngle(player, bodyAngle) {
+  if (Number.isFinite(player?.carSteerAngle)) {
+    return clamp(player.carSteerAngle, -ENGINE.car.maxSteerAngle, ENGINE.car.maxSteerAngle);
+  }
+
+  const moveX = Number(player?.moveX ?? player?.input?.moveX);
+  const moveY = Number(player?.moveY ?? player?.input?.moveY);
+  if (!Number.isFinite(moveX) || !Number.isFinite(moveY) || Math.hypot(moveX, moveY) <= 0.0001) {
+    return 0;
+  }
+
+  const intendedAngle = Math.atan2(moveY, moveX);
+  return clamp(
+    normalizeSignedAngle(intendedAngle - bodyAngle),
+    -ENGINE.car.maxSteerAngle,
+    ENGINE.car.maxSteerAngle
+  );
+}
+
+function carBodyColor(player) {
+  const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), CAR_BODY_COLORS.length);
+  return CAR_BODY_COLORS[index];
+}
+
+function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
+  const radiusSq = radius * radius;
+  const minX = Math.floor(cx - radius);
+  const maxX = Math.ceil(cx + radius);
+  const minY = Math.floor(cy - radius);
+  const maxY = Math.ceil(cy + radius);
+  const darkColor = darkenHexColor(bodyColor, CAR_BODY_DARKEN);
+  const midDarkColor = darkenHexColor(bodyColor, CAR_BODY_MID_DARKEN);
+  const midLightColor = mixHexColors(bodyColor, "#ffffff", CAR_BODY_MID_LIGHT_MIX);
+  const lightColor = mixHexColors(bodyColor, "#ffffff", CAR_BODY_LIGHT_MIX);
+  let currentColor = "";
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const distanceSq = dx * dx + dy * dy;
+      if (distanceSq > radiusSq) {
+        continue;
+      }
+
+      const normalX = dx / radius;
+      const normalY = dy / radius;
+      const normalZ = Math.sqrt(Math.max(0, 1 - distanceSq / radiusSq));
+      const light = clamp(
+        normalX * SHIP_SPHERE_LIGHT.x +
+          normalY * SHIP_SPHERE_LIGHT.y +
+          normalZ * SHIP_SPHERE_LIGHT.z,
+        -1,
+        1
+      );
+      const dither = (SHIP_SPHERE_DITHER[(positiveModulo(px, 4)) + positiveModulo(py, 4) * 4] - 7.5) / 16;
+      const shade = light + dither * 0.32;
+      const color = shade > 0.72
+        ? lightColor
+        : shade > 0.34 ? midLightColor
+          : shade < -0.26 ? darkColor
+            : shade < -0.04 ? midDarkColor : bodyColor;
+      if (color !== currentColor) {
+        ctx.fillStyle = color;
+        currentColor = color;
+      }
+      ctx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+function drawCarEngineNozzles(ctx, x, y, forward, side, radius) {
+  ctx.fillStyle = CAR_TIRE_COLOR;
+  for (const offset of carEngineSideOffsets(radius)) {
+    const cx = x - forward.x * (radius + 1) + side.x * offset;
+    const cy = y - forward.y * (radius + 1) + side.y * offset;
+    fillRotatedRect(ctx, cx, cy, forward, side, CAR_ENGINE_NOZZLE_LENGTH, CAR_ENGINE_NOZZLE_WIDTH);
+  }
+}
+
+function carEngineSideOffsets(radius) {
+  const offset = Math.max(2, radius * CAR_ENGINE_SIDE_OFFSET_SCALE);
+  return [-offset, offset];
+}
+
+function drawCarAxle(ctx, x, y, forward, side, forwardOffset, sideHalfLength) {
+  const cx = x + forward.x * forwardOffset;
+  const cy = y + forward.y * forwardOffset;
+  drawPixelLine(
+    ctx,
+    Math.round(cx - side.x * sideHalfLength),
+    Math.round(cy - side.y * sideHalfLength),
+    Math.round(cx + side.x * sideHalfLength),
+    Math.round(cy + side.y * sideHalfLength)
+  );
+}
+
+function drawCarWheel(ctx, x, y, bodyForward, bodySide, wheelForward, wheelSide, forwardOffset, sideOffset) {
+  const cx = x + bodyForward.x * forwardOffset + bodySide.x * sideOffset;
+  const cy = y + bodyForward.y * forwardOffset + bodySide.y * sideOffset;
+  fillRotatedRect(ctx, cx, cy, wheelForward, wheelSide, CAR_TIRE_LENGTH, CAR_TIRE_WIDTH);
+}
+
+function fillRotatedRect(ctx, cx, cy, axis, normal, length, width) {
+  const halfLength = length / 2;
+  const halfWidth = width / 2;
+  const minX = Math.floor(cx - Math.abs(axis.x) * halfLength - Math.abs(normal.x) * halfWidth) - 1;
+  const maxX = Math.ceil(cx + Math.abs(axis.x) * halfLength + Math.abs(normal.x) * halfWidth) + 1;
+  const minY = Math.floor(cy - Math.abs(axis.y) * halfLength - Math.abs(normal.y) * halfWidth) - 1;
+  const maxY = Math.ceil(cy + Math.abs(axis.y) * halfLength + Math.abs(normal.y) * halfWidth) + 1;
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px + 0.5 - cx;
+      const dy = py + 0.5 - cy;
+      const along = dx * axis.x + dy * axis.y;
+      const across = dx * normal.x + dy * normal.y;
+      if (Math.abs(along) <= halfLength && Math.abs(across) <= halfWidth) {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+}
+
+function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim = false, gameMode = GAME_MODES.bitspace) {
   if (player.alive === false) {
     return;
   }
@@ -10171,6 +10679,7 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
   const lanes = miningRayLanesForPlayer(player, angle, rayLength)
     .map((lane) => clipRenderMiningRayLaneStart(player, asteroid, lane, angle))
     .filter((lane) => lane.offset !== 0);
+  const emitterColors = miningRayEmitterRenderColors(colors, gameMode);
 
   for (const lane of lanes) {
     const direction = miningRayLaneDirection(lane, fallbackDirection);
@@ -10190,7 +10699,7 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
       normal,
       lane.offset,
       emitterRadius,
-      colors
+      emitterColors
     );
   }
 }
@@ -10225,14 +10734,15 @@ function drawShipStormWarning(ctx, x, y, player, colors, textRenderer) {
   });
 }
 
-function drawShipHealthIndicator(ctx, x, y, player, colors) {
+function drawShipHealthIndicator(ctx, x, y, player, colors, angleOrigin = null) {
   const maxHealth = Math.max(1, player.maxHealth || ENGINE.player.maxHealth);
   const health = clamp(player.health ?? maxHealth, 0, maxHealth);
   if (health <= 0) {
     return;
   }
 
-  ctx.fillStyle = colors.foreground;
+  const healthColor = colors.health || colors.foreground;
+  ctx.fillStyle = healthColor;
 
   const healthRatio = clamp(health / maxHealth, 0, 1);
   const healthBars = clamp(
@@ -10244,28 +10754,35 @@ function drawShipHealthIndicator(ctx, x, y, player, colors) {
   const depletedAngle = (1 - healthRatio) * Math.PI * 2;
   const segmentAngle = (Math.PI * 2) / healthBars;
   const gapPixels = 0.72;
+  const hasAngleOrigin = Number.isFinite(angleOrigin);
   const minX = x - radius - 1;
   const maxX = x + radius + 1;
   const minY = y - radius - 1;
   const maxY = y + radius + 1;
+  const innerRadius = radius - (hasAngleOrigin ? 1.5 : 0.5);
+  const outerRadius = radius + 0.5;
   let drewPoint = false;
 
   for (let py = minY; py <= maxY; py += 1) {
     for (let px = minX; px <= maxX; px += 1) {
       const dx = px - x;
       const dy = py - y;
-      if (Math.abs(Math.hypot(dx, dy) - radius) > 0.5) {
+      const distance = Math.hypot(dx, dy);
+      if (distance < innerRadius || distance > outerRadius) {
         continue;
       }
 
-      const clockwiseAngle = positiveModulo(Math.atan2(dy, dx) + Math.PI / 2, Math.PI * 2);
+      const clockwiseAngle = hasAngleOrigin
+        ? positiveModulo(Math.atan2(dy, dx) - angleOrigin, Math.PI * 2)
+        : positiveModulo(Math.atan2(dy, dx) + Math.PI / 2, Math.PI * 2);
       if (clockwiseAngle < depletedAngle) {
         continue;
       }
 
       const segmentPosition = positiveModulo(clockwiseAngle, segmentAngle);
       const boundaryDistance = Math.min(segmentPosition, segmentAngle - segmentPosition);
-      if (healthBars > 1 && boundaryDistance * radius <= gapPixels) {
+      const gapRadius = hasAngleOrigin ? Math.max(1, distance) : radius;
+      if (healthBars > 1 && boundaryDistance * gapRadius <= gapPixels) {
         continue;
       }
 
@@ -10276,8 +10793,11 @@ function drawShipHealthIndicator(ctx, x, y, player, colors) {
 
   if (!drewPoint) {
     const fallbackAngle = depletedAngle + (healthRatio * Math.PI);
-    const fallbackX = Math.round(x + Math.sin(fallbackAngle) * radius);
-    const fallbackY = Math.round(y - Math.cos(fallbackAngle) * radius);
+    const absoluteFallbackAngle = hasAngleOrigin
+      ? angleOrigin + fallbackAngle
+      : fallbackAngle - Math.PI / 2;
+    const fallbackX = Math.round(x + Math.cos(absoluteFallbackAngle) * radius);
+    const fallbackY = Math.round(y + Math.sin(absoluteFallbackAngle) * radius);
     drawPoint(ctx, fallbackX, fallbackY);
   }
 }
@@ -11250,15 +11770,15 @@ function breakPixelWord(word, maxWidth, textRenderer, options) {
   return chunks;
 }
 
-function emitThrusterParticles(state, player, dtSeconds) {
-  const basis = thrusterParticleBasis(player);
+function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.bitspace) {
+  const basis = thrusterParticleBasis(player, gameMode);
   if (!basis) {
     return;
   }
 
   const effects = aggregateUpgradeEffects(player.upgrades);
   const { rear, side } = basis;
-  const origins = rearEnginePlumeOrigins(player, rear, side);
+  const origins = rearEnginePlumeOrigins(player, rear, side, gameMode);
   const key = player.id || String(player.number);
   const particleMultiplier = effects.thrusterParticleMultiplier;
   const engineRamp = thrusterEngineRamp(player);
@@ -11332,7 +11852,7 @@ function thrusterEngineRamp(player) {
   };
 }
 
-function thrusterParticleBasis(player) {
+function thrusterParticleBasis(player, gameMode = GAME_MODES.bitspace) {
   const rawMoveX = Number(player?.moveX ?? player?.input?.moveX);
   const rawMoveY = Number(player?.moveY ?? player?.input?.moveY);
   const moveX = Number.isFinite(rawMoveX) ? rawMoveX : 0;
@@ -11342,7 +11862,9 @@ function thrusterParticleBasis(player) {
     return null;
   }
 
-  const visualAngle = shipVisualAngle(player);
+  const visualAngle = gameMode === GAME_MODES.cars
+    ? carBodyAngle(player)
+    : shipVisualAngle(player);
   const forward = {
     x: Math.cos(visualAngle),
     y: Math.sin(visualAngle)
@@ -11411,7 +11933,72 @@ function emitMiningParticles(state, player, dtSeconds) {
   }
 }
 
-function rearEnginePlumeOrigins(player, rear, side) {
+function emitTireTrackParticles(state, player, dtSeconds) {
+  void dtSeconds;
+  if (!state?.tireTrackParticles || player?.alive === false) {
+    return;
+  }
+
+  const speed = Math.hypot(Number(player.vx) || 0, Number(player.vy) || 0);
+  if (speed <= 0.5) {
+    return;
+  }
+
+  const wheels = carTireTrackWheels(player);
+  for (const wheel of wheels) {
+    const seed = state.nextSeed();
+    state.tireTrackParticles.push({
+      x: wheel.x,
+      y: wheel.y,
+      age: 0,
+      life: TIRE_TRACK_LIFE_SECONDS,
+      colorIndex: Math.floor(randomUnit(seed, 1) * TIRE_TRACK_DARKEN_LEVELS.length),
+      seed
+    });
+  }
+}
+
+function carTireTrackWheels(player) {
+  const radius = shipMainRadius(player);
+  const angle = carBodyAngle(player);
+  const forward = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const side = {
+    x: -forward.y,
+    y: forward.x
+  };
+  const wheelSpecs = [
+    {
+      forwardOffset: radius * ENGINE.car.frontAxleOffsetScale,
+      sideOffset: -radius * ENGINE.car.frontTrackOffsetScale
+    },
+    {
+      forwardOffset: radius * ENGINE.car.frontAxleOffsetScale,
+      sideOffset: radius * ENGINE.car.frontTrackOffsetScale
+    },
+    {
+      forwardOffset: radius * ENGINE.car.rearAxleOffsetScale,
+      sideOffset: -radius * ENGINE.car.rearTrackOffsetScale
+    },
+    {
+      forwardOffset: radius * ENGINE.car.rearAxleOffsetScale,
+      sideOffset: radius * ENGINE.car.rearTrackOffsetScale
+    }
+  ];
+
+  return wheelSpecs.map((wheel) => ({
+    x: player.x + forward.x * wheel.forwardOffset + side.x * wheel.sideOffset,
+    y: player.y + forward.y * wheel.forwardOffset + side.y * wheel.sideOffset
+  }));
+}
+
+function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspace) {
+  if (gameMode === GAME_MODES.cars) {
+    return carRearEnginePlumeOrigins(player, rear, side);
+  }
+
   const mainRadius = shipMainRadius(player);
   const geometryScale = shipGeometryScaleForRadius(mainRadius);
   const smallOrbRadius = shipSmallOrbRadius(geometryScale);
@@ -11427,6 +12014,29 @@ function rearEnginePlumeOrigins(player, rear, side) {
     medialOffset: orb.side * geometryScale,
     medialRadius
   }));
+}
+
+function carRearEnginePlumeOrigins(player, rear, side) {
+  const radius = shipMainRadius(player);
+  const offsets = carEngineSideOffsets(radius);
+  const medialRadius = Math.max(1, Math.max(...offsets.map((offset) => Math.abs(offset))));
+  return offsets.map((offset) => ({
+    x: player.x + rear.x * (radius + CAR_ENGINE_NOZZLE_LENGTH + 0.5) + side.x * offset,
+    y: player.y + rear.y * (radius + CAR_ENGINE_NOZZLE_LENGTH + 0.5) + side.y * offset,
+    nozzleWidth: CAR_ENGINE_NOZZLE_WIDTH + 1,
+    medialOffset: offset,
+    medialRadius
+  }));
+}
+
+function updateStaticParticles(particles, dtSeconds) {
+  for (let index = particles.length - 1; index >= 0; index -= 1) {
+    const particle = particles[index];
+    particle.age += dtSeconds;
+    if (particle.age >= particle.life) {
+      particles.splice(index, 1);
+    }
+  }
 }
 
 function updateParticles(particles, dtSeconds) {
@@ -11445,6 +12055,31 @@ function updateParticles(particles, dtSeconds) {
     particle.vx *= drag;
     particle.vy *= drag;
   }
+}
+
+function drawTireTrackParticles(ctx, particles, camera, colors) {
+  const trackColors = tireTrackColors(colors);
+  let currentColor = "";
+
+  for (const particle of particles) {
+    const color = trackColors[positiveModulo(particle.colorIndex || 0, trackColors.length)] || trackColors[0];
+    if (color !== currentColor) {
+      ctx.fillStyle = color;
+      currentColor = color;
+    }
+    const screen = worldToScreen(particle, camera);
+    drawTireTrackStamp(ctx, screen.x, screen.y);
+  }
+}
+
+function drawTireTrackStamp(ctx, x, y) {
+  const offset = Math.floor(TIRE_TRACK_STAMP_SIZE / 2);
+  ctx.fillRect(x - offset, y - offset, TIRE_TRACK_STAMP_SIZE, TIRE_TRACK_STAMP_SIZE);
+}
+
+function tireTrackColors(colors) {
+  const base = colors.background || CAR_MODE_COLORS.background;
+  return TIRE_TRACK_DARKEN_LEVELS.map((amount) => darkenHexColor(base, amount));
 }
 
 function drawParticles(ctx, particles, camera, colors, timeSeconds) {
@@ -11790,7 +12425,11 @@ function drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, color
   };
   const sideSign = Math.sign(sideOffset);
 
-  ctx.fillStyle = colors.foreground;
+  const gradientPalette = Array.isArray(colors.miningRayGradient)
+    ? colors.miningRayGradient
+    : null;
+  let activeColor = colors.foreground;
+  ctx.fillStyle = activeColor;
   for (let py = minY; py <= maxY; py += 1) {
     for (let px = minX; px <= maxX; px += 1) {
       const pointX = px + 0.5;
@@ -11807,6 +12446,13 @@ function drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, color
         ? isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds)
         : isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign);
       if (inside) {
+        if (gradientPalette) {
+          const gradientColor = miningRayGradientColor(gradientPalette, signedCross, radius);
+          if (gradientColor !== activeColor) {
+            activeColor = gradientColor;
+            ctx.fillStyle = activeColor;
+          }
+        }
         ctx.fillRect(px, py, 1, 1);
       }
     }
@@ -11874,11 +12520,12 @@ function drawMiningRayHitFlare(ctx, point, colors) {
   fillSolidDisk(ctx, x, y, MINING_RAY_HIT_FLARE_RADIUS);
 }
 
-function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
+function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameMode = GAME_MODES.bitspace) {
   if (player.alive === false || player.mining !== true) {
     return;
   }
 
+  const rayColors = miningRayRenderColors(colors, gameMode, timeSeconds);
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
@@ -11927,7 +12574,7 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
       visibleTip,
       unit,
       laneNormal,
-      colors,
+      rayColors,
       timeSeconds * effects.raySpinMultiplier,
       Boolean(lane.hit),
       Number(lane.offset) || 0
@@ -11935,13 +12582,12 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors) {
   }
 }
 
-function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colors) {
-  void timeSeconds;
-
+function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colors, gameMode = GAME_MODES.bitspace) {
   if (player.alive === false || player.mining !== true) {
     return;
   }
 
+  const rayColors = miningRayRenderColors(colors, gameMode, timeSeconds);
   const effects = aggregateUpgradeEffects(player.upgrades);
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
@@ -11954,8 +12600,46 @@ function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colo
       continue;
     }
 
-    drawMiningRayHitFlare(ctx, worldToScreen({ x: lane.endX, y: lane.endY }, camera), colors);
+    drawMiningRayHitFlare(ctx, worldToScreen({ x: lane.endX, y: lane.endY }, camera), rayColors);
   }
+}
+
+function miningRayRenderColors(colors, gameMode, timeSeconds) {
+  if (gameMode !== GAME_MODES.cars) {
+    return colors;
+  }
+
+  return {
+    ...colors,
+    foreground: "#7cff00",
+    miningRayGradient: CAR_MODE_MINING_RAY_GRADIENT
+  };
+}
+
+function miningRayEmitterRenderColors(colors, gameMode) {
+  if (gameMode !== GAME_MODES.cars) {
+    return colors;
+  }
+
+  return {
+    ...colors,
+    foreground: CAR_TIRE_COLOR,
+    background: CAR_TIRE_COLOR
+  };
+}
+
+function miningRayGradientColor(palette, signedCross, radius) {
+  if (!Array.isArray(palette) || palette.length <= 0) {
+    return RENDER.foreground;
+  }
+  if (palette.length === 1) {
+    return palette[0];
+  }
+
+  const t = clamp((signedCross / Math.max(0.0001, radius) + 1) * 0.5, 0, 1);
+  const scaled = t * (palette.length - 1);
+  const index = Math.min(palette.length - 2, Math.floor(scaled));
+  return mixHexColors(palette[index], palette[index + 1], scaled - index);
 }
 
 function miningRayRenderableLanes(miningRay) {

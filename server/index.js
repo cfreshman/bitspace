@@ -195,7 +195,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const result = roomManager.readyClient(clientId);
+    const result = roomManager.readyClient(clientId, {
+      mode: payload?.mode
+    });
     if (!result.ok) {
       socket.emit(SERVER_EVENTS.notice, {
         code: result.reason

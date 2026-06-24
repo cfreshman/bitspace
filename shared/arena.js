@@ -1,4 +1,4 @@
-import { ENGINE, RENDER } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -13,6 +13,7 @@ import {
   sweptCircleBlockerHit
 } from "./asteroid.js";
 import { createEmptyInput, normalizeInput } from "./input.js";
+import { simulateCarMovement } from "./car-physics.js";
 import {
   clamp,
   clampMagnitude,
@@ -44,9 +45,13 @@ const RANDOM_DIAMOND_SPAWN_TICKS = ENGINE.tickRate * 15;
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
+  const mode = normalizeGameMode(options.mode);
   const asteroid = options.asteroid ?? createAsteroid({
     seed: `${seed}:asteroid`,
-    playerCount: options.playerCount
+    playerCount: options.playerCount,
+    tileSize: mode === GAME_MODES.cars
+      ? RENDER.tileSize * ENGINE.car.tileScale
+      : RENDER.tileSize
   });
   const playerDamage = options.playerDamage ?? true;
   const asteroidMining = options.asteroidMining ?? true;
@@ -54,6 +59,7 @@ export function createArena(options = {}) {
 
   return {
     id: options.id ?? DEFAULT_ARENA_ID,
+    mode,
     seed,
     tick: 0,
     players: new Map(),
@@ -93,6 +99,8 @@ export function addPlayer(arena, playerOptions) {
     vx: 0,
     vy: 0,
     angle: spawn.angle,
+    carHeading: spawn.angle,
+    carSteerAngle: 0,
     facingMoveX: 0,
     facingMoveY: 0,
     pendingFacingSignX: 0,
@@ -336,6 +344,7 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) 
 export function snapshotArena(arena) {
   return {
     arenaId: arena.id,
+    mode: normalizeGameMode(arena.mode),
     tick: arena.tick,
     serverTime: Date.now(),
     render: RENDER,
@@ -425,10 +434,13 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   const canThrust = hasMoveIntent;
   player.thrusting = canThrust;
 
-  updateShipFacing(player, move, dtSeconds);
-
-  if (canThrust) {
-    applyThrusterAcceleration(player, move, effects, dtSeconds);
+  if (normalizeGameMode(arena.mode) === GAME_MODES.cars) {
+    simulateCarMovement(player, move, effects, dtSeconds);
+  } else {
+    updateShipFacing(player, move, dtSeconds);
+    if (canThrust) {
+      applyThrusterAcceleration(player, move, effects, dtSeconds);
+    }
   }
 
   player.aimAngle = player.input.aimAngle;
@@ -2647,6 +2659,9 @@ function snapshotPlayer(player, tick = 0) {
     vx: roundForSnapshot(player.vx),
     vy: roundForSnapshot(player.vy),
     angle: roundForSnapshot(player.angle),
+    carHeading: roundForSnapshot(player.carHeading ?? player.angle),
+    carSteerAngle: roundForSnapshot(player.carSteerAngle || 0),
+    carAngularVelocity: roundForSnapshot(player.carAngularVelocity || 0),
     aimAngle: roundForSnapshot(player.aimAngle),
     moveX: roundForSnapshot(player.input?.moveX || 0),
     moveY: roundForSnapshot(player.input?.moveY || 0),
@@ -2681,4 +2696,25 @@ function snapshotPlayer(player, tick = 0) {
 function normalizeAngle(angle) {
   const fullTurn = Math.PI * 2;
   return ((angle % fullTurn) + fullTurn) % fullTurn;
+}
+
+function normalizeSignedAngle(angle) {
+  const normalized = normalizeAngle(angle);
+  return normalized > Math.PI ? normalized - Math.PI * 2 : normalized;
+}
+
+function normalizeVector(x, y, fallback = { x: 1, y: 0 }) {
+  const length = Math.hypot(x, y);
+  if (length <= 0.000001) {
+    return fallback;
+  }
+
+  return {
+    x: x / length,
+    y: y / length
+  };
+}
+
+function normalizeGameMode(mode) {
+  return mode === GAME_MODES.cars ? GAME_MODES.cars : GAME_MODES.bitspace;
 }
