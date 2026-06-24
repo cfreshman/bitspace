@@ -70,6 +70,7 @@ const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
 const PERF_DEBUG_STORAGE_KEY = "bitspace.debugPerf";
 const PLAYER_MAP_STORAGE_KEY = "bitspace.playerMap";
 const SPECTATOR_TARGET_STORAGE_KEY = "bitspace.spectatorTarget";
+const SETTINGS_STORAGE_KEY = "bitspace.settings";
 const PLAYER_MAP_STORAGE_VERSION = 2;
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{12,48}$/;
 const CLIENT_SECRET_PATTERN = /^[a-zA-Z0-9_-]{24,96}$/;
@@ -135,8 +136,30 @@ const LOCAL_BOT_MAX_STEPS_PER_FRAME = 4;
 const BOT_DEBUG_CHUNK_TILES = 16;
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
-  theme: "theme"
+  theme: "theme",
+  settings: "prefs"
 });
+const HUD_LOCATIONS = Object.freeze(["top-left", "top", "bottom"]);
+const DEFAULT_SETTINGS = Object.freeze({
+  hudLocation: "top-left",
+  voiceChat: true,
+  micCapture: true,
+  masterVolume: 1,
+  effectsVolume: 1,
+  voiceVolume: 1
+});
+const SETTINGS_PANEL = Object.freeze({
+  minWidth: 132,
+  rowHeight: 18,
+  headerHeight: 26,
+  padding: 8,
+  bottomPadding: 8,
+  columnGap: 10,
+  sliderWidth: 64,
+  sliderEndPadding: 10,
+  edgeInset: 8
+});
+const VOLUME_PREVIEW_MIN_INTERVAL_SECONDS = 0.12;
 const MENU_BUTTON_WIDTH = 112;
 const MENU_BUTTON_WIDE_WIDTH = 128;
 const MENU_BUTTON_HEIGHT = 32;
@@ -206,7 +229,8 @@ const UPGRADE_MENU_LAYOUT = Object.freeze({
 });
 const MOBILE_POINTER_QUERY = "(pointer: coarse)";
 const MOBILE_HUD_SCALE = 1.75;
-const MOBILE_HUD_EDGE_INSET = 8;
+const HUD_EDGE_INSET = 0;
+const MOBILE_HUD_EDGE_INSET = HUD_EDGE_INSET;
 const MOBILE_JOYSTICK_DEADZONE_RATIO = 0.22;
 const MOBILE_JOYSTICK_MIN_DEADZONE = 8;
 const MOBILE_JOYSTICK_MIN_RADIUS = 42;
@@ -222,12 +246,13 @@ const HUD_PANEL_PADDING = 4;
 const HUD_PANEL_TEXT_HEIGHT = 7;
 const HUD_PANEL_ROW_STEP = 10;
 const HUD_PANEL_ACTION_GAP = 7;
-const MOBILE_HUD_ACTION_X = 10;
+const MOBILE_HUD_ACTION_X = HUD_EDGE_INSET;
 const MOBILE_HUD_ACTION_WIDTH = 118;
 const MOBILE_HUD_ACTION_HEIGHT = 12;
+const HUD_CONTROL_VISIBLE_HEIGHT = 9;
 const MOBILE_CONTROL_LINE_STEP = MOBILE_HUD_ACTION_HEIGHT + 8;
 const TERMINAL_LEAVE_ACTION = Object.freeze({
-  x: 10,
+  x: HUD_EDGE_INSET,
   eliminatedY: 41,
   endedPanelY: 8,
   endedRowStartY: 29,
@@ -279,6 +304,7 @@ const audio = {
   endSoundKey: "",
   defeatSoundKey: "",
   lastDefeatAtSeconds: -Infinity,
+  lastVolumePreviewAtSeconds: -Infinity,
   huckRockBuffer: null,
   rockThumpBuffer: null
 };
@@ -450,6 +476,14 @@ const state = {
     active: false,
     nextAttemptSeconds: 0,
     lastTargetKey: ""
+  },
+  settings: loadSettings(),
+  settingsUi: {
+    selectedIndex: 0,
+    navDirection: 0,
+    valueDirection: 0,
+    dragIndex: null,
+    dragPointerId: null
   },
   menu: {
     ...createMenuState()
@@ -921,6 +955,7 @@ window.addEventListener("blur", () => {
   keys.clear();
   releasedKeysUntilKeyup.clear();
   state.mouse.down = false;
+  clearSettingsDrag();
 });
 window.addEventListener("pagehide", () => {
   saveLocalBotGame({ force: true });
@@ -965,6 +1000,14 @@ window.addEventListener("pointermove", (event) => {
   if (state.mouse.down && !state.build.active && !hasMousePointer()) {
     state.mouse.down = false;
   }
+  if (isSettingsMenu()) {
+    const hudPoint = eventToHudFramePoint(event);
+    if (!updateSettingsDrag(hudPoint.x, hudPoint.y, event.pointerId)) {
+      updateSettingsSelectionFromPoint(hudPoint.x, hudPoint.y);
+    }
+    state.uiHoverId = null;
+    return;
+  }
   state.uiHoverId = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   if (state.upgrades.active) {
     updateUpgradeSelectionFromMouse();
@@ -989,6 +1032,11 @@ window.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   unlockAudio();
   updateMouse(event);
+  if (isSettingsMenu()) {
+    const hudPoint = eventToHudFramePoint(event);
+    handleSettingsPointerDown(hudPoint.x, hudPoint.y, event.pointerId);
+    return;
+  }
   const screenButton = screenRoomButtonAtPoint(state.mouse.x, state.mouse.y);
   if (screenButton) {
     handleRoomUiClick(screenButton);
@@ -1032,6 +1080,7 @@ window.addEventListener("pointerup", (event) => {
   event.preventDefault();
   updateMouse(event);
   state.mouse.down = false;
+  clearSettingsDrag(event.pointerId);
 });
 
 window.addEventListener("pointercancel", (event) => {
@@ -1046,6 +1095,7 @@ window.addEventListener("pointercancel", (event) => {
   event.preventDefault();
   updateMouse(event);
   state.mouse.down = false;
+  clearSettingsDrag(event.pointerId);
 });
 
 window.addEventListener("contextmenu", (event) => {
@@ -1143,6 +1193,12 @@ function handleMobilePointerMove(event) {
     updateMobileJoystickFromPointer(event, "aim");
   }
   state.uiHoverId = screenRoomButtonAtPoint(hudPoint.x, hudPoint.y);
+  if (isSettingsMenu()) {
+    if (!updateSettingsDrag(hudPoint.x, hudPoint.y, event.pointerId)) {
+      updateSettingsSelectionFromPoint(hudPoint.x, hudPoint.y);
+    }
+    state.uiHoverId = null;
+  }
   if (state.upgrades.active) {
     updateUpgradeSelectionFromPoint(hudPoint.x, hudPoint.y);
   }
@@ -1158,6 +1214,11 @@ function handleMobilePointerDown(event) {
   unlockAudio();
   updateMouse(event);
   const hudPoint = mobileHudFramePointFromEvent(event);
+
+  if (isSettingsMenu()) {
+    handleSettingsPointerDown(hudPoint.x, hudPoint.y, event.pointerId);
+    return true;
+  }
 
   if (state.upgrades.active) {
     if (
@@ -1234,6 +1295,7 @@ function handleMobilePointerUp(event) {
   if (state.mobile.aimJoystick.active && event.pointerId === state.mobile.aimJoystick.pointerId) {
     resetMobileJoystick("aim");
   }
+  clearSettingsDrag(event.pointerId);
   state.mouse.down = false;
   return true;
 }
@@ -1393,7 +1455,7 @@ function mobileUpgradePanelRect() {
 
 function mobileConfirmLeaveActionRect() {
   return {
-    x: 10,
+    x: MOBILE_HUD_ACTION_X,
     y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
     width: 112,
     height: MOBILE_HUD_ACTION_HEIGHT
@@ -1402,7 +1464,7 @@ function mobileConfirmLeaveActionRect() {
 
 function mobileThemeLeaveActionRect() {
   return {
-    x: 10,
+    x: MOBILE_HUD_ACTION_X,
     y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
     width: 96,
     height: MOBILE_HUD_ACTION_HEIGHT
@@ -1428,7 +1490,7 @@ function mobileWaitingStartActionRect() {
 function mobileWaitingActionRect(index, width = 96) {
   const actionY = mobileWaitingActionsY();
   return {
-    x: 10,
+    x: MOBILE_HUD_ACTION_X,
     y: actionY + MOBILE_CONTROL_LINE_STEP * index,
     width,
     height: MOBILE_HUD_ACTION_HEIGHT
@@ -1467,8 +1529,8 @@ function mobileArenaActionKinds() {
 
 function mobileControlListHeight(lineCount, lineStep = MOBILE_CONTROL_LINE_STEP) {
   return Math.max(
-    MOBILE_HUD_ACTION_HEIGHT,
-    Math.max(0, Math.floor(lineCount) - 1) * lineStep + MOBILE_HUD_ACTION_HEIGHT
+    HUD_CONTROL_VISIBLE_HEIGHT,
+    Math.max(0, Math.floor(lineCount) - 1) * lineStep + HUD_CONTROL_VISIBLE_HEIGHT
   );
 }
 
@@ -1476,7 +1538,7 @@ function mobileHudControlBlockY(blockHeight) {
   const frame = mobileHudContentCssRect();
   return Math.max(
     MOBILE_HUD_EDGE_INSET,
-    frame.logicalHeight - MOBILE_HUD_EDGE_INSET - Math.max(MOBILE_HUD_ACTION_HEIGHT, blockHeight)
+    frame.logicalHeight - MOBILE_HUD_EDGE_INSET - Math.max(HUD_CONTROL_VISIBLE_HEIGHT, blockHeight)
   );
 }
 
@@ -1626,7 +1688,7 @@ function updateMobileControlUi() {
     return;
   }
 
-  const modalActive = state.upgrades.active === true;
+  const modalActive = state.upgrades.active === true || isSettingsMenu();
   const active = mobileControlsActive() && !shouldIgnorePagePointerEvent() && !modalActive;
   mobileControlsRoot.hidden = !active;
   if (!active) {
@@ -1787,14 +1849,23 @@ function mobileHudFramePointFromEvent(event) {
   }
 
   const frame = mobileHudContentCssRect();
-  const scale = Math.max(0.0001, frame.scale);
+  const scaleX = Math.max(0.0001, frame.scaleX || frame.scale);
+  const scaleY = Math.max(0.0001, frame.scaleY || frame.scale);
   const x = event.clientX - frame.left;
   const y = event.clientY - frame.top;
   return {
-    x: clamp(x / scale, 0, frame.logicalWidth),
-    y: clamp(y / scale, 0, frame.logicalHeight),
+    x: clamp(x / scaleX, 0, frame.logicalWidth),
+    y: clamp(y / scaleY, 0, frame.logicalHeight),
     inFrame: x >= 0 && x <= frame.width && y >= 0 && y <= frame.height
   };
+}
+
+function eventToHudFramePoint(event) {
+  if (mobileControlsActive()) {
+    return mobileHudFramePointFromEvent(event);
+  }
+
+  return eventToCanvasFramePoint(event, canvas);
 }
 
 function mobileHudContentCssRect() {
@@ -1804,22 +1875,22 @@ function mobileHudContentCssRect() {
   }
 
   const canvasRect = canvas.getBoundingClientRect();
-  const edgeX = Math.max(0, canvasRect.left);
-  const edgeY = Math.max(0, canvasRect.top);
   const scale = frame.scale * MOBILE_HUD_SCALE;
-  const width = canvasRect.width + edgeX * 2;
-  const height = canvasRect.height + edgeY * 2;
+  const width = canvasRect.width;
+  const height = canvasRect.height;
   const logicalSize = mobileHudLogicalSize(width, height, scale);
   return {
-    left: 0,
-    top: 0,
+    left: canvasRect.left,
+    top: canvasRect.top,
     width,
     height,
-    right: width,
-    bottom: height,
+    right: canvasRect.left + width,
+    bottom: canvasRect.top + height,
     logicalWidth: logicalSize.width,
     logicalHeight: logicalSize.height,
-    scale
+    scale,
+    scaleX: width / Math.max(1, logicalSize.width),
+    scaleY: height / Math.max(1, logicalSize.height)
   };
 }
 
@@ -2064,22 +2135,24 @@ function draw(now = 0) {
     predictedPlayer: readyMenu ? null : predictedLocalPlayer(),
     eliminationNotices: state.eliminationNotices,
     controllerActive: state.controller.connected,
-	    mobileActive: mobileControlsActive(),
-	    controllerCursor: controllerCursorRenderState(),
-	    controllerAimCursor: controllerAimCursorRenderState(),
-	    hudFlash: hudFlashRenderState(timeSeconds),
-	    leaveConfirm: leaveConfirmRenderState(timeSeconds),
-	    playerMap: playerMapVisible ? playerMap : null,
-	    playerMapLarge: playerMapVisible && state.playerMap.large,
-	    playerMapVisible,
-	    playerMapFeatureEnabled: playerMapFeatureEnabled(),
-	    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
-	    botDebugOverlay,
-	    theme: state.theme,
-	    themeName: themeLabelForTheme(state.theme),
-	    timeSeconds,
-	    measurePerf: state.perfDebug.enabled
-	  });
+    mobileActive: mobileControlsActive(),
+    controllerCursor: controllerCursorRenderState(),
+    controllerAimCursor: controllerAimCursorRenderState(),
+    hudFlash: hudFlashRenderState(timeSeconds),
+    leaveConfirm: leaveConfirmRenderState(timeSeconds),
+    playerMap: playerMapVisible ? playerMap : null,
+    playerMapLarge: playerMapVisible && state.playerMap.large,
+    playerMapVisible,
+    playerMapFeatureEnabled: playerMapFeatureEnabled(),
+    botChunkMap: botDebugOverlay ? botChunkMapRenderState(cameraPlayerId) : null,
+    botDebugOverlay,
+    theme: state.theme,
+    themeName: themeLabelForTheme(state.theme),
+    settings: state.settings,
+    settingsUi: state.settingsUi,
+    timeSeconds,
+    measurePerf: state.perfDebug.enabled
+  });
   if (state.perfDebug.enabled) {
     updatePerfRenderMetrics(performance.now() - renderStart, renderPerf);
     updatePerfDebugPanel(now);
@@ -2776,9 +2849,11 @@ function createControllerState() {
 }
 
 function createMenuState() {
+  const readyAsteroid = createLobbyAsteroid({ seed: "bitspace-menu" });
   const asteroids = {
-    [MENU_ROOMS.ready]: createLobbyAsteroid({ seed: "bitspace-menu" }),
-    [MENU_ROOMS.theme]: createThemeMenuAsteroid()
+    [MENU_ROOMS.ready]: readyAsteroid,
+    [MENU_ROOMS.theme]: createThemeMenuAsteroid(),
+    [MENU_ROOMS.settings]: readyAsteroid
   };
   const asteroid = asteroids[MENU_ROOMS.ready];
 
@@ -2894,6 +2969,7 @@ function enterMenuRoom(room) {
   releaseSpaceUntilKeyup();
 
   const player = state.menu.player;
+  const preserveMenuCamera = room === MENU_ROOMS.settings && state.menu.room === MENU_ROOMS.ready;
   state.menu.room = room;
   state.menu.asteroid = state.menu.asteroids[room];
   state.menu.huckRocks = [];
@@ -2901,15 +2977,21 @@ function enterMenuRoom(room) {
   const center = menuCenter(state.menu.asteroid);
   state.menu.activeTargetId = null;
   resetMenuButtonTarget();
-  player.x = center.x;
-  player.y = center.y;
+  if (!preserveMenuCamera) {
+    player.x = center.x;
+    player.y = center.y;
+  }
   player.vx = 0;
   player.vy = 0;
-  player.angle = Math.PI / 4;
+  if (!preserveMenuCamera) {
+    player.angle = Math.PI / 4;
+  }
   player.facingMoveX = 0;
   player.facingMoveY = 0;
   clearPendingFacing(player);
-  player.aimAngle = Math.PI / 2;
+  if (!preserveMenuCamera) {
+    player.aimAngle = Math.PI / 2;
+  }
   player.mining = false;
   player.miningRay = null;
   player.miningHoldSeconds = 0;
@@ -2917,6 +2999,7 @@ function enterMenuRoom(room) {
   player.prototypeMiningRayCount = state.menu.rayCount;
   player.huckRockEngineCutoutSeconds = 0;
   player.thrusting = false;
+  updateMobileControlUi();
 }
 
 function updateMenuSimulation(timeSeconds) {
@@ -2927,6 +3010,21 @@ function updateMenuSimulation(timeSeconds) {
   state.menu.tick += 1;
   player.shake = Math.max(0, (player.shake || 0) - ENGINE.collision.shakeDecay * dtSeconds);
   player.huckRockEngineCutoutSeconds = 0;
+  if (state.menu.room === MENU_ROOMS.settings) {
+    player.vx = 0;
+    player.vy = 0;
+    player.moveX = 0;
+    player.moveY = 0;
+    player.thrusting = false;
+    player.mining = false;
+    player.miningRay = null;
+    player.miningHoldSeconds = 0;
+    player.rayExtension = 0;
+    state.menu.activeTargetId = null;
+    resetMenuButtonTarget();
+    return;
+  }
+
   applyShipFriction(player, dtSeconds);
 
   updateMenuAim(player);
@@ -3713,6 +3811,11 @@ function activateMenuEntity(entity) {
 
   if (entity.action === "theme") {
     enterMenuRoom(MENU_ROOMS.theme);
+    return;
+  }
+
+  if (entity.action === "prefs") {
+    enterMenuRoom(MENU_ROOMS.settings);
     return;
   }
 
@@ -4850,16 +4953,17 @@ function rayCircleIntersection(start, direction, circle, maxDistance) {
 
 function menuSnapshot() {
   const world = menuWorld(state.menu.asteroid);
+  const settingsMenu = state.menu.room === MENU_ROOMS.settings;
   const entities = menuEntities().concat(
-    state.menu.huckRocks.filter((entity) => entity.destroyed !== true)
+    settingsMenu ? [] : state.menu.huckRocks.filter((entity) => entity.destroyed !== true)
   );
   return {
-    arenaId: `menu-${state.menu.room}`,
+    arenaId: settingsMenu ? `menu-${MENU_ROOMS.ready}` : `menu-${state.menu.room}`,
     tick: state.menu.tick,
     serverTime: Date.now(),
     render: RENDER,
     world,
-    players: [{ ...state.menu.player }],
+    players: settingsMenu ? [{ ...state.menu.player, hidden: true }] : [{ ...state.menu.player }],
     asteroidMining: [],
     entities,
     effects: []
@@ -4876,25 +4980,32 @@ function isLoadingRoom() {
 
 function menuEntities() {
   const center = menuCenter(state.menu.asteroid);
-  const top = center.y + 28;
   const buttonWidth = 88;
-  const buttonGap = 16;
   const controlsRows = menuControlHintRows();
-  const controlsY = top + MENU_BUTTON_HEIGHT + 30;
-  const controlsHeight = controlsRows.length * 11 - 1;
-  const secondaryY = controlsY + controlsHeight + 18;
 
   if (state.menu.room === MENU_ROOMS.theme) {
     return themeSwatchEntities(center);
   }
 
+  if (state.menu.room === MENU_ROOMS.settings) {
+    return [];
+  }
+
+  const titleY = center.y - 80;
+  const readyY = center.y + 38;
+  const controlsY = readyY + MENU_BUTTON_HEIGHT + 9;
+  const sideXGap = 116;
+  const sideTopY = center.y - 26;
+  const sideBottomY = center.y + 16;
+
   return [
-    menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, center.y - 84),
-    menuButton("menu-ready", "ready", "READY", center.x - buttonWidth - buttonGap / 2, top, buttonWidth),
-    menuButton("menu-theme", "theme", "THEME", center.x + buttonGap / 2, top, buttonWidth),
+    menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, titleY),
+    menuButton("menu-ready", "ready", "READY", center.x - buttonWidth / 2, readyY, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
-    menuButton("menu-room", "named-room", "ROOM", center.x - buttonWidth - buttonGap / 2, secondaryY, buttonWidth),
-    menuButton("menu-bots", "bots", "BOTS", center.x + buttonGap / 2, secondaryY, buttonWidth)
+    menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
+    menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
+    menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
+    menuButton("menu-prefs", "prefs", "PREFS", center.x + sideXGap - buttonWidth / 2, sideBottomY, buttonWidth)
   ];
 }
 
@@ -4921,6 +5032,483 @@ function menuControlHintRows() {
     { input: "CLICK + HOLD", action: "MINING RAY" },
     { input: "SPACE", action: "HUCK ROCK" }
   ];
+}
+
+function settingsRows() {
+  const rows = [];
+  if (!mobileControlsActive()) {
+    rows.push({
+      id: "hudLocation",
+      label: "HUD LOCATION",
+      type: "cycle",
+      value: hudLocationLabel(state.settings.hudLocation)
+    });
+  }
+
+  rows.push(
+    {
+      id: "voiceChat",
+      label: "VOICE CHAT",
+      type: "toggle",
+      value: state.settings.voiceChat ? "ON" : "OFF"
+    },
+    {
+      id: "micCapture",
+      label: "MIC CAPTURE",
+      type: "toggle",
+      value: state.settings.micCapture === false ? "OFF" : "ON"
+    },
+    {
+      id: "masterVolume",
+      label: "MASTER",
+      type: "slider",
+      value: state.settings.masterVolume
+    },
+    {
+      id: "effectsVolume",
+      label: "EFFECTS",
+      type: "slider",
+      value: state.settings.effectsVolume
+    },
+    {
+      id: "voiceVolume",
+      label: "VOICE",
+      type: "slider",
+      value: state.settings.voiceVolume
+    },
+    {
+      id: "back",
+      label: "BACK",
+      type: "action",
+      value: ""
+    }
+  );
+
+  return rows;
+}
+
+function hudLocationLabel(value) {
+  if (value === "top") {
+    return "TOP";
+  }
+  if (value === "bottom") {
+    return "BOTTOM";
+  }
+  return "TOP LEFT";
+}
+
+function settingsFrameSize() {
+  if (!mobileControlsActive()) {
+    return framebufferSize();
+  }
+
+  const frame = mobileHudContentCssRect();
+  return {
+    width: frame.logicalWidth,
+    height: frame.logicalHeight
+  };
+}
+
+function settingsPanelRect(frame = settingsFrameSize()) {
+  const rows = settingsRows();
+  const metrics = settingsPanelMetrics(rows, frame);
+  const height = SETTINGS_PANEL.headerHeight +
+    rows.length * SETTINGS_PANEL.rowHeight +
+    SETTINGS_PANEL.bottomPadding;
+  return {
+    x: Math.round((frame.width - metrics.width) / 2),
+    y: Math.round((frame.height - height) / 2),
+    width: metrics.width,
+    height
+  };
+}
+
+function settingsPanelMetrics(rows = settingsRows(), frame = settingsFrameSize()) {
+  const labelWidth = Math.max(0, ...rows.map((row) => approximateBitmapTextWidth(row.label)));
+  const controlWidth = Math.max(0, ...rows.map((row) => {
+    if (row.type === "slider") {
+      return SETTINGS_PANEL.sliderWidth + SETTINGS_PANEL.sliderEndPadding * 2;
+    }
+    return row.value ? approximateBitmapTextWidth(row.value) : 0;
+  }));
+  const titleWidth = approximateBitmapTextWidth("PREFS");
+  const contentWidth = Math.max(
+    titleWidth,
+    labelWidth + (controlWidth > 0 ? SETTINGS_PANEL.columnGap + controlWidth : 0)
+  );
+  const maxWidth = Math.max(1, frame.width - SETTINGS_PANEL.edgeInset * 2);
+  const width = Math.min(
+    maxWidth,
+    Math.max(SETTINGS_PANEL.minWidth, contentWidth + SETTINGS_PANEL.padding * 2)
+  );
+  return {
+    width,
+    labelWidth,
+    controlWidth
+  };
+}
+
+function settingsRowRect(index, frame = settingsFrameSize()) {
+  const panel = settingsPanelRect(frame);
+  return {
+    x: panel.x + SETTINGS_PANEL.padding,
+    y: panel.y + SETTINGS_PANEL.headerHeight + index * SETTINGS_PANEL.rowHeight,
+    width: panel.width - SETTINGS_PANEL.padding * 2,
+    height: SETTINGS_PANEL.rowHeight
+  };
+}
+
+function settingsIndexAtPoint(x, y) {
+  const rows = settingsRows();
+  for (let index = 0; index < rows.length; index += 1) {
+    const rect = settingsRowRect(index);
+    if (pointInRect(x, y, rect)) {
+      return index;
+    }
+  }
+  return null;
+}
+
+function handleSettingsPointerDown(x, y, pointerId) {
+  if (settingsLeaveControlAtPoint(x, y)) {
+    leaveSettingsMenuRoom();
+    return true;
+  }
+
+  const index = updateSettingsSelectionFromPoint(x, y);
+  if (!Number.isInteger(index)) {
+    clearSettingsDrag(pointerId);
+    return false;
+  }
+
+  const row = settingsRows()[index];
+  if (row?.type === "slider") {
+    const value = settingSliderValueFromPoint(index, x);
+    if (value === null) {
+      clearSettingsDrag(pointerId);
+      return true;
+    }
+
+    beginSettingsDrag(index, pointerId);
+    setSettingValue(row.id, value, { silent: true });
+    requestVolumePreview(row.id, { force: true });
+    return true;
+  }
+
+  clearSettingsDrag(pointerId);
+  activateSelectedSetting({ index });
+  return true;
+}
+
+function settingSliderValueFromPoint(index, x, options = {}) {
+  const row = settingsRows()[index];
+  if (!row || row.type !== "slider") {
+    return null;
+  }
+
+  const rect = settingsRowRect(index);
+  const slider = settingsSliderRect(rect);
+  const hitX = slider.x - SETTINGS_PANEL.sliderEndPadding;
+  const hitWidth = slider.width + SETTINGS_PANEL.sliderEndPadding * 2;
+  if (!options.clampOutside && (x < hitX || x > hitX + hitWidth)) {
+    return null;
+  }
+  return clamp((x - slider.x) / Math.max(1, slider.width), 0, 1);
+}
+
+function settingsSliderRect(rowRect) {
+  return {
+    x: rowRect.x + rowRect.width - SETTINGS_PANEL.sliderWidth - SETTINGS_PANEL.sliderEndPadding,
+    y: rowRect.y + 6,
+    width: SETTINGS_PANEL.sliderWidth,
+    height: 6
+  };
+}
+
+function beginSettingsDrag(index, pointerId) {
+  const row = settingsRows()[index];
+  if (!row || row.type !== "slider") {
+    clearSettingsDrag();
+    return false;
+  }
+
+  state.settingsUi.dragIndex = index;
+  state.settingsUi.dragPointerId = pointerId;
+  return true;
+}
+
+function updateSettingsDrag(x, y, pointerId) {
+  if (!Number.isInteger(state.settingsUi.dragIndex)) {
+    return false;
+  }
+
+  if (
+    state.settingsUi.dragPointerId !== null &&
+    state.settingsUi.dragPointerId !== undefined &&
+    pointerId !== state.settingsUi.dragPointerId
+  ) {
+    return true;
+  }
+
+  const index = state.settingsUi.dragIndex;
+  const row = settingsRows()[index];
+  if (!row || row.type !== "slider") {
+    clearSettingsDrag(pointerId);
+    return false;
+  }
+
+  state.settingsUi.selectedIndex = index;
+  setSettingValue(row.id, settingSliderValueFromPoint(index, x, { clampOutside: true }), { silent: true });
+  requestVolumePreview(row.id);
+  return true;
+}
+
+function clearSettingsDrag(pointerId = null) {
+  if (
+    pointerId !== null &&
+    pointerId !== undefined &&
+    state.settingsUi.dragPointerId !== null &&
+    state.settingsUi.dragPointerId !== undefined &&
+    pointerId !== state.settingsUi.dragPointerId
+  ) {
+    return;
+  }
+
+  state.settingsUi.dragIndex = null;
+  state.settingsUi.dragPointerId = null;
+}
+
+function settingsLeaveControlAtPoint(x, y) {
+  if (!isSettingsMenu()) {
+    return false;
+  }
+
+  const rect = settingsLeaveControlRect();
+  return pointInRect(x, y, rect);
+}
+
+function settingsLeaveControlRect() {
+  if (mobileControlsActive()) {
+    return {
+      x: MOBILE_HUD_ACTION_X,
+      y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
+      width: 96,
+      height: MOBILE_HUD_ACTION_HEIGHT
+    };
+  }
+
+  const position = hudControlPosition(0, { count: 1 });
+  return {
+    x: position.x,
+    y: position.y,
+    width: 96,
+    height: 13
+  };
+}
+
+function hudControlPosition(index, options = {}) {
+  const placement = state.settings.hudLocation || DEFAULT_SETTINGS.hudLocation;
+  const step = Math.max(1, Math.floor(Number(options.lineStep) || 14));
+  const lineHeight = Math.max(1, Math.min(step, Math.floor(Number(options.lineHeight) || HUD_CONTROL_VISIBLE_HEIGHT)));
+  const count = Math.max(1, Math.floor(Number(options.count) || 3));
+  const panelHeight = Math.max(1, Math.floor(Number(options.panelHeight) || 58));
+  const frame = framebufferSize();
+  if (placement === "top") {
+    return {
+      x: HUD_EDGE_INSET,
+      y: HUD_EDGE_INSET + index * step
+    };
+  }
+
+  if (placement === "bottom") {
+    const rowIndex = Math.max(0, Math.min(count - 1, Math.floor(Number(index) || 0)));
+    return {
+      x: HUD_EDGE_INSET,
+      y: Math.max(HUD_EDGE_INSET, frame.height - HUD_EDGE_INSET - lineHeight - rowIndex * step)
+    };
+  }
+
+  const panel = hudPanelRect(HUD_PANEL_MIN_WIDTH, panelHeight);
+  return {
+    x: panel.x + 2,
+    y: panel.y + panel.height + HUD_PANEL_ACTION_GAP + index * step
+  };
+}
+
+function hudPanelRect(width, height) {
+  const frame = framebufferSize();
+  const placement = state.settings.hudLocation || DEFAULT_SETTINGS.hudLocation;
+  if (placement === "top") {
+    return {
+      x: Math.max(HUD_EDGE_INSET, frame.width - width - HUD_EDGE_INSET),
+      y: HUD_EDGE_INSET,
+      width,
+      height
+    };
+  }
+
+  if (placement === "bottom") {
+    return {
+      x: Math.max(HUD_EDGE_INSET, frame.width - width - HUD_EDGE_INSET),
+      y: Math.max(HUD_EDGE_INSET, frame.height - height - HUD_EDGE_INSET),
+      width,
+      height
+    };
+  }
+
+  return {
+    x: HUD_EDGE_INSET,
+    y: HUD_EDGE_INSET,
+    width,
+    height
+  };
+}
+
+function updateSettingsSelectionFromPoint(x, y) {
+  const index = settingsIndexAtPoint(x, y);
+  if (Number.isInteger(index)) {
+    state.settingsUi.selectedIndex = index;
+  }
+  return index;
+}
+
+function moveSettingsSelection(direction) {
+  const rows = settingsRows();
+  if (rows.length <= 0) {
+    state.settingsUi.selectedIndex = 0;
+    return;
+  }
+
+  const next = (state.settingsUi.selectedIndex + Math.sign(direction || 1) + rows.length) % rows.length;
+  state.settingsUi.selectedIndex = next;
+  requestMechanicalBeep();
+}
+
+function isSettingsMenu() {
+  return state.room?.state === "menu" && state.menu.room === MENU_ROOMS.settings;
+}
+
+function activateSelectedSetting(options = {}) {
+  const rows = settingsRows();
+  if (Object.prototype.hasOwnProperty.call(options, "index") && !Number.isInteger(options.index)) {
+    return false;
+  }
+
+  const index = clamp(
+    Number.isInteger(options.index) ? options.index : state.settingsUi.selectedIndex,
+    0,
+    Math.max(0, rows.length - 1)
+  );
+  const row = rows[index];
+  if (!row) {
+    return false;
+  }
+
+  state.settingsUi.selectedIndex = index;
+  if (row.id === "back") {
+    leaveSettingsMenuRoom();
+    return true;
+  }
+
+  if (row.type === "slider") {
+    const value = Number.isFinite(options.value)
+      ? options.value
+      : Number(state.settings[row.id] || 0) + 0.1;
+    setSettingValue(row.id, value > 1 ? 0 : value);
+    return true;
+  }
+
+  adjustSelectedSetting(1);
+  return true;
+}
+
+function adjustSelectedSetting(direction) {
+  const rows = settingsRows();
+  const row = rows[state.settingsUi.selectedIndex];
+  if (!row || row.id === "back") {
+    return false;
+  }
+
+  if (row.id === "hudLocation") {
+    const current = Math.max(0, HUD_LOCATIONS.indexOf(state.settings.hudLocation));
+    const next = (current + Math.sign(direction || 1) + HUD_LOCATIONS.length) % HUD_LOCATIONS.length;
+    setSettingValue("hudLocation", HUD_LOCATIONS[next]);
+    return true;
+  }
+
+  if (row.type === "toggle") {
+    setSettingValue(row.id, !state.settings[row.id]);
+    return true;
+  }
+
+  if (row.type === "slider") {
+    setSettingValue(row.id, Number(state.settings[row.id] || 0) + Math.sign(direction || 1) * 0.1);
+    return true;
+  }
+
+  return false;
+}
+
+function setSettingValue(id, value, options = {}) {
+  if (id === "hudLocation") {
+    state.settings.hudLocation = HUD_LOCATIONS.includes(value)
+      ? value
+      : DEFAULT_SETTINGS.hudLocation;
+  } else if (id === "voiceChat") {
+    state.settings.voiceChat = Boolean(value);
+    if (state.settings.voiceChat && Number(state.settings.voiceVolume || 0) <= 0) {
+      state.settings.voiceVolume = DEFAULT_SETTINGS.voiceVolume;
+    }
+  } else if (id === "micCapture") {
+    state.settings.micCapture = Boolean(value);
+  } else if (id === "masterVolume" || id === "effectsVolume" || id === "voiceVolume") {
+    const previousEffectiveVoiceVolume = effectiveVoiceSettingVolume(state.settings);
+    const clampedValue = clamp(Number(value), 0, 1);
+    state.settings[id] = clampedValue;
+    const nextEffectiveVoiceVolume = effectiveVoiceSettingVolume(state.settings);
+    if ((id === "masterVolume" || id === "voiceVolume") && nextEffectiveVoiceVolume <= 0) {
+      state.settings.voiceChat = false;
+    } else if (
+      (id === "masterVolume" || id === "voiceVolume") &&
+      previousEffectiveVoiceVolume <= 0 &&
+      nextEffectiveVoiceVolume > 0 &&
+      state.settings.voiceChat === false
+    ) {
+      state.settings.voiceChat = true;
+    }
+  } else {
+    return;
+  }
+
+  saveSettings();
+  applySettingsSideEffects(id);
+  if (!options.silent) {
+    if (isVolumeSetting(id)) {
+      requestVolumePreview(id, { force: true });
+    } else {
+      requestMechanicalBeep();
+    }
+  }
+}
+
+function applySettingsSideEffects(id = "") {
+  if (id === "voiceChat" || id === "voiceVolume" || id === "masterVolume") {
+    if (!state.settings.voiceChat) {
+      stopVoiceRoom({ keepGesture: true });
+    } else {
+      syncVoiceRoomState();
+    }
+  } else if (id === "micCapture") {
+    if (state.settings.micCapture === false) {
+      stopVoiceMicrophone();
+    } else {
+      syncVoiceRoomState();
+    }
+  }
+}
+
+function isVolumeSetting(id) {
+  return id === "masterVolume" || id === "effectsVolume" || id === "voiceVolume";
 }
 
 function menuTitle(id, label, subtitle, x, y) {
@@ -5116,6 +5704,38 @@ function loadBotDebugOverlay() {
 
 function loadPerfDebug() {
   return window.localStorage.getItem(PERF_DEBUG_STORAGE_KEY) === "1";
+}
+
+function loadSettings() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
+    return normalizeSettings(stored);
+  } catch {
+    window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function normalizeSettings(settings) {
+  const source = settings && typeof settings === "object" ? settings : {};
+  const masterVolume = clamp(Number(source.masterVolume ?? DEFAULT_SETTINGS.masterVolume), 0, 1);
+  const voiceVolume = clamp(Number(source.voiceVolume ?? DEFAULT_SETTINGS.voiceVolume), 0, 1);
+  const hudLocation = source.hudLocation ?? source.controlsPlacement;
+  return {
+    hudLocation: HUD_LOCATIONS.includes(hudLocation)
+      ? hudLocation
+      : DEFAULT_SETTINGS.hudLocation,
+    voiceChat: source.voiceChat !== false && masterVolume * voiceVolume > 0,
+    micCapture: source.micCapture !== false,
+    masterVolume,
+    effectsVolume: clamp(Number(source.effectsVolume ?? DEFAULT_SETTINGS.effectsVolume), 0, 1),
+    voiceVolume
+  };
+}
+
+function saveSettings() {
+  state.settings = normalizeSettings(state.settings);
+  window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state.settings));
 }
 
 function setBotDebugOverlay(enabled) {
@@ -6422,8 +7042,10 @@ function syncVoiceRoomState() {
 
   const roomId = state.room?.roomId || null;
   if (voice.joined && voice.roomId === roomId) {
-    if (voice.userGesture) {
+    if (voice.userGesture && voiceMicCaptureAllowed()) {
       startVoiceMicrophone();
+    } else if (!voiceMicCaptureAllowed() && voice.localStream) {
+      stopVoiceMicrophone();
     }
     refreshVoiceRoomPeersIfNeeded();
     return;
@@ -6438,6 +7060,7 @@ function syncVoiceRoomState() {
 
 function voiceRoomJoinAllowed() {
   if (
+    !state.settings.voiceChat ||
     isMapGenMode() ||
     isLocalBotGame() ||
     !socket.connected ||
@@ -6465,12 +7088,20 @@ function voiceRoomTransmitAllowed() {
     return false;
   }
 
+  if (!voiceMicCaptureAllowed()) {
+    return false;
+  }
+
   if (state.room?.state === "waiting" || state.room?.state === "ended") {
     return true;
   }
 
   const localPlayer = localPlayerFromSnapshot();
   return Boolean(localPlayer && (localPlayer.alive === true || localPlayer.alive === false));
+}
+
+function voiceMicCaptureAllowed() {
+  return state.settings?.micCapture !== false;
 }
 
 function expectedVoicePeerIds() {
@@ -6508,7 +7139,7 @@ async function startVoiceRoom() {
   const roomId = state.room?.roomId || null;
   voice.starting = true;
   try {
-    if (voice.userGesture && !voice.localStream) {
+    if (voice.userGesture && voiceMicCaptureAllowed() && !voice.localStream) {
       await startVoiceMicrophone({ restartPeers: false });
     }
 
@@ -6533,7 +7164,8 @@ async function startVoiceMicrophone(options = {}) {
     voice.localStream ||
     voice.micStarting ||
     !voice.userGesture ||
-    !voiceRoomJoinAllowed()
+    !voiceRoomJoinAllowed() ||
+    !voiceMicCaptureAllowed()
   ) {
     return;
   }
@@ -6564,7 +7196,7 @@ async function startVoiceMicrophone(options = {}) {
       },
       video: false
     });
-    if (!voiceRoomJoinAllowed() || state.room?.roomId !== roomId) {
+    if (!voiceRoomJoinAllowed() || !voiceMicCaptureAllowed() || state.room?.roomId !== roomId) {
       stopVoiceStream(stream);
       return;
     }
@@ -6701,6 +7333,22 @@ function stopVoiceRoom(options = {}) {
   voice.roomId = null;
   if (!keepGesture) {
     voice.userGesture = false;
+  }
+}
+
+function stopVoiceMicrophone(options = {}) {
+  if (!voice.localStream && !voice.localSource && !voice.localAnalyser && !voice.micStarting && !voice.micAttempted && !voice.micError) {
+    return;
+  }
+
+  disconnectLocalVoiceMeter();
+  stopVoiceStream(voice.localStream);
+  voice.localStream = null;
+  voice.micAttempted = false;
+  voice.micStarting = false;
+  voice.micError = null;
+  if (options.restartPeers !== false && voice.joined) {
+    restartVoiceRoomForLocalTracks();
   }
 }
 
@@ -7072,9 +7720,10 @@ function updateVoiceVisibility(snapshot, cameraPlayerId, timeSeconds) {
       peer.audibleSinceMs = nowMs;
     }
     peer.audibleUntilMs = nowMs;
-    if (Math.abs((peer.voiceTargetGain || 0) - VOICE_REMOTE_GAIN) > 0.001) {
-      setVoicePeerGain(peer, VOICE_REMOTE_GAIN, { fadeSeconds: VOICE_GAIN_FADE_IN_SECONDS });
-      peer.voiceTargetGain = VOICE_REMOTE_GAIN;
+    const targetGain = voiceRemoteGain();
+    if (Math.abs((peer.voiceTargetGain || 0) - targetGain) > 0.001) {
+      setVoicePeerGain(peer, targetGain, { fadeSeconds: VOICE_GAIN_FADE_IN_SECONDS });
+      peer.voiceTargetGain = targetGain;
     }
   }
 }
@@ -7178,7 +7827,8 @@ function setVoicePeerGain(peer, targetGain, options = {}) {
   const gain = peer.gain.gain;
   const now = context.currentTime;
   const currentGain = voicePeerCurrentGain(peer, now);
-  const nextGain = Math.max(0, Math.min(VOICE_REMOTE_GAIN, Number(targetGain) || 0));
+  const maxGain = Math.max(0.0001, voiceRemoteGain());
+  const nextGain = Math.max(0, Math.min(maxGain, Number(targetGain) || 0));
 
   gain.cancelScheduledValues(now);
   if (options.immediate) {
@@ -7194,7 +7844,7 @@ function setVoicePeerGain(peer, targetGain, options = {}) {
 
   const baseFadeSeconds = Math.max(0.001, Number(options.fadeSeconds) || VOICE_GAIN_FADE_OUT_SECONDS);
   const gainDelta = Math.abs(nextGain - currentGain);
-  const fadeSeconds = Math.max(0.001, baseFadeSeconds * clamp(gainDelta / VOICE_REMOTE_GAIN, 0, 1));
+  const fadeSeconds = Math.max(0.001, baseFadeSeconds * clamp(gainDelta / maxGain, 0, 1));
   gain.setValueAtTime(currentGain, now);
   gain.linearRampToValueAtTime(nextGain, now + fadeSeconds);
   peer.voiceCurrentGain = currentGain;
@@ -7234,6 +7884,7 @@ function voiceDebugSnapshot() {
     roomState: state.room?.state || "-",
     joinAllowed: voiceRoomJoinAllowed(),
     transmitAllowed: voiceRoomTransmitAllowed(),
+    micCapture: voiceMicCaptureAllowed(),
     secureContext: window.isSecureContext === true,
     hasMediaDevices: Boolean(navigator.mediaDevices),
     hasGetUserMedia: Boolean(navigator.mediaDevices?.getUserMedia),
@@ -7402,6 +8053,34 @@ function requestMechanicalBeep() {
   playMechanicalBeep(context);
 }
 
+function requestVolumePreview(id, options = {}) {
+  if (!isVolumeSetting(id)) {
+    return false;
+  }
+
+  const nowSeconds = performance.now() / 1000;
+  if (!options.force && nowSeconds - audio.lastVolumePreviewAtSeconds < VOLUME_PREVIEW_MIN_INTERVAL_SECONDS) {
+    return false;
+  }
+  audio.lastVolumePreviewAtSeconds = nowSeconds;
+
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return false;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    context.resume()
+      .then(() => playVolumePreviewTone(context, id))
+      .catch(() => {});
+    return true;
+  }
+
+  playVolumePreviewTone(context, id);
+  return true;
+}
+
 function flushPendingAudio() {
   flushPendingBeeps();
   flushPendingMelodies();
@@ -7520,8 +8199,9 @@ function playTrumpetTone(context, frequency, start, duration, volume) {
   filter.frequency.setValueAtTime(frequency * 2.4, start);
   filter.Q.value = 3.5;
   gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(volume, start + 0.018);
-  gain.gain.exponentialRampToValueAtTime(volume * 0.62, start + duration * 0.62);
+  const scaledVolume = effectGain(volume);
+  gain.gain.exponentialRampToValueAtTime(scaledVolume, start + 0.018);
+  gain.gain.exponentialRampToValueAtTime(scaledVolume * 0.62, start + duration * 0.62);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
 
   oscillator.connect(filter);
@@ -7547,8 +8227,9 @@ function playDefeatTone(context, frequency, start, duration, volume) {
   filter.frequency.exponentialRampToValueAtTime(260, start + duration);
   filter.Q.value = 0.6;
   gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(volume, start + 0.025);
-  gain.gain.exponentialRampToValueAtTime(volume * 0.45, start + duration * 0.62);
+  const scaledVolume = effectGain(volume);
+  gain.gain.exponentialRampToValueAtTime(scaledVolume, start + 0.025);
+  gain.gain.exponentialRampToValueAtTime(scaledVolume * 0.45, start + duration * 0.62);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
 
   oscillator.connect(filter);
@@ -7564,6 +8245,27 @@ function playMechanicalBeep(context, delay = 0) {
   playMechanicalTone(context, 520, start + delay + 0.092, 0.07, 0.0275);
 }
 
+function playVolumePreviewTone(context, id) {
+  const start = context.currentTime + 0.006;
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  const scale = volumePreviewScale(id);
+  const frequency = id === "voiceVolume"
+    ? 640
+    : id === "masterVolume" ? 720 : 820;
+
+  oscillator.type = "triangle";
+  oscillator.frequency.setValueAtTime(frequency, start);
+  oscillator.frequency.exponentialRampToValueAtTime(frequency * 1.18, start + 0.09);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, 0.06 * scale), start + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(start);
+  oscillator.stop(start + 0.14);
+}
+
 function playMechanicalTone(context, frequency, start, duration, volume) {
   const oscillator = context.createOscillator();
   const gain = context.createGain();
@@ -7571,12 +8273,52 @@ function playMechanicalTone(context, frequency, start, duration, volume) {
   oscillator.type = "square";
   oscillator.frequency.setValueAtTime(frequency, start);
   gain.gain.setValueAtTime(0.0001, start);
-  gain.gain.exponentialRampToValueAtTime(volume, start + 0.008);
+  gain.gain.exponentialRampToValueAtTime(effectGain(volume), start + 0.008);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
   oscillator.connect(gain);
   gain.connect(context.destination);
   oscillator.start(start);
   oscillator.stop(start + duration + 0.02);
+}
+
+function masterVolumeScale() {
+  return clamp(Number(state.settings?.masterVolume ?? DEFAULT_SETTINGS.masterVolume), 0, 1);
+}
+
+function effectsVolumeScale() {
+  return masterVolumeScale() *
+    clamp(Number(state.settings?.effectsVolume ?? DEFAULT_SETTINGS.effectsVolume), 0, 1);
+}
+
+function effectiveVoiceSettingVolume(settings = state.settings) {
+  return clamp(Number(settings?.masterVolume ?? DEFAULT_SETTINGS.masterVolume), 0, 1) *
+    clamp(Number(settings?.voiceVolume ?? DEFAULT_SETTINGS.voiceVolume), 0, 1);
+}
+
+function voiceVolumeScale() {
+  if (state.settings?.voiceChat === false) {
+    return 0;
+  }
+
+  return effectiveVoiceSettingVolume(state.settings);
+}
+
+function volumePreviewScale(id) {
+  if (id === "masterVolume") {
+    return masterVolumeScale();
+  }
+  if (id === "voiceVolume") {
+    return effectiveVoiceSettingVolume(state.settings);
+  }
+  return effectsVolumeScale();
+}
+
+function effectGain(value) {
+  return Math.max(0.0001, Number(value || 0) * effectsVolumeScale());
+}
+
+function voiceRemoteGain() {
+  return VOICE_REMOTE_GAIN * voiceVolumeScale();
 }
 
 function requestHuckRockThunk() {
@@ -7608,7 +8350,7 @@ function playHuckRockThunk(context) {
   body.frequency.setValueAtTime(92, start);
   body.frequency.exponentialRampToValueAtTime(42, start + 0.18);
   bodyGain.gain.setValueAtTime(0.0001, start);
-  bodyGain.gain.exponentialRampToValueAtTime(0.105, start + 0.008);
+  bodyGain.gain.exponentialRampToValueAtTime(effectGain(0.105), start + 0.008);
   bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
 
   strike.buffer = audio.huckRockBuffer || createNoiseBuffer(context, 0.08);
@@ -7618,7 +8360,7 @@ function playHuckRockThunk(context) {
   strikeFilter.frequency.exponentialRampToValueAtTime(95, start + 0.07);
   strikeFilter.Q.value = 0.6;
   strikeGain.gain.setValueAtTime(0.0001, start);
-  strikeGain.gain.exponentialRampToValueAtTime(0.07, start + 0.004);
+  strikeGain.gain.exponentialRampToValueAtTime(effectGain(0.07), start + 0.004);
   strikeGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.09);
 
   body.connect(bodyGain);
@@ -7819,7 +8561,7 @@ function updateEngineAudio(context, inputLevel, timeSeconds) {
   const shipAudio = audio.ship;
   const now = context.currentTime;
   const targetGain = inputLevel > 0
-    ? ENGINE_AUDIO_MAX_GAIN * (0.45 + inputLevel * 0.55)
+    ? effectGain(ENGINE_AUDIO_MAX_GAIN * (0.45 + inputLevel * 0.55))
     : 0.0001;
   const filterFrequency = 85 + inputLevel * 205 + Math.sin(timeSeconds * 18) * 7 * inputLevel;
   const oscillatorFrequency = 40 + inputLevel * 25 + Math.sin(timeSeconds * 9) * 2 * inputLevel;
@@ -7833,7 +8575,7 @@ function updateEngineAudio(context, inputLevel, timeSeconds) {
 function updateMiningAudio(context, active, timeSeconds) {
   const shipAudio = audio.ship;
   const now = context.currentTime;
-  const targetGain = active ? MINING_AUDIO_MAX_GAIN : 0.0001;
+  const targetGain = active ? effectGain(MINING_AUDIO_MAX_GAIN) : 0.0001;
   const baseFrequency = 310 + Math.sin(timeSeconds * 7.5) * 18;
 
   setAudioTarget(shipAudio.miningGain.gain, targetGain, now, 0.025);
@@ -7900,14 +8642,14 @@ function playLocalClunk(context, intensity) {
   noiseFilter.frequency.exponentialRampToValueAtTime(110, start + 0.11);
   noiseFilter.Q.value = 0.9;
   noiseGain.gain.setValueAtTime(0.0001, start);
-  noiseGain.gain.exponentialRampToValueAtTime(0.034 * intensity, start + 0.006);
+  noiseGain.gain.exponentialRampToValueAtTime(effectGain(0.034 * intensity), start + 0.006);
   noiseGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
 
   oscillator.type = "square";
   oscillator.frequency.setValueAtTime(155 + intensity * 18, start);
   oscillator.frequency.exponentialRampToValueAtTime(72, start + 0.13);
   oscillatorGain.gain.setValueAtTime(0.0001, start);
-  oscillatorGain.gain.exponentialRampToValueAtTime(0.025 * intensity, start + 0.006);
+  oscillatorGain.gain.exponentialRampToValueAtTime(effectGain(0.025 * intensity), start + 0.006);
   oscillatorGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.14);
 
   noise.connect(noiseFilter);
@@ -7933,7 +8675,7 @@ function playRockThump(context, intensity) {
   body.frequency.setValueAtTime(74 + intensity * 8, start);
   body.frequency.exponentialRampToValueAtTime(42, start + 0.2);
   bodyGain.gain.setValueAtTime(0.0001, start);
-  bodyGain.gain.exponentialRampToValueAtTime(0.105 * intensity, start + 0.018);
+  bodyGain.gain.exponentialRampToValueAtTime(effectGain(0.105 * intensity), start + 0.018);
   bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.26);
 
   brush.buffer = audio.rockThumpBuffer || createNoiseBuffer(context, 0.1);
@@ -7943,7 +8685,7 @@ function playRockThump(context, intensity) {
   brushFilter.frequency.exponentialRampToValueAtTime(65, start + 0.12);
   brushFilter.Q.value = 0.35;
   brushGain.gain.setValueAtTime(0.0001, start);
-  brushGain.gain.exponentialRampToValueAtTime(0.042 * intensity, start + 0.012);
+  brushGain.gain.exponentialRampToValueAtTime(effectGain(0.042 * intensity), start + 0.012);
   brushGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
 
   body.connect(bodyGain);
@@ -9570,7 +10312,6 @@ function handleWaitingRoomShortcutKey(event) {
 function handleMenuRoomShortcutKey(event) {
   if (
     state.room?.state !== "menu" ||
-    state.menu.room !== MENU_ROOMS.theme ||
     event.repeat ||
     event.metaKey ||
     event.ctrlKey ||
@@ -9579,9 +10320,49 @@ function handleMenuRoomShortcutKey(event) {
     return false;
   }
 
-  if (event.code === "Escape") {
+  if (state.menu.room === MENU_ROOMS.theme && event.code === "Escape") {
     event.preventDefault();
     leaveThemeMenuRoom();
+    return true;
+  }
+
+  if (state.menu.room !== MENU_ROOMS.settings) {
+    return false;
+  }
+
+  if (event.code === "Escape") {
+    event.preventDefault();
+    leaveSettingsMenuRoom();
+    return true;
+  }
+
+  if (event.code === "ArrowUp" || event.code === "KeyW") {
+    event.preventDefault();
+    moveSettingsSelection(-1);
+    return true;
+  }
+
+  if (event.code === "ArrowDown" || event.code === "KeyS") {
+    event.preventDefault();
+    moveSettingsSelection(1);
+    return true;
+  }
+
+  if (event.code === "ArrowLeft" || event.code === "KeyA") {
+    event.preventDefault();
+    adjustSelectedSetting(-1);
+    return true;
+  }
+
+  if (event.code === "ArrowRight" || event.code === "KeyD") {
+    event.preventDefault();
+    adjustSelectedSetting(1);
+    return true;
+  }
+
+  if (event.code === "Enter" || event.code === "Space") {
+    event.preventDefault();
+    activateSelectedSetting();
     return true;
   }
 
@@ -9624,12 +10405,50 @@ function handleWaitingRoomControllerActions(input) {
 }
 
 function handleMenuRoomControllerActions(input) {
-  if (state.room?.state !== "menu" || state.menu.room !== MENU_ROOMS.theme) {
+  if (state.room?.state !== "menu") {
     return false;
   }
 
-  if (input.pressed.reset) {
+  if (state.menu.room === MENU_ROOMS.theme && input.pressed.reset) {
     leaveThemeMenuRoom();
+    return true;
+  }
+
+  if (state.menu.room !== MENU_ROOMS.settings) {
+    return false;
+  }
+
+  const rowDirection = Math.abs(input.dpad.y) >= CONTROLLER_DPAD_NAV_THRESHOLD
+    ? Math.sign(input.dpad.y)
+    : 0;
+  if (rowDirection === 0) {
+    state.settingsUi.navDirection = 0;
+  } else if (rowDirection !== state.settingsUi.navDirection) {
+    state.settingsUi.navDirection = rowDirection;
+    moveSettingsSelection(rowDirection);
+    unlockAudio();
+    return true;
+  }
+
+  const valueDirection = Math.abs(input.dpad.x) >= CONTROLLER_DPAD_NAV_THRESHOLD
+    ? Math.sign(input.dpad.x)
+    : 0;
+  if (valueDirection === 0) {
+    state.settingsUi.valueDirection = 0;
+  } else if (valueDirection !== state.settingsUi.valueDirection) {
+    state.settingsUi.valueDirection = valueDirection;
+    adjustSelectedSetting(valueDirection);
+    unlockAudio();
+    return true;
+  }
+
+  if (input.pressed.reset) {
+    leaveSettingsMenuRoom();
+    return true;
+  }
+
+  if (input.pressed.select) {
+    activateSelectedSetting();
     return true;
   }
 
@@ -9637,6 +10456,11 @@ function handleMenuRoomControllerActions(input) {
 }
 
 function leaveThemeMenuRoom() {
+  requestMechanicalBeep();
+  enterMenuRoom(MENU_ROOMS.ready);
+}
+
+function leaveSettingsMenuRoom() {
   requestMechanicalBeep();
   enterMenuRoom(MENU_ROOMS.ready);
 }
@@ -9900,7 +10724,7 @@ function terminalLeaveActionRect() {
 
 function mobileTerminalLeaveActionRect() {
   return {
-    x: 10,
+    x: MOBILE_HUD_ACTION_X,
     y: mobileHudControlBlockY(MOBILE_HUD_ACTION_HEIGHT),
     width: 96,
     height: MOBILE_HUD_ACTION_HEIGHT

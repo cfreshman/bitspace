@@ -30,8 +30,11 @@ import {
 const ENTITY_PIXEL_SIZE = 1;
 const CANVAS_EDGE_PADDING_EM = 1;
 const MOBILE_HUD_SCALE = 1.75;
-const MOBILE_HUD_EDGE_INSET = 8;
+const HUD_EDGE_INSET = 0;
+const MOBILE_HUD_EDGE_INSET = HUD_EDGE_INSET;
 const MOBILE_HUD_ACTION_HEIGHT = 12;
+const HUD_CONTROL_VISIBLE_HEIGHT = 9;
+const CONTROLLER_HUD_CONTROL_HEIGHT = 14;
 const MOBILE_CONTROL_LINE_STEP = MOBILE_HUD_ACTION_HEIGHT + 8;
 const MIN_RENDER_ASPECT = 2 / 3;
 const MAX_RENDER_ASPECT = 3 / 2;
@@ -139,14 +142,25 @@ const HUD_PANEL_ACTION_GAP = 7;
 const HUD_CONTROL_TEXT_BORDER = Object.freeze({
   borderTransparentAsBacking: true
 });
+const SETTINGS_PANEL = Object.freeze({
+  minWidth: 132,
+  rowHeight: 18,
+  headerHeight: 26,
+  padding: 8,
+  bottomPadding: 8,
+  columnGap: 10,
+  sliderWidth: 64,
+  sliderEndPadding: 10,
+  edgeInset: 8
+});
 const MOBILE_UPGRADE_CLOSE_ACTION = Object.freeze({
   gap: 7,
   width: 52,
   height: 13
 });
 const ENDED_HUD_LAYOUT = Object.freeze({
-  x: 8,
-  y: 8,
+  x: HUD_EDGE_INSET,
+  y: HUD_EDGE_INSET,
   width: HUD_PANEL_MIN_WIDTH,
   titleY: HUD_PANEL_PADDING,
   headerY: HUD_PANEL_PADDING + 14,
@@ -538,17 +552,19 @@ export function createRenderer(canvas, minimapCanvas = null) {
     const padding = canvasEdgePaddingPx();
     const sceneViewport = sceneBoxViewport(viewport);
     const scale = Math.max(0.0001, sceneRect.scale * MOBILE_HUD_SCALE);
-    const cssWidth = sceneViewport.width + padding * 2;
-    const cssHeight = sceneViewport.height + padding * 2;
+    const cssWidth = sceneViewport.width;
+    const cssHeight = sceneViewport.height;
+    const logicalWidth = roundEven(cssWidth / scale);
+    const logicalHeight = roundEven(cssHeight / scale);
     return {
       cssWidth,
       cssHeight,
       scale,
-      visibleLogicalWidth: cssWidth / scale,
-      visibleLogicalHeight: cssHeight / scale,
+      visibleLogicalWidth: logicalWidth,
+      visibleLogicalHeight: logicalHeight,
       cssRect: {
-        left: 0,
-        top: 0,
+        left: Math.round(padding),
+        top: Math.round(padding),
         width: Math.round(cssWidth),
         height: Math.round(cssHeight)
       }
@@ -3423,7 +3439,8 @@ function drawBitmapGlyphAdaptiveBorder(ctx, glyph, x, y, scale, borderColor) {
           const sample = typeof ctx.getPixelColor === "function"
             ? ctx.getPixelColor(px, py)
             : null;
-          ctx.fillStyle = sample === packedBacking || (transparentIsBacking && sample === 0)
+          ctx.fillStyle = sample === packedBacking ||
+            (transparentIsBacking && (sample === 0 || sample === null || sample === undefined))
             ? backing
             : background;
           ctx.fillRect(px, py, 1, 1);
@@ -3647,9 +3664,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       ))
       : null;
     worldRenderPlayers = visibility
-      ? renderPlayers.filter((player) => playerTouchesAsteroidVisibility(visibility, player))
-      : renderPlayers;
-    localShipDrawsAfterVisibility = Boolean(visibility && localPlayer?.alive);
+      ? renderPlayers.filter((player) => !player.hidden && playerTouchesAsteroidVisibility(visibility, player))
+      : renderPlayers.filter((player) => !player.hidden);
+    localShipDrawsAfterVisibility = Boolean(visibility && localPlayer?.alive && !localPlayer.hidden);
 
     if (sharedState) {
       Object.assign(sharedState, {
@@ -3817,7 +3834,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   }
   if (shouldDrawHud) measureBucket("hudMs", () => {
     if (mobileUpgradeModal) {
-      drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, true);
+      drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, true, options.playerMapFeatureEnabled, options.settings);
       return;
     }
 
@@ -3837,9 +3854,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           playersLeft,
           mobilePlayerHudLayout(ctx, options)
         );
-        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
-        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
-        drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled);
+        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings);
+        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings);
+        drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings);
         drawMobileLeaveHud(ctx, localPlayer, options, colors, textRenderer);
       }
     }
@@ -4043,7 +4060,7 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
   const state = room.state || "menu";
 
   if (state === "menu") {
-    drawMenuOverlay(ctx, options, colors, textRenderer);
+    drawMenuOverlay(ctx, options, colors, textRenderer, localPlayer);
     return;
   }
 
@@ -4061,11 +4078,235 @@ function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
   }
 }
 
-function drawMenuOverlay(ctx, options, colors, textRenderer) {
+function drawMenuOverlay(ctx, options, colors, textRenderer, localPlayer = null) {
+  drawMenuPreviewHud(ctx, options, localPlayer, colors, textRenderer);
+
+  if (options.menuRoom === "prefs") {
+    drawSettingsMenuOverlay(ctx, options, colors, textRenderer);
+    return;
+  }
+
   drawRoomButtons(ctx, options, colors, textRenderer);
   if (options.menuRoom === "theme") {
     drawThemeTerminalHud(ctx, options, colors, textRenderer);
   }
+}
+
+function drawMenuPreviewHud(ctx, options, localPlayer, colors, textRenderer) {
+  if (!localPlayer || options.menuRoom !== "prefs" || !settingsShowsHudLocation(options)) {
+    return;
+  }
+
+  drawPlayerHud(
+    ctx,
+    localPlayer,
+    colors,
+    textRenderer,
+    options.hudFlash,
+    options.timeSeconds,
+    0,
+    mobilePlayerHudLayout(ctx, options)
+  );
+  drawMenuLeaveHud(ctx, options, colors, textRenderer);
+}
+
+function drawMenuLeaveHud(ctx, options, colors, textRenderer) {
+  if (options.mobileActive) {
+    drawMobileHudAction(ctx, "LEAVE", HUD_EDGE_INSET, mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT), colors, textRenderer);
+    return;
+  }
+
+  const position = hudControlPosition(ctx, 0, options.settings, controllerHudPositionOptions(options));
+  if (options.controllerActive) {
+    drawControllerHudAction(ctx, "faceRight", "LEAVE", position.x, position.y, colors, textRenderer);
+    return;
+  }
+
+  textRenderer.draw(ctx, "ESC - LEAVE", position.x, position.y, {
+    fontSize: 8,
+    color: colors.foreground,
+    ...HUD_CONTROL_TEXT_BORDER,
+    width: 96
+  });
+}
+
+function drawSettingsMenuOverlay(ctx, options, colors, textRenderer) {
+  const rows = settingsMenuRows(options);
+  const frame = {
+    width: options.mobileActive ? mobileHudVisibleWidth(ctx) : ctx.width,
+    height: options.mobileActive ? mobileHudVisibleHeight(ctx) : ctx.height
+  };
+  const metrics = settingsPanelMetrics(rows, frame, textRenderer);
+  const height = SETTINGS_PANEL.headerHeight +
+    rows.length * SETTINGS_PANEL.rowHeight +
+    SETTINGS_PANEL.bottomPadding;
+  const panel = {
+    x: Math.round((frame.width - metrics.width) / 2),
+    y: Math.round((frame.height - height) / 2),
+    width: metrics.width,
+    height
+  };
+  const selectedIndex = Number.isInteger(options.settingsUi?.selectedIndex)
+    ? clamp(options.settingsUi.selectedIndex, 0, Math.max(0, rows.length - 1))
+    : 0;
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  textRenderer.draw(ctx, "PREFS", panel.x + SETTINGS_PANEL.padding, panel.y + SETTINGS_PANEL.padding, {
+    ...textOptions,
+    width: panel.width - SETTINGS_PANEL.padding * 2
+  });
+
+  rows.forEach((row, index) => {
+    const rowRect = {
+      x: panel.x + SETTINGS_PANEL.padding,
+      y: panel.y + SETTINGS_PANEL.headerHeight + index * SETTINGS_PANEL.rowHeight,
+      width: panel.width - SETTINGS_PANEL.padding * 2,
+      height: SETTINGS_PANEL.rowHeight
+    };
+    const selected = index === selectedIndex;
+    const rowColor = selected ? colors.background : colors.foreground;
+
+    if (selected) {
+      ctx.fillStyle = colors.foreground;
+      ctx.fillRect(rowRect.x - 2, rowRect.y, rowRect.width + 4, rowRect.height - 2);
+    }
+
+    textRenderer.draw(ctx, row.label, rowRect.x, rowRect.y + 4, {
+      fontSize: 8,
+      color: rowColor,
+      width: Math.min(rowRect.width, metrics.labelWidth + 2)
+    });
+
+    if (row.type === "slider") {
+      drawSettingsSlider(ctx, rowRect, row.value, selected, colors);
+      return;
+    }
+
+    if (row.value) {
+      const valueWidth = textRenderer.measure(row.value, { fontSize: 8 });
+      textRenderer.draw(ctx, row.value, rowRect.x + rowRect.width - valueWidth, rowRect.y + 4, {
+        fontSize: 8,
+        color: rowColor,
+        width: valueWidth + 2
+      });
+    }
+  });
+}
+
+function settingsMenuRows(options) {
+  const settings = options.settings || {};
+  const rows = [];
+  if (settingsShowsHudLocation(options)) {
+    rows.push({
+      id: "hudLocation",
+      label: "HUD LOCATION",
+      type: "cycle",
+      value: hudLocationLabel(settings.hudLocation)
+    });
+  }
+
+  rows.push(
+    {
+      id: "voiceChat",
+      label: "VOICE CHAT",
+      type: "toggle",
+      value: settings.voiceChat === false ? "OFF" : "ON"
+    },
+    {
+      id: "micCapture",
+      label: "MIC CAPTURE",
+      type: "toggle",
+      value: settings.micCapture === false ? "OFF" : "ON"
+    },
+    {
+      id: "masterVolume",
+      label: "MASTER",
+      type: "slider",
+      value: Number(settings.masterVolume ?? 1)
+    },
+    {
+      id: "effectsVolume",
+      label: "EFFECTS",
+      type: "slider",
+      value: Number(settings.effectsVolume ?? 1)
+    },
+    {
+      id: "voiceVolume",
+      label: "VOICE",
+      type: "slider",
+      value: Number(settings.voiceVolume ?? 1)
+    },
+    {
+      id: "back",
+      label: "BACK",
+      type: "action",
+      value: ""
+    }
+  );
+  return rows;
+}
+
+function settingsShowsHudLocation(options = {}) {
+  return !options.mobileActive;
+}
+
+function settingsPanelMetrics(rows, frame, textRenderer) {
+  const textOptions = { fontSize: 8 };
+  const labelWidth = Math.max(0, ...rows.map((row) => textRenderer.measure(row.label, textOptions)));
+  const controlWidth = Math.max(0, ...rows.map((row) => {
+    if (row.type === "slider") {
+      return SETTINGS_PANEL.sliderWidth + SETTINGS_PANEL.sliderEndPadding * 2;
+    }
+    return row.value ? textRenderer.measure(row.value, textOptions) : 0;
+  }));
+  const titleWidth = textRenderer.measure("PREFS", textOptions);
+  const contentWidth = Math.max(
+    titleWidth,
+    labelWidth + (controlWidth > 0 ? SETTINGS_PANEL.columnGap + controlWidth : 0)
+  );
+  const maxWidth = Math.max(1, frame.width - SETTINGS_PANEL.edgeInset * 2);
+  return {
+    width: Math.min(
+      maxWidth,
+      Math.max(SETTINGS_PANEL.minWidth, contentWidth + SETTINGS_PANEL.padding * 2)
+    ),
+    labelWidth,
+    controlWidth
+  };
+}
+
+function hudLocationLabel(value) {
+  if (value === "top") {
+    return "TOP";
+  }
+  if (value === "bottom") {
+    return "BOTTOM";
+  }
+  return "TOP LEFT";
+}
+
+function drawSettingsSlider(ctx, rowRect, rawValue, selected, colors) {
+  const slider = {
+    x: rowRect.x + rowRect.width - SETTINGS_PANEL.sliderWidth - SETTINGS_PANEL.sliderEndPadding,
+    y: rowRect.y + 6,
+    width: SETTINGS_PANEL.sliderWidth,
+    height: 6
+  };
+  const value = clamp(Number(rawValue) || 0, 0, 1);
+  const trackColor = selected ? colors.background : colors.foreground;
+  const fillColor = selected ? colors.background : colors.foreground;
+  const emptyColor = selected ? colors.foreground : colors.background;
+
+  ctx.fillStyle = trackColor;
+  ctx.fillRect(slider.x, slider.y, slider.width, slider.height);
+  ctx.fillStyle = emptyColor;
+  ctx.fillRect(slider.x + 1, slider.y + 1, slider.width - 2, slider.height - 2);
+  ctx.fillStyle = fillColor;
+  ctx.fillRect(slider.x + 1, slider.y + 1, Math.round((slider.width - 2) * value), slider.height - 2);
 }
 
 function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
@@ -4078,7 +4319,8 @@ function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
   const panel = mainHudPanelRect(
     ctx,
     Math.max(HUD_PANEL_MIN_WIDTH, textRenderer.measure(label, textOptions) + padding * 2),
-    hudPanelHeightForRows(1)
+    hudPanelHeightForRows(1),
+    options.settings
   );
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   textRenderer.draw(ctx, label, panel.x + padding, panel.y + padding, {
@@ -4086,10 +4328,11 @@ function drawThemeTerminalHud(ctx, options, colors, textRenderer) {
     width: panel.width - padding * 2
   });
 
+  const actionPosition = hudPanelActionPosition(ctx, panel, 0, 1, options.settings, options.controllerActive ? 15 : 12);
   const warningPosition = drawWaitingTerminalActions(
     ctx,
-    panel.x + 2,
-    panel.y + panel.height + 7,
+    actionPosition.x,
+    actionPosition.y,
     false,
     null,
     options,
@@ -4142,11 +4385,12 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
   const panel = mainHudPanelRect(
     ctx,
     Math.max(minWidth, labelWidth + padding * 2, statusWidth + padding * 2),
-    hudPanelHeightForRows(2)
+    hudPanelHeightForRows(2),
+    options.settings
   );
   if (playerHudPanel) {
     panel.x = playerHudPanel.x;
-    panel.y = options.mobileActive
+    panel.y = hudStacksUp(options.settings) || options.mobileActive
       ? Math.max(8, playerHudPanel.y - panel.height - 6)
       : playerHudPanel.y + playerHudPanel.height + 6;
   }
@@ -4160,10 +4404,18 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
     ...textOptions,
     width: panel.width - padding * 2
   });
+  const actionPosition = hudPanelActionPosition(
+    ctx,
+    panel,
+    0,
+    waitingTerminalActionCount(room, canStart),
+    options.settings,
+    options.controllerActive ? 15 : 12
+  );
   const warningPosition = drawWaitingTerminalActions(
     ctx,
-    panel.x + 2,
-    panel.y + panel.height + HUD_PANEL_ACTION_GAP,
+    actionPosition.x,
+    actionPosition.y,
     canStart,
     room,
     options,
@@ -4171,6 +4423,10 @@ function drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, c
     textRenderer
   );
   drawWaitingDisabledFlash(ctx, warningPosition.x, warningPosition.y, options, colors, textRenderer);
+}
+
+function waitingTerminalActionCount(room, canStart) {
+  return 1 + (room?.localBots === true ? 2 : 0) + (canStart ? 1 : 0);
 }
 
 function drawWaitingTerminalActions(ctx, x, y, canStart, room, options, colors, textRenderer) {
@@ -4313,7 +4569,7 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
   const panelWidth = Math.min(visibleWidth - 24, textWidth + 24);
   const panelHeight = 39;
   const panelX = options.mobileActive
-    ? Math.max(8, visibleWidth - panelWidth - 8)
+    ? Math.max(HUD_EDGE_INSET, visibleWidth - panelWidth - HUD_EDGE_INSET)
     : Math.round((visibleWidth - panelWidth) / 2);
   const panel = {
     x: panelX,
@@ -4336,7 +4592,7 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
 
   if (spectatedPlayer && spectatedPlayer.id !== localPlayer?.id) {
     const header = spectatorHeaderForPlayer(spectatedPlayer);
-    const spectatedHeight = playerHudPanelHeight(header);
+    const spectatedHeight = playerHudPanelHeight(header, options.settings);
     stackPanel = drawPlayerHud(
       ctx,
       spectatedPlayer,
@@ -4347,25 +4603,27 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
       playersLeft,
       {
         header,
+        settings: options.settings,
         y: stackPanel
-          ? options.mobileActive
-            ? Math.max(8, stackPanel.y - spectatedHeight - 6)
+          ? options.mobileActive || hudStacksUp(options.settings)
+            ? Math.max(HUD_EDGE_INSET, stackPanel.y - spectatedHeight - 6)
             : stackPanel.y + stackPanel.height + 6
           : undefined
       }
     );
   } else if (!stackPanel) {
-    stackPanel = drawSpectatingFallbackPanel(ctx, colors, textRenderer);
+    stackPanel = drawSpectatingFallbackPanel(ctx, options, colors, textRenderer);
   }
 
-  drawTerminalLeaveAction(
+  const actionPosition = hudPanelActionPosition(
     ctx,
-    (stackPanel?.x ?? 8) + 2,
-    (stackPanel?.y ?? 8) + (stackPanel?.height ?? 0) + HUD_PANEL_ACTION_GAP,
-    options,
-    colors,
-    textRenderer
+    stackPanel || { x: HUD_EDGE_INSET, y: HUD_EDGE_INSET, height: 0 },
+    0,
+    1,
+    options.settings,
+    terminalActionLineStep(options)
   );
+  drawTerminalLeaveAction(ctx, actionPosition.x, actionPosition.y, options, colors, textRenderer);
 }
 
 function spectatorHeaderForPlayer(player) {
@@ -4384,7 +4642,7 @@ function drawEliminatedPanel(ctx, options, player, snapshot, colors, textRendere
     place ? `FINISHED ${placeLabel(place)}` : "FINISHED",
     killCountLabel(kills)
   ];
-  return drawHudTextPanel(ctx, rows, colors, textRenderer);
+  return drawHudTextPanel(ctx, rows, colors, textRenderer, options.settings);
 }
 
 function killCountLabel(kills) {
@@ -4392,11 +4650,11 @@ function killCountLabel(kills) {
   return `${count} KILL${count === 1 ? "" : "S"}`;
 }
 
-function drawSpectatingFallbackPanel(ctx, colors, textRenderer) {
-  return drawHudTextPanel(ctx, ["SPECTATING"], colors, textRenderer);
+function drawSpectatingFallbackPanel(ctx, options, colors, textRenderer) {
+  return drawHudTextPanel(ctx, ["SPECTATING"], colors, textRenderer, options.settings);
 }
 
-function drawHudTextPanel(ctx, rows, colors, textRenderer) {
+function drawHudTextPanel(ctx, rows, colors, textRenderer, settings = {}) {
   const padding = HUD_PANEL_PADDING;
   const textOptions = {
     fontSize: 8,
@@ -4406,7 +4664,7 @@ function drawHudTextPanel(ctx, rows, colors, textRenderer) {
     HUD_PANEL_MIN_WIDTH,
     ...rows.map((row) => textRenderer.measure(row, textOptions) + padding * 2)
   );
-  const panel = mainHudPanelRect(ctx, width, hudPanelHeightForRows(rows.length));
+  const panel = mainHudPanelRect(ctx, width, hudPanelHeightForRows(rows.length), settings);
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   rows.forEach((row, index) => {
@@ -4424,7 +4682,7 @@ function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
     return;
   }
 
-  const panel = mainHudPanelRect(ctx, HUD_PANEL_MIN_WIDTH, hudPanelHeightForRows(2));
+  const panel = mainHudPanelRect(ctx, HUD_PANEL_MIN_WIDTH, hudPanelHeightForRows(2), options.settings);
   const padding = HUD_PANEL_PADDING;
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   textRenderer.draw(ctx, "CONFIRM LEAVE?", panel.x + padding, panel.y + padding, {
@@ -4440,7 +4698,8 @@ function drawLeaveConfirmHud(ctx, leaveConfirm, options, colors, textRenderer) {
     leaveConfirm.progress,
     colors
   );
-  drawTerminalConfirmLeaveAction(ctx, panel.x + 2, panel.y + panel.height + HUD_PANEL_ACTION_GAP, options, colors, textRenderer);
+  const actionPosition = hudPanelActionPosition(ctx, panel, 0, 1, options.settings, terminalActionLineStep(options));
+  drawTerminalConfirmLeaveAction(ctx, actionPosition.x, actionPosition.y, options, colors, textRenderer);
 }
 
 function drawLeaveConfirmFuse(ctx, x, y, width, progress, colors) {
@@ -5769,7 +6028,8 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
   const panel = mainHudPanelRect(
     ctx,
     ENDED_HUD_LAYOUT.width,
-    endedHudPanelHeight(rowCount, resetSeconds !== null)
+    endedHudPanelHeight(rowCount, resetSeconds !== null),
+    options.settings
   );
   const textOptions = {
     fontSize: 8,
@@ -5832,7 +6092,8 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
       width: panel.width - padding * 2
     });
   }
-  drawTerminalLeaveAction(ctx, panel.x + 2, panel.y + panel.height + HUD_PANEL_ACTION_GAP, options, colors, textRenderer);
+  const actionPosition = hudPanelActionPosition(ctx, panel, 0, 1, options.settings, terminalActionLineStep(options));
+  drawTerminalLeaveAction(ctx, actionPosition.x, actionPosition.y, options, colors, textRenderer);
 }
 
 function endedHudPanelHeight(rowCount, hasCountdown) {
@@ -5941,7 +6202,7 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
   };
 
   if (options.mobileActive) {
-    textRenderer.draw(ctx, "LEAVE", 10, mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT) + 2, {
+    textRenderer.draw(ctx, "LEAVE", HUD_EDGE_INSET, mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT) + 2, {
       ...textOptions,
       width: 96
     });
@@ -10141,8 +10402,9 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   const header = String(layout.header || "").trim().toUpperCase();
   const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
   const width = HUD_PANEL_MIN_WIDTH;
-  const height = playerHudPanelHeight(header);
-  const panel = mainHudPanelRect(ctx, width, height);
+  const voiceRow = voiceHudEnabled(layout.settings);
+  const height = playerHudPanelHeight(header, layout.settings);
+  const panel = mainHudPanelRect(ctx, width, height, layout.settings);
   if (Number.isFinite(layout.x)) {
     panel.x = Math.round(layout.x);
   }
@@ -10199,29 +10461,70 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     })) {
       drawHudMessage(ctx, `${killDropAmount} DIAMOND${killDropAmount === 1 ? "" : "S"}`, contentX, rowY + rowStep * 3, textRenderer, colors);
     }
+    if (voiceRow) {
+      drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors);
+    }
     return panel;
   }
 
   drawHudKillRow(ctx, player.kills || 0, playersLeft, contentX, contentRight, rowY + rowStep * 3, textRenderer, colors);
+  if (voiceRow) {
+    drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors);
+  }
   return panel;
 }
 
 function mobilePlayerHudLayout(ctx, options = {}) {
   if (!options.mobileActive) {
-    return {};
+    return {
+      settings: options.settings
+    };
   }
 
   return {
-    x: Math.max(8, mobileHudVisibleWidth(ctx) - HUD_PANEL_MIN_WIDTH - 8),
-    y: mobileHudBottomY(ctx, playerHudPanelHeight())
+    x: Math.max(HUD_EDGE_INSET, mobileHudVisibleWidth(ctx) - HUD_PANEL_MIN_WIDTH - HUD_EDGE_INSET),
+    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings)),
+    settings: options.settings
   };
 }
 
-function mainHudPanelRect(ctx, width, height) {
+function voiceHudEnabled(settings = {}) {
+  return settings?.voiceChat !== false &&
+    Number(settings?.masterVolume ?? 1) * Number(settings?.voiceVolume ?? 1) > 0;
+}
+
+function hudLocation(settings = {}) {
+  return settings?.hudLocation || settings?.controlsPlacement || "top-left";
+}
+
+function hudStacksUp(settings = {}) {
+  return mobileControlsActiveForRender() || hudLocation(settings) === "bottom";
+}
+
+function mainHudPanelRect(ctx, width, height, settings = {}) {
   const right = mobileControlsActiveForRender() ? mobileHudVisibleWidth(ctx) : ctx.width;
+  const placement = mobileControlsActiveForRender() ? "bottom" : hudLocation(settings);
+  if (placement === "top") {
+    return {
+      x: Math.max(HUD_EDGE_INSET, right - width - HUD_EDGE_INSET),
+      y: HUD_EDGE_INSET,
+      width,
+      height
+    };
+  }
+
+  if (placement === "bottom") {
+    return {
+      x: Math.max(HUD_EDGE_INSET, right - width - HUD_EDGE_INSET),
+      y: Math.max(HUD_EDGE_INSET, mobileHudVisibleHeight(ctx) - height - HUD_EDGE_INSET),
+      width,
+      height
+    };
+  }
+
   return {
-    x: mobileControlsActiveForRender() ? Math.max(8, right - width - 8) : 8,
-    y: mobileControlsActiveForRender() ? mobileHudBottomY(ctx, height) : 8,
+    x: HUD_EDGE_INSET,
+    y: HUD_EDGE_INSET,
     width,
     height
   };
@@ -10240,13 +10543,13 @@ function mobileHudBottomY(ctx, height, inset = MOBILE_HUD_EDGE_INSET) {
 }
 
 function mobileHudControlBlockY(ctx, blockHeight) {
-  return mobileHudBottomY(ctx, Math.max(MOBILE_HUD_ACTION_HEIGHT, blockHeight));
+  return mobileHudBottomY(ctx, Math.max(HUD_CONTROL_VISIBLE_HEIGHT, blockHeight));
 }
 
 function mobileControlListHeight(lineCount, lineStep = MOBILE_CONTROL_LINE_STEP) {
   return Math.max(
-    MOBILE_HUD_ACTION_HEIGHT,
-    Math.max(0, Math.floor(lineCount) - 1) * lineStep + MOBILE_HUD_ACTION_HEIGHT
+    HUD_CONTROL_VISIBLE_HEIGHT,
+    Math.max(0, Math.floor(lineCount) - 1) * lineStep + HUD_CONTROL_VISIBLE_HEIGHT
   );
 }
 
@@ -10268,8 +10571,10 @@ function mobileArenaActionKinds(mapFeatureEnabled = true, leaveVisible = true) {
   return kinds;
 }
 
-function playerHudPanelHeight(header = "") {
-  return 58 + (String(header || "").trim() ? HUD_PANEL_ROW_STEP : 0);
+function playerHudPanelHeight(header = "", settings = {}) {
+  return 58 +
+    (String(header || "").trim() ? HUD_PANEL_ROW_STEP : 0) +
+    (voiceHudEnabled(settings) ? HUD_PANEL_ROW_STEP : 0);
 }
 
 function hudPanelHeightForRows(rowCount) {
@@ -10278,23 +10583,84 @@ function hudPanelHeightForRows(rowCount) {
     Math.max(0, Math.floor(rowCount) - 1) * HUD_PANEL_ROW_STEP;
 }
 
-function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true) {
+function hudControlPosition(ctx, index, settings = {}, options = {}) {
+  const placement = mobileControlsActiveForRender() ? "bottom" : hudLocation(settings);
+  const step = Math.max(1, Math.floor(Number(options.lineStep) || 14));
+  const lineHeight = Math.max(1, Math.min(step, Math.floor(Number(options.lineHeight) || HUD_CONTROL_VISIBLE_HEIGHT)));
+  const count = Math.max(1, Math.floor(Number(options.count) || 3));
+  const panelHeight = Math.max(1, Math.floor(Number(options.panelHeight) || playerHudPanelHeight("", settings)));
+  if (placement === "top") {
+    return {
+      x: HUD_EDGE_INSET,
+      y: HUD_EDGE_INSET + index * step
+    };
+  }
+
+  if (placement === "bottom") {
+    const rowIndex = Math.max(0, Math.min(count - 1, Math.floor(Number(index) || 0)));
+    return {
+      x: HUD_EDGE_INSET,
+      y: Math.max(HUD_EDGE_INSET, mobileHudVisibleHeight(ctx) - HUD_EDGE_INSET - lineHeight - rowIndex * step)
+    };
+  }
+
+  const panel = mainHudPanelRect(ctx, HUD_PANEL_MIN_WIDTH, panelHeight, settings);
+  return {
+    x: panel.x + 2,
+    y: panel.y + panel.height + HUD_PANEL_ACTION_GAP + index * step
+  };
+}
+
+function hudPanelActionPosition(ctx, panel, index = 0, count = 1, settings = {}, lineStep = 14) {
+  const placement = mobileControlsActiveForRender() ? "bottom" : hudLocation(settings);
+  if (placement === "top") {
+    return hudControlPosition(ctx, index, settings, { count, lineStep });
+  }
+
+  if (placement === "bottom") {
+    const step = Math.max(1, Math.floor(Number(lineStep) || 14));
+    const lineHeight = bottomActionLineHeight(step);
+    const lineCount = Math.max(1, Math.floor(Number(count) || 1));
+    const blockHeight = lineHeight + Math.max(0, lineCount - 1) * step;
+    return {
+      x: HUD_EDGE_INSET,
+      y: Math.max(HUD_EDGE_INSET, mobileHudVisibleHeight(ctx) - HUD_EDGE_INSET - blockHeight + index * step)
+    };
+  }
+
+  return {
+    x: (panel?.x ?? HUD_EDGE_INSET) + 2,
+    y: (panel?.y ?? HUD_EDGE_INSET) + (panel?.height ?? 0) + HUD_PANEL_ACTION_GAP + index * lineStep
+  };
+}
+
+function bottomActionLineHeight(lineStep) {
+  const step = Math.max(1, Math.floor(Number(lineStep) || 14));
+  return Math.max(1, Math.min(step, step >= 15 ? CONTROLLER_HUD_CONTROL_HEIGHT : HUD_CONTROL_VISIBLE_HEIGHT));
+}
+
+function terminalActionLineStep(options = {}) {
+  return options.controllerActive ? 15 : 14;
+}
+
+function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}) {
   if (!player) {
     return;
   }
 
   if (!upgradesUi?.active) {
     if (mobileActive) {
-      drawMobileHudAction(ctx, "UPGRADES", 10, mobileArenaControlY(ctx, "upgrades", mapFeatureEnabled), colors, textRenderer);
+      drawMobileHudAction(ctx, "UPGRADES", HUD_EDGE_INSET, mobileArenaControlY(ctx, "upgrades", mapFeatureEnabled), colors, textRenderer);
       return;
     }
 
+    const position = hudControlPosition(ctx, 0, settings, controllerHudPositionOptions({ controllerActive }));
     if (controllerActive) {
-      drawControllerHudAction(ctx, "faceTop", "UPGRADES", 10, 74, colors, textRenderer);
+      drawControllerHudAction(ctx, "faceTop", "UPGRADES", position.x, position.y, colors, textRenderer);
       return;
     }
 
-    textRenderer.draw(ctx, "Q - UPGRADES", 10, 74, {
+    textRenderer.draw(ctx, "Q - UPGRADES", position.x, position.y, {
       fontSize: 8,
       color: colors.foreground,
       ...HUD_CONTROL_TEXT_BORDER
@@ -10305,7 +10671,7 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
   drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive, mobileActive);
 }
 
-function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true) {
+function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}) {
   if (!player || upgradesUi?.active) {
     return;
   }
@@ -10314,7 +10680,7 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
     drawMobileHudAction(
       ctx,
       buildUi?.active ? "MINING RAY" : "BUILDER ARM",
-      10,
+      HUD_EDGE_INSET,
       mobileArenaControlY(ctx, "build", mapFeatureEnabled),
       colors,
       textRenderer
@@ -10322,42 +10688,44 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
     return;
   }
 
+  const position = hudControlPosition(ctx, 1, settings, controllerHudPositionOptions({ controllerActive }));
   if (controllerActive) {
     drawControllerHudAction(
       ctx,
       "faceLeft",
       buildUi?.active ? "MINING RAY" : "BUILDER ARM",
-      10,
-      92,
+      position.x,
+      position.y,
       colors,
       textRenderer
     );
     return;
   }
 
-  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", 10, 88, {
+  textRenderer.draw(ctx, buildUi?.active ? "E - MINING RAY" : "E - BUILDER ARM", position.x, position.y, {
     fontSize: 8,
     color: colors.foreground,
     ...HUD_CONTROL_TEXT_BORDER
   });
 }
 
-function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true) {
+function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}) {
   if (!mapFeatureEnabled || !player || upgradesUi?.active) {
     return;
   }
 
   if (mobileActive) {
-    drawMobileHudAction(ctx, "MAP", 10, mobileArenaControlY(ctx, "map", mapFeatureEnabled), colors, textRenderer);
+    drawMobileHudAction(ctx, "MAP", HUD_EDGE_INSET, mobileArenaControlY(ctx, "map", mapFeatureEnabled), colors, textRenderer);
     return;
   }
 
+  const position = hudControlPosition(ctx, 2, settings, controllerHudPositionOptions({ controllerActive }));
   if (controllerActive) {
-    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", 10, 110, colors, textRenderer);
+    drawControllerDpadHudAction(ctx, "dpadUp", "MAP", position.x, position.y, colors, textRenderer);
     return;
   }
 
-  textRenderer.draw(ctx, "M - MAP", 10, 102, {
+  textRenderer.draw(ctx, "M - MAP", position.x, position.y, {
     fontSize: 8,
     color: colors.foreground,
     ...HUD_CONTROL_TEXT_BORDER
@@ -10369,7 +10737,11 @@ function drawMobileLeaveHud(ctx, player, options, colors, textRenderer) {
     return;
   }
 
-  drawMobileHudAction(ctx, "LEAVE", 10, mobileArenaControlY(ctx, "leave", options.playerMapFeatureEnabled, true), colors, textRenderer);
+  drawMobileHudAction(ctx, "LEAVE", HUD_EDGE_INSET, mobileArenaControlY(ctx, "leave", options.playerMapFeatureEnabled, true), colors, textRenderer);
+}
+
+function controllerHudPositionOptions(options = {}) {
+  return options.controllerActive ? { lineHeight: CONTROLLER_HUD_CONTROL_HEIGHT } : {};
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
