@@ -175,12 +175,12 @@ const THRUSTER_ENGINE_MAX_LEVEL =
 const THRUSTER_ENGINE_RAMP = Object.freeze({
   rateMin: 1,
   rateMax: 2,
-  plumeSpeedMin: 0.5,
-  plumeSpeedMax: 1,
+  plumeSpeedMin: 0.3,
+  plumeSpeedMax: 0.7,
   lifeMin: 1,
   lifeMax: 1,
-  nozzleMin: 0.5,
-  nozzleMax: 0.67,
+  nozzleMin: 0.33,
+  nozzleMax: 0.5,
 });
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
@@ -4725,7 +4725,7 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
 
   if (spectatedPlayer && spectatedPlayer.id !== localPlayer?.id) {
     const header = spectatorHeaderForPlayer(spectatedPlayer);
-    const spectatedHeight = playerHudPanelHeight(header, options.settings);
+    const spectatedHeight = playerHudPanelHeight(header, options.settings, options.voiceHudActive);
     stackPanel = drawPlayerHud(
       ctx,
       spectatedPlayer,
@@ -4737,6 +4737,7 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
       {
         header,
         settings: options.settings,
+        voiceHudActive: options.voiceHudActive,
         y: stackPanel
           ? options.mobileActive || hudStacksUp(options.settings)
             ? Math.max(HUD_EDGE_INSET, stackPanel.y - spectatedHeight - 6)
@@ -7107,6 +7108,8 @@ function drawAsteroidTiles(
   drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility);
 
   const drawResources = () => {
+    const carResources = gameMode === GAME_MODES.cars;
+    ctx.fillStyle = colors.foreground;
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
         const index = tileY * asteroid.widthTiles + tileX;
@@ -7118,7 +7121,7 @@ function drawAsteroidTiles(
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
         if (tile === ASTEROID_TILE.ore) {
-          ctx.fillStyle = colors.ore || colors.foreground;
+          ctx.fillStyle = carResources ? colors.ore || colors.foreground : colors.foreground;
           const amount = amountAt(asteroid, index);
           drawOreRings(
             ctx,
@@ -7128,7 +7131,7 @@ function drawAsteroidTiles(
             amount,
             hashCell(asteroid.seed, tileX, tileY),
             oreMiningProgressFor(asteroidMiningTargets, index, amount),
-            gameMode === GAME_MODES.cars
+            carResources
               ? {
                   fillColor: colors.ore || colors.foreground,
                   strokeColor: colors.backing || colors.foreground
@@ -7136,7 +7139,7 @@ function drawAsteroidTiles(
               : null
           );
         } else if (tile === ASTEROID_TILE.diamond) {
-          ctx.fillStyle = colors.diamond || colors.foreground;
+          ctx.fillStyle = carResources ? colors.diamond || colors.foreground : colors.foreground;
           drawDiamondWireframe(
             ctx,
             screenX,
@@ -7144,7 +7147,7 @@ function drawAsteroidTiles(
             tileSize,
             hashCell(asteroid.seed, tileX, tileY),
             diamondMiningProgressFor(asteroidMiningTargets, index),
-            gameMode === GAME_MODES.cars
+            carResources
               ? {
                   fillColor: colors.diamond || colors.foreground,
                   edgeColor: colors.backing || colors.foreground,
@@ -9114,7 +9117,7 @@ function diamondMiningProgressFor(targets, index) {
 function drawOreRings(ctx, tileX, tileY, size, amount, hash, miningProgress = null, options = null) {
   const pieces = buildOrePieces(tileX, tileY, size, amount, hash, miningProgress);
   const drawOrder = [...pieces].sort((a, b) => a.depth - b.depth);
-  const strokeColor = options?.strokeColor || ctx.fillStyle;
+  const strokeColor = options?.strokeColor || null;
 
   for (const piece of drawOrder) {
     const occluders = pieces
@@ -11026,8 +11029,8 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   const header = String(layout.header || "").trim().toUpperCase();
   const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
   const width = HUD_PANEL_MIN_WIDTH;
-  const voiceRow = voiceHudEnabled(layout.settings);
-  const height = playerHudPanelHeight(header, layout.settings);
+  const voiceRow = voiceHudEnabled(layout.settings, layout.voiceHudActive);
+  const height = playerHudPanelHeight(header, layout.settings, layout.voiceHudActive);
   const panel = mainHudPanelRect(ctx, width, height, layout.settings);
   if (Number.isFinite(layout.x)) {
     panel.x = Math.round(layout.x);
@@ -11101,20 +11104,23 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
 function mobilePlayerHudLayout(ctx, options = {}) {
   if (!options.mobileActive) {
     return {
-      settings: options.settings
+      settings: options.settings,
+      voiceHudActive: options.voiceHudActive
     };
   }
 
   return {
     x: Math.max(HUD_EDGE_INSET, mobileHudVisibleWidth(ctx) - HUD_PANEL_MIN_WIDTH - HUD_EDGE_INSET),
-    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings)),
-    settings: options.settings
+    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings, options.voiceHudActive)),
+    settings: options.settings,
+    voiceHudActive: options.voiceHudActive
   };
 }
 
-function voiceHudEnabled(settings = {}) {
+function voiceHudEnabled(settings = {}, voiceHudActive = false) {
   return settings?.voiceChat !== false &&
-    Number(settings?.masterVolume ?? 1) * Number(settings?.voiceVolume ?? 1) > 0;
+    Number(settings?.masterVolume ?? 1) * Number(settings?.voiceVolume ?? 1) > 0 &&
+    voiceHudActive === true;
 }
 
 function hudLocation(settings = {}) {
@@ -11195,10 +11201,10 @@ function mobileArenaActionKinds(mapFeatureEnabled = true, leaveVisible = true) {
   return kinds;
 }
 
-function playerHudPanelHeight(header = "", settings = {}) {
+function playerHudPanelHeight(header = "", settings = {}, voiceHudActive = false) {
   return 58 +
     (String(header || "").trim() ? HUD_PANEL_ROW_STEP : 0) +
-    (voiceHudEnabled(settings) ? HUD_PANEL_ROW_STEP : 0);
+    (voiceHudEnabled(settings, voiceHudActive) ? HUD_PANEL_ROW_STEP : 0);
 }
 
 function hudPanelHeightForRows(rowCount) {
@@ -11924,8 +11930,8 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
       state.particles.push({
         x: origin.x + side.x * sideJitter + rear.x * (capOffset + rearJitter),
         y: origin.y + side.y * sideJitter + rear.y * (capOffset + rearJitter),
-        vx: (player.vx || 0) + rear.x * speed + side.x * spread,
-        vy: (player.vy || 0) + rear.y * speed + side.y * spread,
+        vx: rear.x * speed + side.x * spread,
+        vy: rear.y * speed + side.y * spread,
         age: randomUnit(seed, 6) * 0.025,
         life,
         seed

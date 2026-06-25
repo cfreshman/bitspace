@@ -2150,6 +2150,7 @@ function draw(now = 0) {
     theme: state.theme,
     themeName: themeLabelForTheme(state.theme),
     settings: state.settings,
+    voiceHudActive: voiceHudActive(),
     settingsUi: state.settingsUi,
     timeSeconds,
     measurePerf: state.perfDebug.enabled
@@ -7879,6 +7880,59 @@ function voicePeerCurrentGain(peer, now) {
     return targetGain;
   }
   return Number(peer?.voiceCurrentGain ?? 0);
+}
+
+function voiceHudActive() {
+  if (!voiceRoomJoinAllowed() || !voice.joined) {
+    return false;
+  }
+
+  if (voiceMicOutputActive()) {
+    return true;
+  }
+
+  return voiceRemoteOutputActive();
+}
+
+function voiceMicOutputActive() {
+  const tracks = voice.localStream?.getAudioTracks?.() || [];
+  return tracks.some((track) => (
+    track.readyState === "live" &&
+    track.enabled === true &&
+    track.muted !== true
+  ));
+}
+
+function voiceRemoteOutputActive() {
+  if (!voiceRoomJoinAllowed() || !voice.joined || voice.peers.size <= 0) {
+    return false;
+  }
+
+  const context = audio.context;
+  if (!context || context.state !== "running") {
+    return false;
+  }
+
+  const now = context.currentTime;
+  for (const peer of voice.peers.values()) {
+    const connectionState = peer.pc?.connectionState;
+    const iceState = peer.pc?.iceConnectionState;
+    const connected = connectionState === "connected" ||
+      connectionState === "completed" ||
+      iceState === "connected" ||
+      iceState === "completed";
+    if (!connected || !peer.gain || peer.remoteStream?.getAudioTracks().length <= 0) {
+      continue;
+    }
+
+    const currentGain = voicePeerCurrentGain(peer, now);
+    const targetGain = Number(peer.voiceTargetGain || peer.voiceRampTargetGain || 0);
+    if (Math.max(currentGain, targetGain) > 0.001) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function voiceDebugSnapshot() {
