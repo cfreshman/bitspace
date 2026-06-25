@@ -89,6 +89,7 @@ const WORLD_LENS_EDGE_SCALE = RENDER.lensEdgeScale || 1;
 const WORLD_LENS_POWER = RENDER.lensPower || 2;
 const ENGINE_AUDIO_MAX_GAIN = 0.032;
 const MINING_AUDIO_MAX_GAIN = 0.0066;
+const AUDIO_UNLOCK_FADE_SECONDS = 0.12;
 const AUDIO_CLUNK_COOLDOWN_SECONDS = 0.16;
 const AUDIO_COLLISION_CLUNK_SPEED = 18;
 const AUDIO_ROCK_THUMP_COOLDOWN_SECONDS = 0.14;
@@ -99,6 +100,7 @@ const VOICE_GAIN_FADE_OUT_SECONDS = 1;
 const VOICE_RETRY_DELAY_MS = 5000;
 const VOICE_PEER_REFRESH_MS = 2500;
 const VOICE_MAX_TARGET_CHECKS = 5;
+const VOICE_MIC_AUTO_START_DELAY_MS = 650;
 const VOICE_RTC_CONFIGURATION = Object.freeze({
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" }
@@ -143,6 +145,7 @@ const MUSIC_TRACKS = Object.freeze({
 const MUSIC_TRACK_FULL_VOLUME_SETTING = 0.5;
 const MUSIC_VISIBLE_OTHER_HOLD_MS = 2500;
 const MUSIC_CROSSFADE_SECONDS = 0.16;
+const MUSIC_FIRST_START_FADE_SECONDS = 0.55;
 const MUSIC_ROOM_START_FORCE_ARENA_MS = 750;
 const MUSIC_ROOM_START_CROSSFADE_SECONDS = 0.045;
 const MENU_ROOMS = Object.freeze({
@@ -302,6 +305,7 @@ const storedClientSecret = getClientSecret();
 const inputSessionId = randomClientSecret();
 const audio = {
   context: null,
+  masterOutput: null,
   unlocked: false,
   pendingBeeps: 0,
   pendingMelodies: [],
@@ -325,6 +329,7 @@ const audio = {
     gain: null,
     currentKey: "",
     lastPlayAttemptAtMs: 0,
+    firstStartPending: true,
     visibleOtherUntilMs: 0,
     forceArenaUntilMs: 0,
     fastSwitchUntilMs: 0
@@ -345,6 +350,7 @@ const voice = {
   localSource: null,
   localAnalyser: null,
   localZeroGain: null,
+  micStartTimer: null,
   peers: new Map()
 };
 const state = {
@@ -7139,7 +7145,7 @@ function syncVoiceRoomState() {
   const roomId = state.room?.roomId || null;
   if (voice.joined && voice.roomId === roomId) {
     if (voice.userGesture && voiceMicCaptureAllowed()) {
-      startVoiceMicrophone();
+      scheduleVoiceMicrophoneStart();
     } else if (!voiceMicCaptureAllowed() && voice.localStream) {
       stopVoiceMicrophone();
     }
@@ -7236,7 +7242,7 @@ async function startVoiceRoom() {
   voice.starting = true;
   try {
     if (voice.userGesture && voiceMicCaptureAllowed() && !voice.localStream) {
-      await startVoiceMicrophone({ restartPeers: false });
+      scheduleVoiceMicrophoneStart();
     }
 
     voice.failed = false;
@@ -7255,7 +7261,36 @@ async function startVoiceRoom() {
   }
 }
 
+function scheduleVoiceMicrophoneStart(options = {}) {
+  if (
+    voice.micStartTimer ||
+    voice.localStream ||
+    voice.micStarting ||
+    !voice.userGesture ||
+    !voiceRoomJoinAllowed() ||
+    !voiceMicCaptureAllowed()
+  ) {
+    return;
+  }
+
+  const delayMs = Math.max(0, Number(options.delayMs ?? VOICE_MIC_AUTO_START_DELAY_MS) || 0);
+  voice.micStartTimer = window.setTimeout(() => {
+    voice.micStartTimer = null;
+    startVoiceMicrophone(options);
+  }, delayMs);
+}
+
+function clearVoiceMicrophoneStartTimer() {
+  if (!voice.micStartTimer) {
+    return;
+  }
+
+  window.clearTimeout(voice.micStartTimer);
+  voice.micStartTimer = null;
+}
+
 async function startVoiceMicrophone(options = {}) {
+  clearVoiceMicrophoneStartTimer();
   if (
     voice.localStream ||
     voice.micStarting ||
@@ -7411,6 +7446,7 @@ function announceVoiceJoin(options = {}) {
 function stopVoiceRoom(options = {}) {
   const notify = options.notify !== false;
   const keepGesture = options.keepGesture === true;
+  clearVoiceMicrophoneStartTimer();
   if (notify && voice.joined && socket.connected) {
     socket.emit(CLIENT_EVENTS.voiceLeave);
   }
@@ -7433,6 +7469,7 @@ function stopVoiceRoom(options = {}) {
 }
 
 function stopVoiceMicrophone(options = {}) {
+  clearVoiceMicrophoneStartTimer();
   if (!voice.localStream && !voice.localSource && !voice.localAnalyser && !voice.micStarting && !voice.micAttempted && !voice.micError) {
     return;
   }
@@ -8027,6 +8064,7 @@ function voiceDebugSnapshot() {
     failed: voice.failed,
     micAttempted: voice.micAttempted,
     micStarting: voice.micStarting,
+    micStartPending: Boolean(voice.micStartTimer),
     micError: voice.micError,
     retryInMs: voice.retryAtMs ? Math.max(0, Math.round(voice.retryAtMs - performance.now())) : 0,
     roomId: voice.roomId,
@@ -8165,14 +8203,21 @@ function unlockAudio() {
   }
 
   audio.context = context;
+  ensureAudioMasterOutput(context);
   if (context.state === "suspended") {
     context.resume()
-      .then(flushPendingAudio)
+      .then(() => finishAudioUnlock(context))
       .catch(() => {});
   } else {
-    flushPendingAudio();
+    finishAudioUnlock(context);
   }
+}
+
+function finishAudioUnlock(context) {
   audio.unlocked = true;
+  audio.music.firstStartPending = true;
+  rampAudioMasterOutput(context);
+  flushPendingAudio();
   updateMusicPlayback({ force: true });
 }
 
@@ -8183,6 +8228,38 @@ function createAudioContext() {
   }
 
   return new AudioContextClass();
+}
+
+function ensureAudioMasterOutput(context) {
+  if (!context) {
+    return null;
+  }
+  if (audio.masterOutput?.context === context) {
+    return audio.masterOutput;
+  }
+
+  const gain = context.createGain();
+  gain.gain.value = audio.unlocked ? 1 : 0;
+  gain.connect(context.destination);
+  audio.masterOutput = gain;
+  return gain;
+}
+
+function audioOutputNode(context) {
+  return ensureAudioMasterOutput(context) || context.destination;
+}
+
+function rampAudioMasterOutput(context) {
+  const output = ensureAudioMasterOutput(context);
+  if (!output) {
+    return;
+  }
+
+  const now = context.currentTime || 0;
+  const current = clamp(Number(output.gain.value || 0), 0, 1);
+  output.gain.cancelScheduledValues(now);
+  output.gain.setValueAtTime(current, now);
+  output.gain.linearRampToValueAtTime(1, now + AUDIO_UNLOCK_FADE_SECONDS);
 }
 
 function requestMechanicalBeep() {
@@ -8357,7 +8434,7 @@ function playTrumpetTone(context, frequency, start, duration, volume) {
   oscillator.connect(filter);
   overtone.connect(filter);
   filter.connect(gain);
-  gain.connect(context.destination);
+  gain.connect(audioOutputNode(context));
   oscillator.start(start);
   overtone.start(start);
   oscillator.stop(start + duration + 0.03);
@@ -8384,7 +8461,7 @@ function playDefeatTone(context, frequency, start, duration, volume) {
 
   oscillator.connect(filter);
   filter.connect(gain);
-  gain.connect(context.destination);
+  gain.connect(audioOutputNode(context));
   oscillator.start(start);
   oscillator.stop(start + duration + 0.03);
 }
@@ -8412,7 +8489,7 @@ function playVolumePreviewTone(context, id) {
   gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, 0.06 * scale), start + 0.01);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
   oscillator.connect(gain);
-  gain.connect(context.destination);
+  gain.connect(audioOutputNode(context));
   oscillator.start(start);
   oscillator.stop(start + 0.14);
 }
@@ -8427,7 +8504,7 @@ function playMechanicalTone(context, frequency, start, duration, volume) {
   gain.gain.exponentialRampToValueAtTime(effectGain(volume), start + 0.008);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
   oscillator.connect(gain);
-  gain.connect(context.destination);
+  gain.connect(audioOutputNode(context));
   oscillator.start(start);
   oscillator.stop(start + duration + 0.02);
 }
@@ -8553,7 +8630,7 @@ function ensureMusicAudio() {
   audio.context = context;
   const gain = context.createGain();
   gain.gain.value = musicVolumeScale();
-  gain.connect(context.destination);
+  gain.connect(audioOutputNode(context));
   const tracks = new Map();
 
   for (const [key, src] of Object.entries(MUSIC_TRACKS)) {
@@ -8595,8 +8672,10 @@ function updateMusicPlayback(options = {}) {
   const gain = musicVolumeScale();
   if (music.gain) {
     const now = context.currentTime || 0;
-    if (typeof music.gain.gain.setTargetAtTime === "function") {
-      music.gain.gain.setTargetAtTime(gain, now, 0.03);
+    if (typeof music.gain.gain.linearRampToValueAtTime === "function") {
+      music.gain.gain.cancelScheduledValues(now);
+      music.gain.gain.setValueAtTime(clamp(Number(music.gain.gain.value || 0), 0, 2), now);
+      music.gain.gain.linearRampToValueAtTime(gain, now + 0.08);
     } else {
       music.gain.gain.value = gain;
     }
@@ -8622,19 +8701,26 @@ function updateMusicPlayback(options = {}) {
   const switchFadeSeconds = desiredKey === "arena" && nowMs <= music.fastSwitchUntilMs
     ? MUSIC_ROOM_START_CROSSFADE_SECONDS
     : MUSIC_CROSSFADE_SECONDS;
-  setMusicTrackGains(desiredKey, previousKey && previousKey !== desiredKey ? switchFadeSeconds : 0.04);
-  startMusicTracks(options.force === true, nowMs);
+  const firstStartFadeSeconds = audio.music.firstStartPending
+    ? MUSIC_FIRST_START_FADE_SECONDS
+    : 0.04;
+  setMusicTrackGains(desiredKey, previousKey && previousKey !== desiredKey ? switchFadeSeconds : firstStartFadeSeconds);
+  startMusicTracks(desiredKey, options.force === true, nowMs);
+  audio.music.firstStartPending = false;
   return musicTrackIsPlaying(desiredKey);
 }
 
-function startMusicTracks(force = false, nowMs = performance.now()) {
+function startMusicTracks(activeKey, force = false, nowMs = performance.now()) {
   const tracks = audio.music.tracks;
   if (!tracks) {
     return false;
   }
 
-  const pausedTracks = Array.from(tracks.values()).filter((track) => track.element.paused);
-  if (pausedTracks.length <= 0) {
+  const track = tracks.get(activeKey);
+  if (!track) {
+    return false;
+  }
+  if (!track.element.paused) {
     return true;
   }
 
@@ -8646,9 +8732,7 @@ function startMusicTracks(force = false, nowMs = performance.now()) {
   }
 
   audio.music.lastPlayAttemptAtMs = nowMs;
-  for (const track of pausedTracks) {
-    track.element.play().catch(() => {});
-  }
+  track.element.play().catch(() => {});
   return true;
 }
 
@@ -8680,8 +8764,9 @@ function setMusicTrackGains(activeKey, fadeSeconds = MUSIC_CROSSFADE_SECONDS) {
     if (typeof gain.cancelScheduledValues === "function") {
       gain.cancelScheduledValues(now);
     }
-    if (typeof gain.setTargetAtTime === "function") {
-      gain.setTargetAtTime(target, now, Math.max(0.01, fadeSeconds * 0.25));
+    if (typeof gain.linearRampToValueAtTime === "function") {
+      gain.setValueAtTime(clamp(Number(gain.value || 0), 0, 1), now);
+      gain.linearRampToValueAtTime(target, now + Math.max(0.01, fadeSeconds));
     } else {
       gain.value = target;
     }
@@ -8736,10 +8821,10 @@ function playHuckRockThunk(context) {
   strikeGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.09);
 
   body.connect(bodyGain);
-  bodyGain.connect(context.destination);
+  bodyGain.connect(audioOutputNode(context));
   strike.connect(strikeFilter);
   strikeFilter.connect(strikeGain);
-  strikeGain.connect(context.destination);
+  strikeGain.connect(audioOutputNode(context));
   body.start(start);
   body.stop(start + 0.24);
   strike.start(start);
@@ -8911,10 +8996,10 @@ function ensureShipAudio(context) {
   engineOscillator.connect(engineOscillatorGain);
   engineOscillatorGain.connect(engineFilter);
   engineFilter.connect(engineGain);
-  engineGain.connect(context.destination);
+  engineGain.connect(audioOutputNode(context));
 
   miningGain.gain.value = 0.0001;
-  miningGain.connect(context.destination);
+  miningGain.connect(audioOutputNode(context));
 
   engineNoise.start();
   engineOscillator.start();
@@ -9026,9 +9111,9 @@ function playLocalClunk(context, intensity) {
 
   noise.connect(noiseFilter);
   noiseFilter.connect(noiseGain);
-  noiseGain.connect(context.destination);
+  noiseGain.connect(audioOutputNode(context));
   oscillator.connect(oscillatorGain);
-  oscillatorGain.connect(context.destination);
+  oscillatorGain.connect(audioOutputNode(context));
   noise.start(start);
   noise.stop(start + 0.15);
   oscillator.start(start);
@@ -9061,10 +9146,10 @@ function playRockThump(context, intensity) {
   brushGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
 
   body.connect(bodyGain);
-  bodyGain.connect(context.destination);
+  bodyGain.connect(audioOutputNode(context));
   brush.connect(brushFilter);
   brushFilter.connect(brushGain);
-  brushGain.connect(context.destination);
+  brushGain.connect(audioOutputNode(context));
   body.start(start);
   body.stop(start + 0.28);
   brush.start(start);

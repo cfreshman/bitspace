@@ -29,14 +29,16 @@ import {
 
 const ENTITY_PIXEL_SIZE = 1;
 const CAR_MODE_COLORS = Object.freeze({
-  foreground: "#ffe2b4",
-  background: "#b64d15",
-  backing: "#4a2118",
-  ore: "#8f8a80",
+  foreground: "#ffe69a",
+  background: "#c2531c",
+  backgroundDark: "#b96a1c",
+  backing: "#1f0d0a",
+  trueBacking: "#1f0d0a",
+  ore: "#c1aa7d",
   diamond: "#3fb8ff",
   diamondLight: "#b9f2ff",
   rockFill: "#9d512f",
-  rockLine: "#f2b86f",
+  rockLine: "#6c2d1c",
   wallFill: "#783624",
   wallLine: "#d78a52",
   rock: "#9d512f",
@@ -46,14 +48,14 @@ const CAR_MODE_COLORS = Object.freeze({
   health: "#28100c"
 });
 const CAR_BODY_COLORS = Object.freeze([
-  "#ff0000",
-  "#ff7f00",
-  "#ffff00",
-  "#00ff00",
-  "#00ffff",
-  "#0060ff",
-  "#7f00ff",
-  "#ff00a8"
+  "#ff1a12",
+  "#ff8a00",
+  "#ffd400",
+  "#18e84f",
+  "#00d9ff",
+  "#2458ff",
+  "#9a2cff",
+  "#ff2fc3"
 ]);
 const CAR_TIRE_COLOR = "#000000";
 const CAR_TIRE_LENGTH = 6;
@@ -61,21 +63,33 @@ const CAR_TIRE_WIDTH = 3;
 const CAR_CENTER_TIRE_LENGTH_SCALE = 1.36;
 const CAR_CENTER_TIRE_RADIUS_SCALE = 0.32;
 const CAR_CENTER_TIRE_TREAD_SPACING = 4;
-const CAR_BODY_LIGHT_MIX = 0.34;
-const CAR_BODY_MID_LIGHT_MIX = 0.14;
+const CAR_BODY_LIGHT_MIX = 0.24;
+const CAR_BODY_MID_LIGHT_MIX = 0.08;
 const CAR_BODY_MID_DARKEN = 0.76;
 const CAR_BODY_DARKEN = 0.54;
+const CAR_BODY_LEAN_VISUAL_SHIFT = 1.3;
 const CAR_ENGINE_NOZZLE_LENGTH = 4;
 const CAR_ENGINE_NOZZLE_WIDTH = 2;
+const CAR_ENGINE_NOZZLE_CENTER_REAR_OFFSET = 1;
 const CAR_ENGINE_SIDE_OFFSET_SCALE = 0.52;
+const CAR_ENGINE_PLUME_SIDE_OFFSET_SCALE = 1.18;
 const GROUND_DEBRIS_CELL_SIZE = 8;
 const GROUND_DEBRIS_DENSITY_MOD = 5;
 const GROUND_GRASS_DENSITY_MOD = 53;
 const GROUND_GRASS_COLORS = Object.freeze(["#5f7d37", "#6b8d3f", "#4f6f32"]);
 const GROUND_GRASS_SWAY_SPEED = 2.8;
 const TIRE_TRACK_LIFE_SECONDS = 8;
-const TIRE_TRACK_DARKEN_LEVELS = Object.freeze([0.86, 0.82, 0.78]);
+const TIRE_TRACK_BACKGROUND_MIXES = Object.freeze([0.16, 0.22, 0.28]);
 const TIRE_TRACK_STAMP_SIZE = 3;
+const CAR_THRUSTER_PARTICLE_KIND = "car-thruster";
+const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
+  "#ffffff",
+  "#fff6c8",
+  "#ffe04a",
+  "#ff9d2e",
+  "#e34a1f",
+  "#6c2d1c"
+]);
 
 function renderGameMode(snapshot, options = {}) {
   return snapshot?.mode || options.room?.mode || GAME_MODES.bitspace;
@@ -90,6 +104,22 @@ function colorsForGameMode(colors, gameMode) {
     ...colors,
     ...CAR_MODE_COLORS
   };
+}
+
+function trueBackingColor(colors) {
+  return colors.trueBacking || colors.backing || "#000000";
+}
+
+function rockOuterBevelRadiusForGameMode(gameMode = GAME_MODES.bitspace) {
+  return gameMode === GAME_MODES.cars
+    ? CAR_ROCK_OUTER_BEVEL_RADIUS
+    : ROCK_OUTER_CORNER_RADIUS;
+}
+
+function asteroidVisibilityOuterBevelRadiusForGameMode(gameMode = GAME_MODES.bitspace) {
+  return gameMode === GAME_MODES.cars
+    ? CAR_ROCK_OUTER_BEVEL_RADIUS
+    : ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS;
 }
 
 const CANVAS_EDGE_PADDING_EM = 1;
@@ -153,6 +183,10 @@ const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
 ]);
 const ROCK_OUTER_CORNER_RADIUS = Math.round(RENDER.tileSize / 3);
 const ROCK_INNER_CORNER_RADIUS = 1;
+const CAR_ROCK_OUTLINE_WIDTH = 8;
+const CAR_ROCK_OUTER_BEVEL_RADIUS = Math.max(1, ROCK_OUTER_CORNER_RADIUS - 1);
+const ROCK_BEVEL_INNER_EDGE_TOLERANCE = 0.25;
+const ROCK_INNER_BEVEL_ENDPOINT_TOLERANCE = 0.75;
 const ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS = Math.max(2, Math.ceil(ROCK_OUTER_CORNER_RADIUS * 0.5));
 const SMALL_ORB_RADIUS = 3;
 const REAR_ORBS = Object.freeze([
@@ -168,6 +202,7 @@ const SHIP_SPHERE_DITHER = Object.freeze([
 ]);
 const SHIP_SPHERE_LIGHT = Object.freeze(normalize3d(-0.42, -0.58, 0.7));
 const SHIP_VISUAL_ROTATION_SPEED = Math.PI * 4;
+const CAR_VISUAL_ROTATION_SPEED = SHIP_VISUAL_ROTATION_SPEED * 0.5;
 const THRUSTER_PARTICLE_RATE = 500;
 const THRUSTER_ENGINE_UPGRADE_ID = "speed";
 const THRUSTER_ENGINE_MAX_LEVEL =
@@ -182,6 +217,20 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   nozzleMin: 0.33,
   nozzleMax: 0.5,
 });
+const CAR_THRUSTER_ENGINE_RAMP = Object.freeze({
+  rateMin: 2,
+  rateMax: 5,
+  plumeSpeedMin: 2,
+  plumeSpeedMax: 5,
+  lifeMin: 0.5,
+  lifeMax: 1,
+  nozzleMin: 2,
+  nozzleMax: 5,
+  spreadMin: 2,
+  spreadMax: 5,
+  sideOffsetScaleMin: CAR_ENGINE_PLUME_SIDE_OFFSET_SCALE,
+  sideOffsetScaleMax: CAR_ENGINE_PLUME_SIDE_OFFSET_SCALE
+});
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
 const MINING_RAY_SIDE_WAVE_AMPLITUDE = 0.5;
@@ -190,7 +239,8 @@ const MINING_RAY_SIDE_WAVE_SPEED = 18;
 const MINING_RAY_EMITTER_RADIUS = 1;
 const MINING_RAY_EMITTER_LENGTH = 8;
 const MINING_RAY_HIT_FLARE_RADIUS = 3;
-const CAR_MODE_MINING_RAY_GRADIENT = Object.freeze(["#00a83a", "#7cff00", "#dfff00", "#7cff00", "#00a83a"]);
+// const CAR_MODE_MINING_RAY_GRADIENT = Object.freeze(["#00a83a", "#7cff00", "#dfff00", "#7cff00", "#00a83a"]);
+const CAR_MODE_MINING_RAY_GRADIENT = Object.freeze(["#7fe64f"]);
 const HUD_FLASH_MODE = Object.freeze({
   additive: "additive",
   subtractive: "subtractive"
@@ -724,7 +774,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
       const gameMode = renderGameMode(snapshot, options);
       const frameColors = colorsForGameMode(colors, gameMode);
       currentTextColors = frameColors;
-      syncPageBackingColor(frameColors.backing);
+      syncPageBackingColor(trueBackingColor(frameColors));
       const frameOptions = {
         ...options,
         gameMode,
@@ -2120,7 +2170,7 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.uniform1f(checkerLocations.lensNoiseRadial, WORLD_LENS_NOISE_RADIAL);
       gl.uniform1f(checkerLocations.lensNoiseTangential, WORLD_LENS_NOISE_TANGENTIAL);
       gl.uniform1f(checkerLocations.lensDefectDensity, WORLD_LENS_DEFECT_DENSITY);
-      gl.uniform1f(checkerLocations.rockCornerRadius, ROCK_OUTER_CORNER_RADIUS);
+      gl.uniform1f(checkerLocations.rockCornerRadius, rockOuterBevelRadiusForGameMode(layer.gameMode));
       gl.uniform3f(checkerLocations.backgroundColor, background[0], background[1], background[2]);
       gl.uniform3f(checkerLocations.backingColor, backing[0], backing[1], backing[2]);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -3274,11 +3324,7 @@ void main() {
   }
 
   float stormCode = 0.0;
-  if (safe) {
-    if (gpuStormBoundaryPixel(tile, world)) {
-      stormCode = 2.0;
-    }
-  } else {
+  if (!safe) {
     float stormDistance = gpuStormDistanceToSafe(tile, world);
     float playerStormDistance = 99.0;
     if (u_playerStormBlob > 0.5) {
@@ -3708,7 +3754,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   if (options.transparentBacking && typeof ctx.clear === "function") {
     ctx.clear();
   } else {
-    ctx.fillStyle = colors.backing || "#000000";
+    ctx.fillStyle = trueBackingColor(colors);
     ctx.fillRect(0, 0, ctx.width, ctx.height);
   }
   ctx.fillStyle = colors.foreground;
@@ -3748,7 +3794,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
       return extrapolateRemotePlayer(player, snapshot, options.timeSeconds);
     });
-    renderPlayers = applyVisualShipAngles(renderPlayers, options.visualShipAngles, options.dtSeconds);
+    renderPlayers = applyVisualShipAngles(renderPlayers, options.visualShipAngles, options.dtSeconds, options.gameMode);
     camera = cameraForSnapshot(
       snapshot,
       options.cameraPlayerId || options.playerId,
@@ -3795,7 +3841,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     if (options.playerMapLarge && options.playerMap?.cells && options.asteroid) {
       drawFullPlayerMapFrame(ctx, options, colors);
     } else {
-      beginWorldViewport(ctx, colors, !visibility);
+      beginWorldViewport(ctx, colors, !visibility, true);
       if (visibility) {
         measureBucket("ghostMs", () => drawAsteroidVisibilityGhostMap(
           ctx,
@@ -3807,7 +3853,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           options.gpuStormRenderer,
           options.gpuFrameStormReady === true && gpuWorldEffectsAllowed,
           options.gpuFrameCheckerReady === true && gpuWorldEffectsAllowed,
-          perfBuckets
+          perfBuckets,
+          options.gameMode
         ));
         if (typeof ctx.beginWorldMask === "function") {
           ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
@@ -4125,8 +4172,12 @@ function drawFullPlayerMapFrame(ctx, options, colors) {
   ctx.endClip();
 }
 
-function beginWorldViewport(ctx, colors, fillBackground = true) {
+function beginWorldViewport(ctx, colors, fillBackground = true, fillBacking = false) {
   ctx.beginCircleClip();
+  if (fillBacking) {
+    ctx.fillStyle = colors.backing || "#000000";
+    ctx.fillRect(0, 0, ctx.width, ctx.height);
+  }
   if (fillBackground) {
     ctx.fillStyle = colors.background;
     ctx.fillRect(0, 0, ctx.width, ctx.height);
@@ -6575,7 +6626,7 @@ function drawAsteroid(
   gameMode = GAME_MODES.bitspace
 ) {
   drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility, gameMode);
-  const stormOverlayIncludesBoundary = drawStormOverlay(
+  drawStormOverlay(
     ctx,
     asteroid,
     camera,
@@ -6586,11 +6637,7 @@ function drawAsteroid(
     stormFocusPlayer,
     gpuFrameStormReady
   );
-  if (asteroid.storm) {
-    if (!stormOverlayIncludesBoundary) {
-      drawStormBoundary(ctx, asteroid, camera, colors, timeSeconds);
-    }
-  } else {
+  if (!asteroid.storm) {
     drawAsteroidBoundary(ctx, asteroid, camera, colors, visibility);
   }
 }
@@ -6826,29 +6873,45 @@ function extrapolateRemotePlayer(player, snapshot, timeSeconds) {
   };
 }
 
-function applyVisualShipAngles(players, visualAngles, dtSeconds) {
+function applyVisualShipAngles(players, visualAngles, dtSeconds, gameMode = GAME_MODES.bitspace) {
   if (!(visualAngles instanceof Map) || !Array.isArray(players)) {
     return players;
   }
 
   const visibleKeys = new Set();
-  const maxDelta = SHIP_VISUAL_ROTATION_SPEED * clamp(dtSeconds || 1 / 60, 0, 1 / 15);
+  const stepSeconds = clamp(dtSeconds || 1 / 60, 0, 1 / 15);
   const result = players.map((player) => {
     const key = visualShipAngleKey(player);
-    const target = shipControlAngle(player);
+    const target = playerVisualControlAngle(player, gameMode);
     if (!key || !Number.isFinite(target)) {
       return player;
     }
 
     visibleKeys.add(key);
-    const previous = visualAngles.has(key)
-      ? visualAngles.get(key)
-      : target;
-    const visualAngle = rotateAngleToward(previous, target, maxDelta);
-    visualAngles.set(key, visualAngle);
+    const rotationSpeed = visualRotationSpeedForMode(gameMode);
+    let turn = visualShipTurnState(visualAngles.get(key), target, rotationSpeed);
+    const currentAngle = visualTurnAngle(turn);
+    if (Math.abs(normalizeSignedAngle(target - turn.target)) > visualRetargetThresholdForMode(gameMode)) {
+      turn = createVisualTurn(currentAngle, target, rotationSpeed);
+    }
+
+    turn.elapsed = Math.min(turn.duration, turn.elapsed + stepSeconds);
+    turn.angle = visualTurnAngle(turn);
+    const visualCarLean = gameMode === GAME_MODES.cars
+      ? carVisualLeanForTurn(turn)
+      : 0;
+    if (turn.elapsed >= turn.duration) {
+      turn.angle = normalizeAngle(turn.target);
+      turn.from = turn.angle;
+      turn.duration = 0;
+      turn.elapsed = 0;
+    }
+
+    visualAngles.set(key, turn);
     return {
       ...player,
-      visualAngle
+      visualAngle: turn.angle,
+      visualCarLean
     };
   });
 
@@ -6859,6 +6922,64 @@ function applyVisualShipAngles(players, visualAngles, dtSeconds) {
   }
 
   return result;
+}
+
+function playerVisualControlAngle(player, gameMode = GAME_MODES.bitspace) {
+  return gameMode === GAME_MODES.cars
+    ? carControlAngle(player)
+    : shipControlAngle(player);
+}
+
+function visualShipTurnState(value, target, rotationSpeed = SHIP_VISUAL_ROTATION_SPEED) {
+  if (value && typeof value === "object" && Number.isFinite(value.angle)) {
+    return value;
+  }
+
+  const angle = Number.isFinite(value) ? value : target;
+  return createVisualTurn(angle, target, rotationSpeed);
+}
+
+function createVisualTurn(current, target, rotationSpeed = SHIP_VISUAL_ROTATION_SPEED) {
+  const from = normalizeAngle(current);
+  const normalizedTarget = normalizeAngle(target);
+  const delta = normalizeSignedAngle(normalizedTarget - from);
+  const duration = Math.abs(delta) / rotationSpeed;
+  if (duration <= 0.0001) {
+    return {
+      angle: normalizedTarget,
+      from: normalizedTarget,
+      target: normalizedTarget,
+      elapsed: 0,
+      duration: 0
+    };
+  }
+
+  return {
+    angle: from,
+    from,
+    target: normalizedTarget,
+    elapsed: 0,
+    duration
+  };
+}
+
+function visualRotationSpeedForMode(gameMode) {
+  return gameMode === GAME_MODES.cars
+    ? CAR_VISUAL_ROTATION_SPEED
+    : SHIP_VISUAL_ROTATION_SPEED;
+}
+
+function visualRetargetThresholdForMode(gameMode) {
+  return gameMode === GAME_MODES.cars ? 0.03 : 0.001;
+}
+
+function visualTurnAngle(turn) {
+  if (!turn || turn.duration <= 0) {
+    return normalizeAngle(turn?.target ?? 0);
+  }
+
+  const amount = smoothstep01(turn.elapsed / turn.duration);
+  return normalizeAngle(turn.from + normalizeSignedAngle(turn.target - turn.from) * amount);
 }
 
 function visualShipAngleKey(player) {
@@ -6879,15 +7000,6 @@ function shipControlAngle(player) {
   return Number.isFinite(player?.angle)
     ? player.angle
     : Number.isFinite(player?.aimAngle) ? player.aimAngle : 0;
-}
-
-function rotateAngleToward(current, target, maxDelta) {
-  const delta = normalizeSignedAngle(target - current);
-  if (Math.abs(delta) <= maxDelta) {
-    return normalizeAngle(target);
-  }
-
-  return normalizeAngle(current + Math.sign(delta) * maxDelta);
 }
 
 function normalizeSignedAngle(angle) {
@@ -7090,6 +7202,7 @@ function drawAsteroidTiles(
     }
   }
 
+  const rockLineWidth = gameMode === GAME_MODES.cars ? CAR_ROCK_OUTLINE_WIDTH : 1;
   for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
     for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
       const index = tileY * asteroid.widthTiles + tileX;
@@ -7105,13 +7218,44 @@ function drawAsteroidTiles(
       const screenY = Math.round(tileY * tileSize - camera.y);
       if (tile === ASTEROID_TILE.wall) {
         drawWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
-      } else {
-        drawRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
       }
     }
   }
 
-  drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility);
+  if (gameMode === GAME_MODES.cars) {
+    drawRockChunkOutlines(
+      ctx,
+      asteroid,
+      camera,
+      tileSize,
+      minTileX,
+      maxTileX,
+      minTileY,
+      maxTileY,
+      colors,
+      visibility,
+      rockLineWidth,
+      gameMode
+    );
+  } else {
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        const index = tileY * asteroid.widthTiles + tileX;
+        const tile = asteroid.tiles[index];
+        if (!isRockTile(tile)) {
+          continue;
+        }
+        if (visibility && !asteroidVisibilityRendersShell(visibility, tileX, tileY)) {
+          continue;
+        }
+
+        const screenX = Math.round(tileX * tileSize - camera.x);
+        const screenY = Math.round(tileY * tileSize - camera.y);
+        drawBitspaceRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
+      }
+    }
+    drawBitspaceInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility);
+  }
 
   const drawResources = () => {
     const carResources = gameMode === GAME_MODES.cars;
@@ -7209,19 +7353,20 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
     x: player.x - camera.x,
     y: player.y - camera.y
   };
+  const dilatePixels = asteroidVisibilityDilationPixels(options.gameMode);
   const visibilityOptions = {
     baseRays: ASTEROID_VISIBILITY_BASE_RAYS,
     angleEpsilon: ASTEROID_VISIBILITY_ANGLE_EPSILON,
-    dilatePixels: ASTEROID_VISIBILITY_DILATE_PIXELS,
-    outerBevel: ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS,
+    dilatePixels,
+    outerBevel: asteroidVisibilityOuterBevelRadiusForGameMode(options.gameMode),
     innerCorner: ROCK_INNER_CORNER_RADIUS,
-    edgeOverlap: ASTEROID_VISIBILITY_DILATE_PIXELS
+    edgeOverlap: dilatePixels
   };
   let spans = visibilitySpansFromGridNative(asteroid, player, camera, radius, bounds, visibilityOptions);
   if (!spans) {
-    const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds);
+    const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions);
     spans = visibilitySpansNative(origin, radius, segments, visibilityOptions) ||
-      rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, segments));
+      rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, segments), dilatePixels);
   }
   return {
     asteroid,
@@ -7247,6 +7392,12 @@ function asteroidVisibilityCanStartAt(asteroid, tileX, tileY) {
   return !isSolidTile(asteroid.tiles[index]);
 }
 
+function asteroidVisibilityDilationPixels(gameMode = GAME_MODES.bitspace) {
+  return gameMode === GAME_MODES.cars
+    ? Math.ceil(CAR_ROCK_OUTLINE_WIDTH / 2)
+    : ASTEROID_VISIBILITY_DILATE_PIXELS;
+}
+
 function drawAsteroidVisibilityGhostMap(
   ctx,
   asteroid,
@@ -7257,7 +7408,8 @@ function drawAsteroidVisibilityGhostMap(
   gpuStormRenderer = null,
   gpuFrameStormReady = false,
   gpuFrameCheckerReady = false,
-  perfBuckets = null
+  perfBuckets = null,
+  gameMode = GAME_MODES.bitspace
 ) {
   if (!asteroid) {
     return;
@@ -7298,7 +7450,8 @@ function drawAsteroidVisibilityGhostMap(
         palette: {
           background: colors.background,
           backing: colors.backing || "#000000"
-        }
+        },
+        gameMode
       });
     if (queuedGpuChecker) {
       gpuCheckerQueued = true;
@@ -7365,7 +7518,7 @@ function drawAsteroidVisibilityGhostMap(
         if (tile === ASTEROID_TILE.wall) {
           drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
         } else {
-          drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
+          drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera, gameMode);
         }
       }
     }
@@ -7401,10 +7554,7 @@ function drawAsteroidVisibilityGhostMap(
           }
         });
       if (!queuedGpuGhostStorm) {
-        const stormOverlayIncludesBoundary = drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
-        if (!stormOverlayIncludesBoundary) {
-          drawStormBoundary(ctx, asteroid, camera, ghostColors, timeSeconds);
-        }
+        drawStormOverlay(ctx, asteroid, camera, ghostColors, timeSeconds, null, gpuStormRenderer);
       }
     }
   });
@@ -7437,7 +7587,7 @@ function renderedCameraPixelOffset(value) {
   return Math.ceil(value - 0.5);
 }
 
-function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, camera) {
+function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, camera, gameMode = GAME_MODES.bitspace) {
   const north = rockTileBlocksVisibleOutline(asteroid, null, tileX, tileY - 1);
   const east = rockTileBlocksVisibleOutline(asteroid, null, tileX + 1, tileY);
   const south = rockTileBlocksVisibleOutline(asteroid, null, tileX, tileY + 1);
@@ -7456,36 +7606,38 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
   const outerTopRight = topOpen && rightOpen;
   const outerBottomRight = bottomOpen && rightOpen;
   const outerBottomLeft = bottomOpen && leftOpen;
+  const outerBevelRadius = rockOuterBevelRadiusForGameMode(gameMode);
   const topTrimLeft = outerTopLeft
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : topOpen && west && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
   const topTrimRight = outerTopRight
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : topOpen && east && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
   const rightTrimTop = outerTopRight
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : rightOpen && north && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
   const rightTrimBottom = outerBottomRight
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : rightOpen && south && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
   const bottomTrimRight = outerBottomRight
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : bottomOpen && east && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
   const bottomTrimLeft = outerBottomLeft
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : bottomOpen && west && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
   const leftTrimBottom = outerBottomLeft
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : leftOpen && south && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
   const leftTrimTop = outerTopLeft
-    ? ROCK_OUTER_CORNER_RADIUS
+    ? outerBevelRadius
     : leftOpen && north && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
 
   if (outerTopLeft) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      x + ROCK_OUTER_CORNER_RADIUS,
-      y + ROCK_OUTER_CORNER_RADIUS,
+      x + outerBevelRadius,
+      y + outerBevelRadius,
+      outerBevelRadius,
       -1,
       -1,
       colors,
@@ -7495,8 +7647,9 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
   if (outerTopRight) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      right - ROCK_OUTER_CORNER_RADIUS,
-      y + ROCK_OUTER_CORNER_RADIUS,
+      right - outerBevelRadius,
+      y + outerBevelRadius,
+      outerBevelRadius,
       1,
       -1,
       colors,
@@ -7506,8 +7659,9 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
   if (outerBottomRight) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      right - ROCK_OUTER_CORNER_RADIUS,
-      bottom - ROCK_OUTER_CORNER_RADIUS,
+      right - outerBevelRadius,
+      bottom - outerBevelRadius,
+      outerBevelRadius,
       1,
       1,
       colors,
@@ -7517,8 +7671,9 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
   if (outerBottomLeft) {
     drawAsteroidVisibilityCheckerOuterRockCorner(
       ctx,
-      x + ROCK_OUTER_CORNER_RADIUS,
-      bottom - ROCK_OUTER_CORNER_RADIUS,
+      x + outerBevelRadius,
+      bottom - outerBevelRadius,
+      outerBevelRadius,
       -1,
       1,
       colors,
@@ -7547,7 +7702,7 @@ function drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, x, 
     outerTopRight,
     outerBottomRight,
     outerBottomLeft
-  }, colors, camera);
+  }, colors, camera, outerBevelRadius);
 }
 
 function drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, camera) {
@@ -7601,11 +7756,11 @@ function drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, x, 
   }
 }
 
-function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, signX, signY, colors, camera) {
-  const radiusSq = ROCK_OUTER_CORNER_RADIUS * ROCK_OUTER_CORNER_RADIUS;
+function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, radius, signX, signY, colors, camera) {
+  const radiusSq = radius * radius;
   ctx.fillStyle = colors.background;
-  for (let offsetY = 0; offsetY <= ROCK_OUTER_CORNER_RADIUS; offsetY += 1) {
-    for (let offsetX = 0; offsetX <= ROCK_OUTER_CORNER_RADIUS; offsetX += 1) {
+  for (let offsetY = 0; offsetY <= radius; offsetY += 1) {
+    for (let offsetX = 0; offsetX <= radius; offsetX += 1) {
       if (offsetX * offsetX + offsetY * offsetY <= radiusSq) {
         continue;
       }
@@ -7621,14 +7776,14 @@ function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, sig
   }
 }
 
-function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom, corners, colors, camera) {
+function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom, corners, colors, camera, radius = ROCK_OUTER_CORNER_RADIUS) {
   ctx.fillStyle = colors.background;
   if (corners.outerTopLeft) {
     drawAsteroidVisibilityCheckerRockCornerArc(
       ctx,
-      x + ROCK_OUTER_CORNER_RADIUS,
-      y + ROCK_OUTER_CORNER_RADIUS,
-      ROCK_OUTER_CORNER_RADIUS,
+      x + radius,
+      y + radius,
+      radius,
       -1,
       -1,
       camera
@@ -7638,9 +7793,9 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
   if (corners.outerTopRight) {
     drawAsteroidVisibilityCheckerRockCornerArc(
       ctx,
-      right - ROCK_OUTER_CORNER_RADIUS,
-      y + ROCK_OUTER_CORNER_RADIUS,
-      ROCK_OUTER_CORNER_RADIUS,
+      right - radius,
+      y + radius,
+      radius,
       1,
       -1,
       camera
@@ -7650,9 +7805,9 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
   if (corners.outerBottomRight) {
     drawAsteroidVisibilityCheckerRockCornerArc(
       ctx,
-      right - ROCK_OUTER_CORNER_RADIUS,
-      bottom - ROCK_OUTER_CORNER_RADIUS,
-      ROCK_OUTER_CORNER_RADIUS,
+      right - radius,
+      bottom - radius,
+      radius,
       1,
       1,
       camera
@@ -7662,9 +7817,9 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
   if (corners.outerBottomLeft) {
     drawAsteroidVisibilityCheckerRockCornerArc(
       ctx,
-      x + ROCK_OUTER_CORNER_RADIUS,
-      bottom - ROCK_OUTER_CORNER_RADIUS,
-      ROCK_OUTER_CORNER_RADIUS,
+      x + radius,
+      bottom - radius,
+      radius,
       -1,
       1,
       camera
@@ -7673,19 +7828,24 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
 }
 
 function drawAsteroidVisibilityCheckerRockCornerArc(ctx, centerX, centerY, radius, signX, signY, camera) {
+  const drawn = new Set();
   for (let step = 0; step <= radius; step += 1) {
     const other = Math.round(Math.sqrt(Math.max(0, radius * radius - step * step)));
-    drawAsteroidVisibilityCheckerArcPixel(ctx, centerX + signX * step, centerY + signY * other, camera);
-    drawAsteroidVisibilityCheckerArcPixel(ctx, centerX + signX * other, centerY + signY * step, camera);
+    drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, centerX + signX * step, centerY + signY * other, camera);
+    drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, centerX + signX * other, centerY + signY * step, camera);
   }
 }
 
-function drawAsteroidVisibilityCheckerArcPixel(ctx, x, y, camera) {
+function drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, x, y, camera) {
   const px = Math.round(x);
   const py = Math.round(y);
-  if (asteroidVisibilityCheckerPixelOn(px, py, camera)) {
-    ctx.fillRect(px, py, 1, 1);
+  const key = `${px}:${py}`;
+  if (drawn.has(key) || !asteroidVisibilityCheckerPixelOn(px, py, camera)) {
+    return;
   }
+
+  drawn.add(key);
+  ctx.fillRect(px, py, 1, 1);
 }
 
 function drawAsteroidVisibilityGhostInnerRockCornerConnectors(
@@ -7780,7 +7940,7 @@ function drawAsteroidVisibilityCheckerLine(ctx, x0, y0, x1, y1, camera, colors) 
   }
 }
 
-function buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds) {
+function buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions = null) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const segments = [];
   const radiusSq = radius * radius;
@@ -7799,7 +7959,7 @@ function buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bound
       }
 
       if (blockerKind === "rock") {
-        addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, left, top, tileSize, camera);
+        addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, left, top, tileSize, camera, visibilityOptions);
       } else {
         addAsteroidVisibilitySquareSegments(segments, asteroid, tileX, tileY, left, top, tileSize, camera);
       }
@@ -7841,7 +8001,7 @@ function addAsteroidVisibilitySquareSegments(segments, asteroid, tileX, tileY, l
   }
 }
 
-function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, left, top, size, camera) {
+function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, left, top, size, camera, visibilityOptions = null) {
   const north = asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY - 1);
   const east = asteroidVisibilityBlocksSightTile(asteroid, tileX + 1, tileY);
   const south = asteroidVisibilityBlocksSightTile(asteroid, tileX, tileY + 1);
@@ -7860,7 +8020,8 @@ function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, lef
   const outerTopRight = topOpen && rightOpen;
   const outerBottomRight = bottomOpen && rightOpen;
   const outerBottomLeft = bottomOpen && leftOpen;
-  const outerBevel = ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS;
+  const outerBevel = Math.max(1, Number(visibilityOptions?.outerBevel || ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS));
+  const edgeOverlap = Math.max(0, Number(visibilityOptions?.edgeOverlap || ASTEROID_VISIBILITY_DILATE_PIXELS));
   const topTrimLeft = outerTopLeft
     ? outerBevel
     : topOpen && west && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
@@ -7887,16 +8048,16 @@ function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, lef
     : leftOpen && north && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
 
   if (topOpen && left + topTrimLeft <= right - topTrimRight) {
-    addAsteroidVisibilityRockEdgeSegment(segments, left + topTrimLeft, top, right - topTrimRight, top, camera);
+    addAsteroidVisibilityRockEdgeSegment(segments, left + topTrimLeft, top, right - topTrimRight, top, camera, edgeOverlap);
   }
   if (rightOpen && top + rightTrimTop <= bottom - rightTrimBottom) {
-    addAsteroidVisibilityRockEdgeSegment(segments, right, top + rightTrimTop, right, bottom - rightTrimBottom, camera);
+    addAsteroidVisibilityRockEdgeSegment(segments, right, top + rightTrimTop, right, bottom - rightTrimBottom, camera, edgeOverlap);
   }
   if (bottomOpen && left + bottomTrimLeft <= right - bottomTrimRight) {
-    addAsteroidVisibilityRockEdgeSegment(segments, right - bottomTrimRight, bottom, left + bottomTrimLeft, bottom, camera);
+    addAsteroidVisibilityRockEdgeSegment(segments, right - bottomTrimRight, bottom, left + bottomTrimLeft, bottom, camera, edgeOverlap);
   }
   if (leftOpen && top + leftTrimTop <= bottom - leftTrimBottom) {
-    addAsteroidVisibilityRockEdgeSegment(segments, left, bottom - leftTrimBottom, left, top + leftTrimTop, camera);
+    addAsteroidVisibilityRockEdgeSegment(segments, left, bottom - leftTrimBottom, left, top + leftTrimTop, camera, edgeOverlap);
   }
 
   if (outerTopLeft) {
@@ -7906,7 +8067,8 @@ function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, lef
       top,
       left,
       top + outerBevel,
-      camera
+      camera,
+      edgeOverlap
     );
   }
   if (outerTopRight) {
@@ -7916,7 +8078,8 @@ function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, lef
       top + outerBevel,
       right - outerBevel,
       top,
-      camera
+      camera,
+      edgeOverlap
     );
   }
   if (outerBottomRight) {
@@ -7926,7 +8089,8 @@ function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, lef
       bottom,
       right,
       bottom - outerBevel,
-      camera
+      camera,
+      edgeOverlap
     );
   }
   if (outerBottomLeft) {
@@ -7936,13 +8100,13 @@ function addAsteroidVisibilityRockSegments(segments, asteroid, tileX, tileY, lef
       bottom,
       left,
       bottom - outerBevel,
-      camera
+      camera,
+      edgeOverlap
     );
   }
 }
 
-function addAsteroidVisibilityRockEdgeSegment(segments, x0, y0, x1, y1, camera) {
-  const overlap = ASTEROID_VISIBILITY_DILATE_PIXELS;
+function addAsteroidVisibilityRockEdgeSegment(segments, x0, y0, x1, y1, camera, overlap = ASTEROID_VISIBILITY_DILATE_PIXELS) {
   if (y0 === y1) {
     const direction = x1 >= x0 ? 1 : -1;
     addAsteroidVisibilitySegment(segments, x0 - direction * overlap, y0, x1 + direction * overlap, y1, camera);
@@ -7958,8 +8122,20 @@ function addAsteroidVisibilityRockEdgeSegment(segments, x0, y0, x1, y1, camera) 
   addAsteroidVisibilitySegment(segments, x0, y0, x1, y1, camera);
 }
 
-function addAsteroidVisibilityRockBevelSegment(segments, x0, y0, x1, y1, camera) {
-  addAsteroidVisibilitySegment(segments, x0, y0, x1, y1, camera);
+function addAsteroidVisibilityRockBevelSegment(segments, x0, y0, x1, y1, camera, overlap = ASTEROID_VISIBILITY_DILATE_PIXELS) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const length = Math.hypot(dx, dy) || 1;
+  const unitX = dx / length;
+  const unitY = dy / length;
+  addAsteroidVisibilitySegment(
+    segments,
+    x0 - unitX * overlap,
+    y0 - unitY * overlap,
+    x1 + unitX * overlap,
+    y1 + unitY * overlap,
+    camera
+  );
 }
 
 function addAsteroidVisibilityInnerCornerSegments(segments, asteroid, player, radiusSq, bounds, tileSize, camera) {
@@ -8269,7 +8445,7 @@ function raySegmentIntersectionDistance(originX, originY, dirX, dirY, segment) {
   return t;
 }
 
-function rasterizeAsteroidVisibilityPolygon(points) {
+function rasterizeAsteroidVisibilityPolygon(points, dilatePixels = ASTEROID_VISIBILITY_DILATE_PIXELS) {
   if (points.length < 3) {
     return { offsetY: 0, rows: [] };
   }
@@ -8315,7 +8491,7 @@ function rasterizeAsteroidVisibilityPolygon(points) {
 
   return dilateAsteroidVisibilitySpans(
     { offsetY, rows },
-    ASTEROID_VISIBILITY_DILATE_PIXELS
+    dilatePixels
   );
 }
 
@@ -8794,7 +8970,7 @@ function drawRockFill(ctx, x, y, size, colors, tile = null) {
   ctx.fillRect(x, y, size, size);
 }
 
-function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
+function drawBitspaceRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
   const north = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
   const east = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
   const south = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY + 1);
@@ -8872,73 +9048,43 @@ function drawRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibi
     outerBottomLeft: outerBottomLeft && cornerBottomLeft
   };
   if (visibility) {
-    drawOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, visibleCorners);
+    drawBitspaceOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, visibleCorners);
   }
+
   ctx.fillStyle = colors.rockLine || colors.foreground;
-
   if (topOpen && x + topTrimLeft <= right - topTrimRight) {
-    drawPixelLine(
-      ctx,
-      x + topTrimLeft,
-      y,
-      right - topTrimRight,
-      y
-    );
+    drawPixelLine(ctx, x + topTrimLeft, y, right - topTrimRight, y);
   }
-
   if (rightOpen && y + rightTrimTop <= bottom - rightTrimBottom) {
-    drawPixelLine(
-      ctx,
-      right,
-      y + rightTrimTop,
-      right,
-      bottom - rightTrimBottom
-    );
+    drawPixelLine(ctx, right, y + rightTrimTop, right, bottom - rightTrimBottom);
   }
-
   if (bottomOpen && x + bottomTrimLeft <= right - bottomTrimRight) {
-    drawPixelLine(
-      ctx,
-      right - bottomTrimRight,
-      bottom,
-      x + bottomTrimLeft,
-      bottom
-    );
+    drawPixelLine(ctx, right - bottomTrimRight, bottom, x + bottomTrimLeft, bottom);
   }
-
   if (leftOpen && y + leftTrimTop <= bottom - leftTrimBottom) {
-    drawPixelLine(
-      ctx,
-      x,
-      bottom - leftTrimBottom,
-      x,
-      y + leftTrimTop
-    );
+    drawPixelLine(ctx, x, bottom - leftTrimBottom, x, y + leftTrimTop);
   }
 
-  drawOuterRockCorners(ctx, x, y, right, bottom, visibleCorners);
+  drawBitspaceOuterRockCorners(ctx, x, y, right, bottom, visibleCorners);
 }
 
-function drawOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, corners) {
+function drawBitspaceOuterRockCornerBackgrounds(ctx, x, y, right, bottom, colors, corners) {
   ctx.fillStyle = colors.background;
   if (corners.outerTopLeft) {
-    drawRockOuterCornerBackground(ctx, x + ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, -1);
+    drawBitspaceRockOuterCornerBackground(ctx, x + ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, -1);
   }
-
   if (corners.outerTopRight) {
-    drawRockOuterCornerBackground(ctx, right - ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, -1);
+    drawBitspaceRockOuterCornerBackground(ctx, right - ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, -1);
   }
-
   if (corners.outerBottomRight) {
-    drawRockOuterCornerBackground(ctx, right - ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, 1);
+    drawBitspaceRockOuterCornerBackground(ctx, right - ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, 1);
   }
-
   if (corners.outerBottomLeft) {
-    drawRockOuterCornerBackground(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, 1);
+    drawBitspaceRockOuterCornerBackground(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, 1);
   }
 }
 
-function drawRockOuterCornerBackground(ctx, centerX, centerY, radius, signX, signY) {
+function drawBitspaceRockOuterCornerBackground(ctx, centerX, centerY, radius, signX, signY) {
   const radiusSq = radius * radius;
   for (let offsetY = 0; offsetY <= radius; offsetY += 1) {
     for (let offsetX = 0; offsetX <= radius; offsetX += 1) {
@@ -8951,34 +9097,31 @@ function drawRockOuterCornerBackground(ctx, centerX, centerY, radius, signX, sig
   }
 }
 
-function drawOuterRockCorners(ctx, x, y, right, bottom, corners) {
+function drawBitspaceOuterRockCorners(ctx, x, y, right, bottom, corners) {
   if (corners.outerTopLeft) {
-    drawRockCornerArc(ctx, x + ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, -1);
+    drawBitspaceRockCornerArc(ctx, x + ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, -1);
   }
-
   if (corners.outerTopRight) {
-    drawRockCornerArc(ctx, right - ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, -1);
+    drawBitspaceRockCornerArc(ctx, right - ROCK_OUTER_CORNER_RADIUS, y + ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, -1);
   }
-
   if (corners.outerBottomRight) {
-    drawRockCornerArc(ctx, right - ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, 1);
+    drawBitspaceRockCornerArc(ctx, right - ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, 1, 1);
   }
-
   if (corners.outerBottomLeft) {
-    drawRockCornerArc(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, 1);
+    drawBitspaceRockCornerArc(ctx, x + ROCK_OUTER_CORNER_RADIUS, bottom - ROCK_OUTER_CORNER_RADIUS, ROCK_OUTER_CORNER_RADIUS, -1, 1);
   }
 }
 
-function drawRockCornerArc(ctx, centerX, centerY, radius, signX, signY) {
+function drawBitspaceRockCornerArc(ctx, centerX, centerY, radius, signX, signY) {
   const drawn = new Set();
   for (let step = 0; step <= radius; step += 1) {
     const other = Math.round(Math.sqrt(Math.max(0, radius * radius - step * step)));
-    drawRockArcPixel(ctx, drawn, centerX + signX * step, centerY + signY * other);
-    drawRockArcPixel(ctx, drawn, centerX + signX * other, centerY + signY * step);
+    drawBitspaceRockArcPixel(ctx, drawn, centerX + signX * step, centerY + signY * other);
+    drawBitspaceRockArcPixel(ctx, drawn, centerX + signX * other, centerY + signY * step);
   }
 }
 
-function drawRockArcPixel(ctx, drawn, x, y) {
+function drawBitspaceRockArcPixel(ctx, drawn, x, y) {
   const px = Math.round(x);
   const py = Math.round(y);
   const key = `${px}:${py}`;
@@ -8988,6 +9131,780 @@ function drawRockArcPixel(ctx, drawn, x, y) {
 
   drawn.add(key);
   ctx.fillRect(px, py, 1, 1);
+}
+
+function drawBitspaceInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility = null) {
+  ctx.fillStyle = colors.rockLine || colors.foreground;
+
+  for (let tileY = minTileY - 1; tileY <= maxTileY + 1; tileY += 1) {
+    for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
+      if (visibility && !asteroidVisibilityPaintsBackground(visibility, tileX, tileY)) {
+        continue;
+      }
+      if (isRockTileAt(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      const x = Math.round(tileX * tileSize - camera.x);
+      const y = Math.round(tileY * tileSize - camera.y);
+      const topEdge = y - 1;
+      const leftEdge = x - 1;
+      const rightEdge = x + tileSize;
+      const bottomEdge = y + tileSize;
+      const rightInside = rightEdge - 1;
+      const bottomInside = bottomEdge - 1;
+      const north = isRockTileAt(asteroid, tileX, tileY - 1);
+      const east = isRockTileAt(asteroid, tileX + 1, tileY);
+      const south = isRockTileAt(asteroid, tileX, tileY + 1);
+      const west = isRockTileAt(asteroid, tileX - 1, tileY);
+      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
+      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
+      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
+      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
+
+      if (north && west && northWest) {
+        drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS);
+      }
+      if (north && east && northEast) {
+        drawPixelLine(ctx, rightInside - ROCK_INNER_CORNER_RADIUS, topEdge, rightEdge, y + ROCK_INNER_CORNER_RADIUS);
+      }
+      if (south && east && southEast) {
+        drawPixelLine(
+          ctx,
+          rightEdge,
+          bottomInside - ROCK_INNER_CORNER_RADIUS,
+          rightInside - ROCK_INNER_CORNER_RADIUS,
+          bottomEdge
+        );
+      }
+      if (south && west && southWest) {
+        drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, bottomEdge, leftEdge, bottomInside - ROCK_INNER_CORNER_RADIUS);
+      }
+    }
+  }
+}
+
+function drawRockChunkOutlines(
+  ctx,
+  asteroid,
+  camera,
+  tileSize,
+  minTileX,
+  maxTileX,
+  minTileY,
+  maxTileY,
+  colors,
+  visibility = null,
+  lineWidth = 1,
+  gameMode = GAME_MODES.bitspace
+) {
+  if (gameMode === GAME_MODES.cars) {
+    drawCarRockChunkOutlines(
+      ctx,
+      asteroid,
+      camera,
+      tileSize,
+      minTileX,
+      maxTileX,
+      minTileY,
+      maxTileY,
+      colors,
+      visibility,
+      lineWidth
+    );
+    return;
+  }
+
+  const segments = [];
+  const backgroundCorners = [];
+  const outerBevelRadius = rockOuterBevelRadiusForGameMode(gameMode);
+
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (!rockTileRendersForContour(asteroid, visibility, tileX, tileY)) {
+        continue;
+      }
+
+      const x = Math.round(tileX * tileSize - camera.x);
+      const y = Math.round(tileY * tileSize - camera.y);
+      pushRockTileContourSegments(
+        segments,
+        backgroundCorners,
+        asteroid,
+        visibility,
+        tileX,
+        tileY,
+        x,
+        y,
+        tileSize,
+        outerBevelRadius
+      );
+    }
+  }
+
+  pushRockInnerHoleContourSegments(
+    segments,
+    asteroid,
+    camera,
+    tileSize,
+    minTileX,
+    maxTileX,
+    minTileY,
+    maxTileY,
+    visibility,
+    lineWidth > 1
+  );
+
+  ctx.fillStyle = colors.background;
+  for (const corner of backgroundCorners) {
+    drawRockOuterCornerBackground(ctx, corner.x, corner.y, corner.stepX, corner.stepY, outerBevelRadius);
+  }
+
+  strokeRockContourSegments(ctx, segments, colors.rockLine || colors.foreground, lineWidth);
+}
+
+function drawCarRockChunkOutlines(
+  ctx,
+  asteroid,
+  camera,
+  tileSize,
+  minTileX,
+  maxTileX,
+  minTileY,
+  maxTileY,
+  colors,
+  visibility = null,
+  lineWidth = CAR_ROCK_OUTLINE_WIDTH
+) {
+  const width = Math.max(1, Math.floor(Number(lineWidth) || 1));
+  const bevelRadius = rockOuterBevelRadiusForGameMode(GAME_MODES.cars);
+
+  ctx.fillStyle = colors.background;
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (!rockTileRendersForContour(asteroid, visibility, tileX, tileY)) {
+        continue;
+      }
+
+      const x = Math.round(tileX * tileSize - camera.x);
+      const y = Math.round(tileY * tileSize - camera.y);
+      const tileMask = carRockOutlineTileMask(
+        tileSize,
+        width,
+        bevelRadius,
+        carRockNeighborMask(asteroid, visibility, tileX, tileY)
+      );
+      drawCarRockRuns(ctx, x, y, tileMask.clearRuns);
+    }
+  }
+
+  ctx.fillStyle = colors.rockLine || colors.foreground;
+  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+      if (!rockTileRendersForContour(asteroid, visibility, tileX, tileY)) {
+        continue;
+      }
+
+      const screenX = Math.round(tileX * tileSize - camera.x);
+      const screenY = Math.round(tileY * tileSize - camera.y);
+      const tileMask = carRockOutlineTileMask(
+        tileSize,
+        width,
+        bevelRadius,
+        carRockNeighborMask(asteroid, visibility, tileX, tileY)
+      );
+      drawCarRockRuns(ctx, screenX, screenY, tileMask.outlineRuns);
+    }
+  }
+}
+
+function drawCarRockRuns(ctx, screenX, screenY, runs) {
+  for (const run of runs) {
+    ctx.fillRect(screenX + run.x, screenY + run.y, run.width, 1);
+  }
+}
+
+function carRockNeighborMask(asteroid, visibility, tileX, tileY) {
+  let mask = 0;
+  let bit = 1;
+  for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      if (offsetX === 0 && offsetY === 0) {
+        mask |= bit;
+      } else if (rockTileBlocksVisibleOutline(asteroid, visibility, tileX + offsetX, tileY + offsetY)) {
+        mask |= bit;
+      }
+      bit <<= 1;
+    }
+  }
+
+  return mask;
+}
+
+function carRockOutlineTileMask(tileSize, width, bevelRadius, neighborMask) {
+  const size = Math.max(1, Math.floor(tileSize));
+  const outlineWidth = Math.max(1, Math.floor(width));
+  const radius = Math.max(1, Math.floor(bevelRadius));
+  const key = `${size}:${outlineWidth}:${radius}:${neighborMask}`;
+  if (!carRockOutlineTileMask.cache) {
+    carRockOutlineTileMask.cache = new Map();
+  }
+
+  const cached = carRockOutlineTileMask.cache.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const offsets = carRockOutlineOffsets(outlineWidth);
+  const clearRows = new Uint32Array(size);
+  const outlineRows = new Uint32Array(size);
+
+  for (let y = 0; y < size; y += 1) {
+    let clearRow = 0;
+    let outlineRow = 0;
+    for (let x = 0; x < size; x += 1) {
+      const sampleX = x + 0.5;
+      const sampleY = y + 0.5;
+      if (carRockMaskPointInCenterBevelCutout(neighborMask, sampleX, sampleY, size, radius)) {
+        clearRow |= 1 << x;
+        continue;
+      }
+      if (!carRockMaskPointBlocks(neighborMask, sampleX, sampleY, size, radius)) {
+        continue;
+      }
+      if (carRockMaskPointTouchesOpenSpace(neighborMask, sampleX, sampleY, size, radius, offsets)) {
+        outlineRow |= 1 << x;
+      }
+    }
+    clearRows[y] = clearRow;
+    outlineRows[y] = outlineRow;
+  }
+
+  const mask = {
+    clearRuns: carRockRowsToRuns(clearRows, size),
+    outlineRuns: carRockRowsToRuns(outlineRows, size)
+  };
+  carRockOutlineTileMask.cache.set(key, mask);
+  return mask;
+}
+
+function carRockMaskPointTouchesOpenSpace(mask, x, y, tileSize, bevelRadius, offsets) {
+  for (const offset of offsets) {
+    if (!carRockMaskPointBlocks(mask, x + offset.x, y + offset.y, tileSize, bevelRadius)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function carRockMaskPointBlocks(mask, x, y, tileSize, bevelRadius) {
+  const tileOffsetX = Math.floor(x / tileSize);
+  const tileOffsetY = Math.floor(y / tileSize);
+  if (tileOffsetX < -1 || tileOffsetX > 1 || tileOffsetY < -1 || tileOffsetY > 1) {
+    return false;
+  }
+
+  const bit = carRockNeighborBit(tileOffsetX, tileOffsetY);
+  if ((mask & bit) === 0) {
+    return false;
+  }
+
+  const localX = x - tileOffsetX * tileSize;
+  const localY = y - tileOffsetY * tileSize;
+  const north = (mask & carRockNeighborBit(tileOffsetX, tileOffsetY - 1)) !== 0;
+  const east = (mask & carRockNeighborBit(tileOffsetX + 1, tileOffsetY)) !== 0;
+  const south = (mask & carRockNeighborBit(tileOffsetX, tileOffsetY + 1)) !== 0;
+  const west = (mask & carRockNeighborBit(tileOffsetX - 1, tileOffsetY)) !== 0;
+  return !carRockLocalPointInOuterBevelCutout(localX, localY, tileSize, bevelRadius, north, east, south, west);
+}
+
+function carRockMaskPointInCenterBevelCutout(mask, x, y, tileSize, bevelRadius) {
+  const north = (mask & carRockNeighborBit(0, -1)) !== 0;
+  const east = (mask & carRockNeighborBit(1, 0)) !== 0;
+  const south = (mask & carRockNeighborBit(0, 1)) !== 0;
+  const west = (mask & carRockNeighborBit(-1, 0)) !== 0;
+  return carRockLocalPointInOuterBevelCutout(x, y, tileSize, bevelRadius, north, east, south, west);
+}
+
+function carRockNeighborBit(offsetX, offsetY) {
+  if (offsetX < -1 || offsetX > 1 || offsetY < -1 || offsetY > 1) {
+    return 0;
+  }
+
+  return 1 << ((offsetY + 1) * 3 + offsetX + 1);
+}
+
+function carRockLocalPointInOuterBevelCutout(localX, localY, tileSize, bevelRadius, north, east, south, west) {
+  const radius = Math.max(1, Math.floor(bevelRadius));
+  const rightDistance = tileSize - localX;
+  const bottomDistance = tileSize - localY;
+  if (!north && !west && localX + localY < radius) {
+    return true;
+  }
+  if (!north && !east && rightDistance + localY < radius) {
+    return true;
+  }
+  if (!south && !east && rightDistance + bottomDistance < radius) {
+    return true;
+  }
+  return !south && !west && localX + bottomDistance < radius;
+}
+
+function carRockRowsToRuns(rows, size) {
+  const runs = [];
+  for (let y = 0; y < size; y += 1) {
+    const row = rows[y];
+    let runStart = null;
+    for (let x = 0; x < size; x += 1) {
+      if ((row & (1 << x)) !== 0) {
+        if (runStart === null) {
+          runStart = x;
+        }
+      } else if (runStart !== null) {
+        runs.push({ x: runStart, y, width: x - runStart });
+        runStart = null;
+      }
+    }
+    if (runStart !== null) {
+      runs.push({ x: runStart, y, width: size - runStart });
+    }
+  }
+
+  return runs;
+}
+
+function carRockOutlineOffsets(width) {
+  const radius = Math.max(1, Math.floor(Number(width) || 1));
+  if (!carRockOutlineOffsets.cache) {
+    carRockOutlineOffsets.cache = new Map();
+  }
+
+  const cached = carRockOutlineOffsets.cache.get(radius);
+  if (cached) {
+    return cached;
+  }
+
+  const radiusSq = radius * radius;
+  const offsets = [];
+  for (let y = -radius; y <= radius; y += 1) {
+    for (let x = -radius; x <= radius; x += 1) {
+      if (x * x + y * y > radiusSq) {
+        continue;
+      }
+      offsets.push({ x, y, distanceSq: x * x + y * y });
+    }
+  }
+  offsets.sort((a, b) => a.distanceSq - b.distanceSq);
+  carRockOutlineOffsets.cache.set(radius, offsets);
+  return offsets;
+}
+
+function pushRockTileContourSegments(
+  segments,
+  backgroundCorners,
+  asteroid,
+  visibility,
+  tileX,
+  tileY,
+  x,
+  y,
+  size,
+  outerBevelRadius = ROCK_OUTER_CORNER_RADIUS
+) {
+  const north = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY - 1);
+  const east = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY);
+  const south = rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY + 1);
+  const west = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY);
+  const northWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY - 1);
+  const northEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY - 1);
+  const southEast = rockTileBlocksVisibleOutline(asteroid, visibility, tileX + 1, tileY + 1);
+  const southWest = rockTileBlocksVisibleOutline(asteroid, visibility, tileX - 1, tileY + 1);
+  const right = x + size - 1;
+  const bottom = y + size - 1;
+  const topOpen = !north;
+  const rightOpen = !east;
+  const bottomOpen = !south;
+  const leftOpen = !west;
+  const outerTopLeft = topOpen && leftOpen;
+  const outerTopRight = topOpen && rightOpen;
+  const outerBottomRight = bottomOpen && rightOpen;
+  const outerBottomLeft = bottomOpen && leftOpen;
+  let topTrimLeft = outerTopLeft
+    ? outerBevelRadius
+    : topOpen && west && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  let topTrimRight = outerTopRight
+    ? outerBevelRadius
+    : topOpen && east && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  let rightTrimTop = outerTopRight
+    ? outerBevelRadius
+    : rightOpen && north && northEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  let rightTrimBottom = outerBottomRight
+    ? outerBevelRadius
+    : rightOpen && south && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  let bottomTrimRight = outerBottomRight
+    ? outerBevelRadius
+    : bottomOpen && east && southEast ? ROCK_INNER_CORNER_RADIUS : 0;
+  let bottomTrimLeft = outerBottomLeft
+    ? outerBevelRadius
+    : bottomOpen && west && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  let leftTrimBottom = outerBottomLeft
+    ? outerBevelRadius
+    : leftOpen && south && southWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  let leftTrimTop = outerTopLeft
+    ? outerBevelRadius
+    : leftOpen && north && northWest ? ROCK_INNER_CORNER_RADIUS : 0;
+  const cornerMask = visibility
+    ? asteroidVisibilityCornerMaskAt(visibility, tileX, tileY)
+    : ASTEROID_VISIBILITY_ALL_CORNERS;
+  const cornerTopLeft = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.topLeft);
+  const cornerTopRight = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.topRight);
+  const cornerBottomRight = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.bottomRight);
+  const cornerBottomLeft = asteroidVisibilityCornerMaskIncludes(cornerMask, ASTEROID_VISIBILITY_CORNER.bottomLeft);
+  const visibilityTrim = Math.ceil(size * 0.5);
+
+  if (visibility) {
+    if (!cornerTopLeft) {
+      topTrimLeft = Math.max(topTrimLeft, visibilityTrim);
+      leftTrimTop = Math.max(leftTrimTop, visibilityTrim);
+    }
+    if (!cornerTopRight) {
+      topTrimRight = Math.max(topTrimRight, visibilityTrim);
+      rightTrimTop = Math.max(rightTrimTop, visibilityTrim);
+    }
+    if (!cornerBottomRight) {
+      bottomTrimRight = Math.max(bottomTrimRight, visibilityTrim);
+      rightTrimBottom = Math.max(rightTrimBottom, visibilityTrim);
+    }
+    if (!cornerBottomLeft) {
+      bottomTrimLeft = Math.max(bottomTrimLeft, visibilityTrim);
+      leftTrimBottom = Math.max(leftTrimBottom, visibilityTrim);
+    }
+  }
+
+  const visibleOuterTopLeft = outerTopLeft && cornerTopLeft;
+  const visibleOuterTopRight = outerTopRight && cornerTopRight;
+  const visibleOuterBottomRight = outerBottomRight && cornerBottomRight;
+  const visibleOuterBottomLeft = outerBottomLeft && cornerBottomLeft;
+
+  if (visibleOuterTopLeft) {
+    backgroundCorners.push({ x, y, stepX: 1, stepY: 1 });
+    pushRockContourSegment(segments, x, y + outerBevelRadius, x + outerBevelRadius, y, 1, 1);
+  }
+  if (visibleOuterTopRight) {
+    backgroundCorners.push({ x: right, y, stepX: -1, stepY: 1 });
+    pushRockContourSegment(segments, right - outerBevelRadius, y, right, y + outerBevelRadius, -1, 1);
+  }
+  if (visibleOuterBottomRight) {
+    backgroundCorners.push({ x: right, y: bottom, stepX: -1, stepY: -1 });
+    pushRockContourSegment(segments, right, bottom - outerBevelRadius, right - outerBevelRadius, bottom, -1, -1);
+  }
+  if (visibleOuterBottomLeft) {
+    backgroundCorners.push({ x, y: bottom, stepX: 1, stepY: -1 });
+    pushRockContourSegment(segments, x + outerBevelRadius, bottom, x, bottom - outerBevelRadius, 1, -1);
+  }
+
+  if (topOpen && x + topTrimLeft <= right - topTrimRight) {
+    pushRockContourSegment(segments, x + topTrimLeft, y, right - topTrimRight, y, 0, 1);
+  }
+  if (rightOpen && y + rightTrimTop <= bottom - rightTrimBottom) {
+    pushRockContourSegment(segments, right, y + rightTrimTop, right, bottom - rightTrimBottom, -1, 0);
+  }
+  if (bottomOpen && x + bottomTrimLeft <= right - bottomTrimRight) {
+    pushRockContourSegment(segments, right - bottomTrimRight, bottom, x + bottomTrimLeft, bottom, 0, -1);
+  }
+  if (leftOpen && y + leftTrimTop <= bottom - leftTrimBottom) {
+    pushRockContourSegment(segments, x, bottom - leftTrimBottom, x, y + leftTrimTop, 1, 0);
+  }
+}
+
+function pushRockInnerHoleContourSegments(
+  segments,
+  asteroid,
+  camera,
+  tileSize,
+  minTileX,
+  maxTileX,
+  minTileY,
+  maxTileY,
+  visibility = null,
+  sealDiagonalJoins = false
+) {
+  for (let tileY = minTileY - 1; tileY <= maxTileY + 1; tileY += 1) {
+    for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
+      if (visibility && !asteroidVisibilityPaintsBackground(visibility, tileX, tileY)) {
+        continue;
+      }
+      if (isRockTileAt(asteroid, tileX, tileY)) {
+        continue;
+      }
+
+      const x = Math.round(tileX * tileSize - camera.x);
+      const y = Math.round(tileY * tileSize - camera.y);
+      const topEdge = y - 1;
+      const leftEdge = x - 1;
+      const rightEdge = x + tileSize;
+      const bottomEdge = y + tileSize;
+      const rightInside = rightEdge - 1;
+      const bottomInside = bottomEdge - 1;
+      const north = rockTileRendersForContour(asteroid, visibility, tileX, tileY - 1);
+      const east = rockTileRendersForContour(asteroid, visibility, tileX + 1, tileY);
+      const south = rockTileRendersForContour(asteroid, visibility, tileX, tileY + 1);
+      const west = rockTileRendersForContour(asteroid, visibility, tileX - 1, tileY);
+      const northWest = rockTileRendersForContour(asteroid, visibility, tileX - 1, tileY - 1);
+      const northEast = rockTileRendersForContour(asteroid, visibility, tileX + 1, tileY - 1);
+      const southEast = rockTileRendersForContour(asteroid, visibility, tileX + 1, tileY + 1);
+      const southWest = rockTileRendersForContour(asteroid, visibility, tileX - 1, tileY + 1);
+
+      const innerBevelOptions = sealDiagonalJoins
+        ? { endpointTolerance: ROCK_INNER_BEVEL_ENDPOINT_TOLERANCE }
+        : null;
+      if (north && west && northWest) {
+        pushRockContourSegment(
+          segments,
+          x + ROCK_INNER_CORNER_RADIUS,
+          topEdge,
+          leftEdge,
+          y + ROCK_INNER_CORNER_RADIUS,
+          -1,
+          -1,
+          innerBevelOptions
+        );
+      }
+      if (north && east && northEast) {
+        pushRockContourSegment(
+          segments,
+          rightInside - ROCK_INNER_CORNER_RADIUS,
+          topEdge,
+          rightEdge,
+          y + ROCK_INNER_CORNER_RADIUS,
+          1,
+          -1,
+          innerBevelOptions
+        );
+      }
+      if (south && east && southEast) {
+        pushRockContourSegment(
+          segments,
+          rightEdge,
+          bottomInside - ROCK_INNER_CORNER_RADIUS,
+          rightInside - ROCK_INNER_CORNER_RADIUS,
+          bottomEdge,
+          1,
+          1,
+          innerBevelOptions
+        );
+      }
+      if (south && west && southWest) {
+        pushRockContourSegment(
+          segments,
+          x + ROCK_INNER_CORNER_RADIUS,
+          bottomEdge,
+          leftEdge,
+          bottomInside - ROCK_INNER_CORNER_RADIUS,
+          -1,
+          1,
+          innerBevelOptions
+        );
+      }
+    }
+  }
+}
+
+function pushRockContourSegment(segments, x0, y0, x1, y1, inwardX, inwardY, options = null) {
+  if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) {
+    return;
+  }
+
+  segments.push({
+    x0: rockContourCenterCoordinate(x0),
+    y0: rockContourCenterCoordinate(y0),
+    x1: rockContourCenterCoordinate(x1),
+    y1: rockContourCenterCoordinate(y1),
+    inwardX,
+    inwardY,
+    endpointTolerance: options?.endpointTolerance
+  });
+}
+
+function strokeRockContourSegments(ctx, segments, color, lineWidth = 1) {
+  if (!segments.length) {
+    return;
+  }
+
+  const width = Math.max(1, Math.floor(Number(lineWidth) || 1));
+  ctx.fillStyle = color;
+  for (const segment of segments) {
+    drawRockPathSegment(ctx, segment, width);
+  }
+}
+
+function drawRockPathSegment(ctx, segment, width) {
+  const x0 = segment.x0;
+  const y0 = segment.y0;
+  const x1 = segment.x1;
+  const y1 = segment.y1;
+  const inwardX = Math.sign(segment.inwardX || 0);
+  const inwardY = Math.sign(segment.inwardY || 0);
+
+  if (y0 === y1) {
+    const left = rockContourSpanStart(Math.min(x0, x1));
+    const right = rockContourSpanEnd(Math.max(x0, x1));
+    const top = inwardY >= 0
+      ? Math.floor(y0)
+      : Math.floor(y0) - width + 1;
+    ctx.fillRect(left, top, right - left, width);
+    return;
+  }
+
+  if (x0 === x1) {
+    const top = rockContourSpanStart(Math.min(y0, y1));
+    const bottom = rockContourSpanEnd(Math.max(y0, y1));
+    const left = inwardX >= 0
+      ? Math.floor(x0)
+      : Math.floor(x0) - width + 1;
+    ctx.fillRect(left, top, width, bottom - top);
+    return;
+  }
+
+  drawRockRasterStrokeSegment(ctx, x0, y0, x1, y1, inwardX, inwardY, width, segment.endpointTolerance);
+}
+
+function drawRockRasterStrokeSegment(ctx, x0, y0, x1, y1, inwardX, inwardY, width, endpointTolerance = null) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const length = Math.hypot(dx, dy) || 1;
+  const tangentX = dx / length;
+  const tangentY = dy / length;
+  const inwardLength = Math.hypot(inwardX, inwardY) || 1;
+  const normalX = inwardX / inwardLength;
+  const normalY = inwardY / inwardLength;
+  const minX = Math.floor(Math.min(x0, x1, x0 + normalX * width, x1 + normalX * width) - 1);
+  const maxX = Math.ceil(Math.max(x0, x1, x0 + normalX * width, x1 + normalX * width) + 1);
+  const minY = Math.floor(Math.min(y0, y1, y0 + normalY * width, y1 + normalY * width) - 1);
+  const maxY = Math.ceil(Math.max(y0, y1, y0 + normalY * width, y1 + normalY * width) + 1);
+  const alongTolerance = Number.isFinite(endpointTolerance) ? endpointTolerance : 0.5;
+  const normalTolerance = width > 1 ? ROCK_BEVEL_INNER_EDGE_TOLERANCE : 0;
+
+  for (let pixelY = minY; pixelY < maxY; pixelY += 1) {
+    for (let pixelX = minX; pixelX < maxX; pixelX += 1) {
+      const relX = pixelX + 0.5 - x0;
+      const relY = pixelY + 0.5 - y0;
+      const along = relX * tangentX + relY * tangentY;
+      if (along < -alongTolerance || along > length + alongTolerance) {
+        continue;
+      }
+
+      const normal = relX * normalX + relY * normalY;
+      if (normal < 0 || normal >= width + normalTolerance) {
+        continue;
+      }
+
+      ctx.fillRect(pixelX, pixelY, 1, 1);
+    }
+  }
+}
+
+function rockContourCenterCoordinate(value) {
+  return Math.floor(value) + 0.5;
+}
+
+function rockContourStrokeStart(center, width) {
+  return Math.floor(center - width / 2);
+}
+
+function rockContourSpanStart(value) {
+  return Math.floor(value);
+}
+
+function rockContourSpanEnd(value) {
+  return Math.ceil(value);
+}
+
+function orderedRockContourPaths(segments) {
+  const endpointMap = new Map();
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    addRockContourEndpoint(endpointMap, rockContourPointKey(segment.x0, segment.y0), index);
+    addRockContourEndpoint(endpointMap, rockContourPointKey(segment.x1, segment.y1), index);
+  }
+
+  const unused = new Set(segments.map((_, index) => index));
+  const paths = [];
+  while (unused.size) {
+    const firstIndex = unused.values().next().value;
+    const first = segments[firstIndex];
+    unused.delete(firstIndex);
+    const path = [
+      { x: first.x0, y: first.y0 },
+      { x: first.x1, y: first.y1 }
+    ];
+
+    extendRockContourPath(path, segments, endpointMap, unused, true);
+    extendRockContourPath(path, segments, endpointMap, unused, false);
+    paths.push(path);
+  }
+
+  return paths;
+}
+
+function extendRockContourPath(path, segments, endpointMap, unused, forward) {
+  while (true) {
+    const point = forward ? path[path.length - 1] : path[0];
+    const key = rockContourPointKey(point.x, point.y);
+    const candidateIndexes = endpointMap.get(key);
+    if (!candidateIndexes) {
+      return;
+    }
+
+    let nextIndex = null;
+    for (const candidateIndex of candidateIndexes) {
+      if (unused.has(candidateIndex)) {
+        nextIndex = candidateIndex;
+        break;
+      }
+    }
+    if (nextIndex === null) {
+      return;
+    }
+
+    unused.delete(nextIndex);
+    const segment = segments[nextIndex];
+    const startKey = rockContourPointKey(segment.x0, segment.y0);
+    const nextPoint = startKey === key
+      ? { x: segment.x1, y: segment.y1 }
+      : { x: segment.x0, y: segment.y0 };
+    if (forward) {
+      path.push(nextPoint);
+    } else {
+      path.unshift(nextPoint);
+    }
+  }
+}
+
+function addRockContourEndpoint(endpointMap, key, segmentIndex) {
+  let indexes = endpointMap.get(key);
+  if (!indexes) {
+    indexes = [];
+    endpointMap.set(key, indexes);
+  }
+  indexes.push(segmentIndex);
+}
+
+function rockContourPointKey(x, y) {
+  return `${Math.round(x * 2)},${Math.round(y * 2)}`;
+}
+
+function drawRockOuterCornerBackground(ctx, cornerX, cornerY, stepX, stepY, radius = ROCK_OUTER_CORNER_RADIUS) {
+  for (let offsetY = 0; offsetY < radius; offsetY += 1) {
+    for (let offsetX = 0; offsetX < radius; offsetX += 1) {
+      if (offsetX + offsetY >= radius) {
+        continue;
+      }
+
+      ctx.fillRect(cornerX + stepX * offsetX, cornerY + stepY * offsetY, 1, 1);
+    }
+  }
 }
 
 function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
@@ -9040,60 +9957,6 @@ function drawWallOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibi
   if (south && west && !southWest) {
     drawPixelLine(ctx, x + 1, y + size - 2, x + 1, y + size);
     drawPixelLine(ctx, x, y + size - 2, x + 1, y + size - 2);
-  }
-}
-
-function drawInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility = null) {
-  ctx.fillStyle = colors.rockLine || colors.foreground;
-
-  for (let tileY = minTileY - 1; tileY <= maxTileY + 1; tileY += 1) {
-    for (let tileX = minTileX - 1; tileX <= maxTileX + 1; tileX += 1) {
-      if (visibility && !asteroidVisibilityPaintsBackground(visibility, tileX, tileY)) {
-        continue;
-      }
-      if (isRockTileAt(asteroid, tileX, tileY)) {
-        continue;
-      }
-
-      const x = Math.round(tileX * tileSize - camera.x);
-      const y = Math.round(tileY * tileSize - camera.y);
-      const topEdge = y - 1;
-      const leftEdge = x - 1;
-      const rightEdge = x + tileSize;
-      const bottomEdge = y + tileSize;
-      const rightInside = rightEdge - 1;
-      const bottomInside = bottomEdge - 1;
-      const north = isRockTileAt(asteroid, tileX, tileY - 1);
-      const east = isRockTileAt(asteroid, tileX + 1, tileY);
-      const south = isRockTileAt(asteroid, tileX, tileY + 1);
-      const west = isRockTileAt(asteroid, tileX - 1, tileY);
-      const northWest = isRockTileAt(asteroid, tileX - 1, tileY - 1);
-      const northEast = isRockTileAt(asteroid, tileX + 1, tileY - 1);
-      const southEast = isRockTileAt(asteroid, tileX + 1, tileY + 1);
-      const southWest = isRockTileAt(asteroid, tileX - 1, tileY + 1);
-
-      if (north && west && northWest) {
-        drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, topEdge, leftEdge, y + ROCK_INNER_CORNER_RADIUS);
-      }
-
-      if (north && east && northEast) {
-        drawPixelLine(ctx, rightInside - ROCK_INNER_CORNER_RADIUS, topEdge, rightEdge, y + ROCK_INNER_CORNER_RADIUS);
-      }
-
-      if (south && east && southEast) {
-        drawPixelLine(
-          ctx,
-          rightEdge,
-          bottomInside - ROCK_INNER_CORNER_RADIUS,
-          rightInside - ROCK_INNER_CORNER_RADIUS,
-          bottomEdge
-        );
-      }
-
-      if (south && west && southWest) {
-        drawPixelLine(ctx, x + ROCK_INNER_CORNER_RADIUS, bottomEdge, leftEdge, bottomInside - ROCK_INNER_CORNER_RADIUS);
-      }
-    }
   }
 }
 
@@ -9784,6 +10647,18 @@ function rockTileBlocksVisibleOutline(asteroid, visibility, tileX, tileY) {
   return isRockTileAt(asteroid, tileX, tileY);
 }
 
+function rockTileRendersForContour(asteroid, visibility, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+
+  if (!isRockTile(asteroid.tiles[tileY * asteroid.widthTiles + tileX])) {
+    return false;
+  }
+
+  return !visibility || asteroidVisibilityRendersShell(visibility, tileX, tileY);
+}
+
 function isWallTileAt(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
     return false;
@@ -9924,7 +10799,7 @@ function drawGroundDebris(ctx, snapshot, camera, visibility = null, colors = {},
   const maxCellX = Math.ceil((camera.x + ctx.width + padding) / GROUND_DEBRIS_CELL_SIZE) + 1;
   const minCellY = Math.floor((camera.y - padding) / GROUND_DEBRIS_CELL_SIZE) - 1;
   const maxCellY = Math.ceil((camera.y + ctx.height + padding) / GROUND_DEBRIS_CELL_SIZE) + 1;
-  const color = colors.rockDark || colors.wallFill || colors.foreground || RENDER.foreground;
+  const color = colors.backgroundDark || colors.rockDark || colors.wallFill || colors.foreground || RENDER.foreground;
   let currentColor = color;
   ctx.fillStyle = currentColor;
 
@@ -10194,9 +11069,9 @@ function drawCarModeHuckRockEntity(ctx, entity, camera, colors) {
     return;
   }
 
-  drawCarHuckRockShadow(ctx, hull, colors);
+  // drawCarHuckRockShadow(ctx, hull, colors);
 
-  drawCarHuckRockOuterOutline(ctx, hull, colors);
+  // drawCarHuckRockOuterOutline(ctx, hull, colors);
 
   fillConvexPolygon(ctx, hull, colors.backing);
 
@@ -10210,7 +11085,7 @@ function drawCarModeHuckRockEntity(ctx, entity, camera, colors) {
 
 function drawCarHuckRockOuterOutline(ctx, hull, colors) {
   const expandedHull = expandHullFromCenter(hull, 2);
-  ctx.fillStyle = colors.rockLine || colors.foreground;
+  ctx.fillStyle = colors.backgroundDark || colors.rockLine || colors.foreground;
   for (let index = 0; index < expandedHull.length; index += 1) {
     const from = expandedHull[index];
     const to = expandedHull[(index + 1) % expandedHull.length];
@@ -10261,7 +11136,7 @@ function drawCarHuckRockShadow(ctx, hull, colors) {
     return;
   }
 
-  ctx.fillStyle = colors.backing || "#000000";
+  ctx.fillStyle = colors.backgroundDark || colors.backing || "#000000";
   drawPixelLine(ctx, Math.round(minX), Math.round(maxY + 2), Math.round(maxX), Math.round(maxY + 2));
 }
 
@@ -10573,6 +11448,7 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
 
 function drawCarBody(ctx, x, y, player, radius, angle, colors, timeSeconds, drawMiddleLayer = null) {
   const bodyColor = carBodyColor(player);
+  const lean = carVisualLean(player, angle);
   const forward = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -10581,21 +11457,32 @@ function drawCarBody(ctx, x, y, player, radius, angle, colors, timeSeconds, draw
     x: -forward.y,
     y: forward.x
   };
+  const leanShift = -clamp(lean, -1, 1) * CAR_BODY_LEAN_VISUAL_SHIFT;
+  const bodyX = x + side.x * leanShift;
+  const bodyY = y + side.y * leanShift;
 
-  drawCarEngineNozzles(ctx, x, y, forward, side, radius);
+  drawCarEngineNozzles(ctx, bodyX, bodyY, forward, side, radius);
 
-  fillCarBodySphere(ctx, x, y, radius, bodyColor);
-  drawCenterCarTire(ctx, x, y, player, radius, forward, side, timeSeconds);
+  fillCarBodySphere(ctx, bodyX, bodyY, radius, bodyColor);
+  drawCenterCarTire(ctx, bodyX, bodyY, x, y, player, radius, forward, side, timeSeconds);
 
   if (typeof drawMiddleLayer === "function") {
     drawMiddleLayer();
   }
 
   ctx.fillStyle = CAR_TIRE_COLOR;
-  drawCircle(ctx, x, y, radius);
+  drawCircle(ctx, bodyX, bodyY, radius);
 }
 
 function carBodyAngle(player) {
+  if (Number.isFinite(player?.visualAngle)) {
+    return player.visualAngle;
+  }
+
+  return carControlAngle(player);
+}
+
+function carControlAngle(player) {
   return Number.isFinite(player?.carHeading)
     ? player.carHeading
     : shipControlAngle(player);
@@ -10620,20 +11507,52 @@ function carVisualSteerAngle(player, bodyAngle) {
   );
 }
 
-function drawCenterCarTire(ctx, x, y, player, radius, forward, side, timeSeconds) {
-  const halfLength = Math.max(4, radius * CAR_CENTER_TIRE_LENGTH_SCALE * 0.5);
+function carVisualLean(player, bodyAngle) {
+  void bodyAngle;
+  const lean = clamp(Number(player?.visualCarLean) || 0, -1, 1);
+  return Math.abs(lean) < 0.02 ? 0 : lean;
+}
+
+function carVisualLeanForTurn(turn) {
+  if (!turn || turn.duration <= 0) {
+    return 0;
+  }
+
+  const delta = normalizeSignedAngle(turn.target - turn.from);
+  if (Math.abs(delta) <= 0.0001) {
+    return 0;
+  }
+
+  const progress = clamp(turn.elapsed / turn.duration, 0, 1);
+  const envelope = Math.sin(Math.PI * smoothstep01(progress));
+  const magnitude = clamp(Math.abs(delta) / (Math.PI / 3), 0, 1);
+  return -Math.sign(delta) * envelope * magnitude;
+}
+
+function drawCenterCarTire(ctx, sphereX, sphereY, tireX, tireY, player, radius, forward, side, timeSeconds) {
+  const halfLength = Math.max(radius + 1, radius * CAR_CENTER_TIRE_LENGTH_SCALE * 0.5);
   const tireRadius = Math.max(2, radius * CAR_CENTER_TIRE_RADIUS_SCALE);
-  const from = {
-    x: x - forward.x * halfLength,
-    y: y - forward.y * halfLength
-  };
-  const to = {
-    x: x + forward.x * halfLength,
-    y: y + forward.y * halfLength
-  };
+  const leanX = sphereX - tireX;
+  const leanY = sphereY - tireY;
+  const leanMagnitude = Math.hypot(leanX, leanY);
+  const bank = leanMagnitude > 0.001
+    ? { x: leanX / leanMagnitude, y: leanY / leanMagnitude }
+    : { x: 0, y: 0 };
+  const tireCenterX = sphereX + bank.x * tireRadius;
+  const tireCenterY = sphereY + bank.y * tireRadius;
 
   ctx.fillStyle = CAR_TIRE_COLOR;
-  drawFilledCapsule(ctx, from, to, tireRadius);
+  drawCarWheelBand(
+    ctx,
+    tireCenterX,
+    tireCenterY,
+    halfLength,
+    tireRadius,
+    forward,
+    sphereX,
+    sphereY,
+    radius
+  );
 
   const speed = Math.hypot(Number(player.vx) || 0, Number(player.vy) || 0);
   const thrustAmount = player.thrusting ? 1 : 0;
@@ -10644,17 +11563,115 @@ function drawCenterCarTire(ctx, x, y, player, radius, forward, side, timeSeconds
 
   for (let offset = first; offset <= last; offset += CAR_CENTER_TIRE_TREAD_SPACING) {
     const center = {
-      x: x + forward.x * offset,
-      y: y + forward.y * offset
+      x: tireCenterX + forward.x * offset,
+      y: tireCenterY + forward.y * offset
     };
     const width = tireRadius * 0.82;
-    drawPixelLine(
+    drawPixelLineClippedCircle(
       ctx,
       Math.round(center.x - side.x * width),
       Math.round(center.y - side.y * width),
       Math.round(center.x + side.x * width),
-      Math.round(center.y + side.y * width)
+      Math.round(center.y + side.y * width),
+      sphereX,
+      sphereY,
+      radius
     );
+  }
+}
+
+function drawCarWheelBand(ctx, centerX, centerY, halfLength, tireRadius, forward, circleX, circleY, circleRadius) {
+  const from = {
+    x: centerX - forward.x * halfLength,
+    y: centerY - forward.y * halfLength
+  };
+  const to = {
+    x: centerX + forward.x * halfLength,
+    y: centerY + forward.y * halfLength
+  };
+  drawFilledCapsuleClippedCircle(ctx, from, to, tireRadius, circleX, circleY, circleRadius);
+}
+
+function drawFilledCapsuleClippedCircle(ctx, from, to, capsuleRadius, circleX, circleY, circleRadius) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.000001) {
+    fillSolidDisk(ctx, from.x, from.y, Math.min(capsuleRadius, circleRadius));
+    return;
+  }
+
+  const minX = Math.floor(Math.max(
+    Math.min(from.x, to.x) - capsuleRadius,
+    circleX - circleRadius
+  ));
+  const maxX = Math.ceil(Math.min(
+    Math.max(from.x, to.x) + capsuleRadius,
+    circleX + circleRadius
+  ));
+  const minY = Math.floor(Math.max(
+    Math.min(from.y, to.y) - capsuleRadius,
+    circleY - circleRadius
+  ));
+  const maxY = Math.ceil(Math.min(
+    Math.max(from.y, to.y) + capsuleRadius,
+    circleY + circleRadius
+  ));
+  const capsuleRadiusSq = capsuleRadius * capsuleRadius;
+  const circleRadiusSq = circleRadius * circleRadius;
+
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const pointX = px + 0.5;
+      const pointY = py + 0.5;
+      const circleDx = pointX - circleX;
+      const circleDy = pointY - circleY;
+      if (circleDx * circleDx + circleDy * circleDy > circleRadiusSq) {
+        continue;
+      }
+
+      const t = clamp(((pointX - from.x) * dx + (pointY - from.y) * dy) / lengthSq, 0, 1);
+      const closestX = from.x + dx * t;
+      const closestY = from.y + dy * t;
+      const distanceX = pointX - closestX;
+      const distanceY = pointY - closestY;
+      if (distanceX * distanceX + distanceY * distanceY <= capsuleRadiusSq) {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+}
+
+function drawPixelLineClippedCircle(ctx, x0, y0, x1, y1, circleX, circleY, circleRadius) {
+  const radiusSq = circleRadius * circleRadius;
+  let x = x0;
+  let y = y0;
+  const dx = Math.abs(x1 - x0);
+  const sx = x0 < x1 ? 1 : -1;
+  const dy = -Math.abs(y1 - y0);
+  const sy = y0 < y1 ? 1 : -1;
+  let error = dx + dy;
+
+  while (true) {
+    const pointX = x + 0.5 - circleX;
+    const pointY = y + 0.5 - circleY;
+    if (pointX * pointX + pointY * pointY <= radiusSq) {
+      ctx.fillRect(x, y, 1, 1);
+    }
+    if (x === x1 && y === y1) {
+      break;
+    }
+
+    const nextError = error * 2;
+    if (nextError >= dy) {
+      error += dy;
+      x += sx;
+    }
+
+    if (nextError <= dx) {
+      error += dx;
+      y += sy;
+    }
   }
 }
 
@@ -10717,10 +11734,20 @@ function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
 function drawCarEngineNozzles(ctx, x, y, forward, side, radius) {
   ctx.fillStyle = CAR_TIRE_COLOR;
   for (const offset of carEngineSideOffsets(radius)) {
-    const cx = x - forward.x * (radius + 1) + side.x * offset;
-    const cy = y - forward.y * (radius + 1) + side.y * offset;
+    const centerRearOffset = carEngineNozzleCenterRearOffset(radius);
+    const cx = x - forward.x * centerRearOffset + side.x * offset;
+    const cy = y - forward.y * centerRearOffset + side.y * offset;
     fillRotatedRect(ctx, cx, cy, forward, side, CAR_ENGINE_NOZZLE_LENGTH, CAR_ENGINE_NOZZLE_WIDTH);
   }
+}
+
+function carEngineNozzleCenterRearOffset(radius) {
+  return radius + CAR_ENGINE_NOZZLE_CENTER_REAR_OFFSET;
+}
+
+function carEnginePlumeRearOffset(radius) {
+  return carEngineNozzleCenterRearOffset(radius) +
+    CAR_ENGINE_NOZZLE_LENGTH / 2;
 }
 
 function carEngineSideOffsets(radius) {
@@ -11894,10 +12921,10 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
 
   const effects = aggregateUpgradeEffects(player.upgrades);
   const { rear, side } = basis;
-  const origins = rearEnginePlumeOrigins(player, rear, side, gameMode);
+  const engineRamp = thrusterEngineRamp(player, gameMode);
+  const origins = rearEnginePlumeOrigins(player, rear, side, gameMode, engineRamp);
   const key = player.id || String(player.number);
   const particleMultiplier = effects.thrusterParticleMultiplier;
-  const engineRamp = thrusterEngineRamp(player);
   const turnIntensity = Number.isFinite(basis.intensity)
     ? clamp(basis.intensity, 0, 1)
     : 1;
@@ -11923,7 +12950,7 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
       const capOffset = 1 + sideRatio * sideRatio * Math.max(1, nozzleRadius * 0.7);
       const rearJitter = randomUnit(seed, 2) * 0.9;
       const speed = (92 + randomUnit(seed, 3) * 90) * Math.sqrt(particleMultiplier) * engineRamp.plumeSpeed;
-      const spread = (randomUnit(seed, 4) - 0.5) * 10 * Math.sqrt(particleMultiplier);
+      const spread = (randomUnit(seed, 4) - 0.5) * 10 * Math.sqrt(particleMultiplier) * engineRamp.spread;
       const localHeat = 1 - clamp(Math.abs(sideJitter) / (nozzleWidth * 0.5), 0, 1);
       const medialOffset = (origin.medialOffset || 0) + sideJitter;
       const medialHeatLinear = 1 - clamp(Math.abs(medialOffset) / Math.max(1, origin.medialRadius || 1), 0, 1);
@@ -11932,6 +12959,7 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
       const life =
         (0.05 + centerHeat * 0.68 + randomUnit(seed, 5) * (0.1 + centerHeat * 0.3)) *
         engineRamp.life;
+      const particleHeat = clamp(0.18 + centerHeat * 0.88 + randomUnit(seed, 10) * 0.08, 0, 1);
 
       state.particles.push({
         x: origin.x + side.x * sideJitter + rear.x * (capOffset + rearJitter),
@@ -11940,7 +12968,9 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
         vy: rear.y * speed + side.y * spread,
         age: randomUnit(seed, 6) * 0.025,
         life,
-        seed
+        seed,
+        heat: gameMode === GAME_MODES.cars ? particleHeat : null,
+        kind: gameMode === GAME_MODES.cars ? CAR_THRUSTER_PARTICLE_KIND : null
       });
     }
   }
@@ -11952,19 +12982,24 @@ function sampleProjectedNozzleOffset(seed, radius) {
   return Math.cos(angle) * distance;
 }
 
-function thrusterEngineRamp(player) {
+function thrusterEngineRamp(player, gameMode = GAME_MODES.bitspace) {
   const level = clamp(
     upgradeLevel(player?.upgrades, THRUSTER_ENGINE_UPGRADE_ID),
     0,
     THRUSTER_ENGINE_MAX_LEVEL
   );
   const t = THRUSTER_ENGINE_MAX_LEVEL > 0 ? level / THRUSTER_ENGINE_MAX_LEVEL : 0;
+  const ramp = gameMode === GAME_MODES.cars
+    ? CAR_THRUSTER_ENGINE_RAMP
+    : THRUSTER_ENGINE_RAMP;
 
   return {
-    rate: lerp(THRUSTER_ENGINE_RAMP.rateMin, THRUSTER_ENGINE_RAMP.rateMax, t),
-    plumeSpeed: lerp(THRUSTER_ENGINE_RAMP.plumeSpeedMin, THRUSTER_ENGINE_RAMP.plumeSpeedMax, t),
-    life: lerp(THRUSTER_ENGINE_RAMP.lifeMin, THRUSTER_ENGINE_RAMP.lifeMax, t),
-    nozzle: lerp(THRUSTER_ENGINE_RAMP.nozzleMin, THRUSTER_ENGINE_RAMP.nozzleMax, t)
+    rate: lerp(ramp.rateMin, ramp.rateMax, t),
+    plumeSpeed: lerp(ramp.plumeSpeedMin, ramp.plumeSpeedMax, t),
+    life: lerp(ramp.lifeMin, ramp.lifeMax, t),
+    nozzle: lerp(ramp.nozzleMin, ramp.nozzleMax, t),
+    spread: lerp(ramp.spreadMin ?? 1, ramp.spreadMax ?? 1, t),
+    sideOffsetScale: lerp(ramp.sideOffsetScaleMin ?? 1, ramp.sideOffsetScaleMax ?? 1, t)
   };
 }
 
@@ -12068,7 +13103,7 @@ function emitTireTrackParticles(state, player, dtSeconds) {
       y: wheel.y,
       age: 0,
       life: TIRE_TRACK_LIFE_SECONDS,
-      colorIndex: Math.floor(randomUnit(seed, 1) * TIRE_TRACK_DARKEN_LEVELS.length),
+      colorIndex: Math.floor(randomUnit(seed, 1) * TIRE_TRACK_BACKGROUND_MIXES.length),
       seed
     });
   }
@@ -12089,9 +13124,9 @@ function carTireTrackWheels(player) {
   }));
 }
 
-function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspace) {
+function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspace, engineRamp = {}) {
   if (gameMode === GAME_MODES.cars) {
-    return carRearEnginePlumeOrigins(player, rear, side);
+    return carRearEnginePlumeOrigins(player, rear, side, engineRamp);
   }
 
   const mainRadius = shipMainRadius(player);
@@ -12111,13 +13146,15 @@ function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspa
   }));
 }
 
-function carRearEnginePlumeOrigins(player, rear, side) {
+function carRearEnginePlumeOrigins(player, rear, side, engineRamp = {}) {
   const radius = shipMainRadius(player);
-  const offsets = carEngineSideOffsets(radius);
+  const sideOffsetScale = Number(engineRamp.sideOffsetScale || 1);
+  const offsets = carEngineSideOffsets(radius).map((offset) => offset * sideOffsetScale);
   const medialRadius = Math.max(1, Math.max(...offsets.map((offset) => Math.abs(offset))));
+  const rearOffset = carEnginePlumeRearOffset(radius);
   return offsets.map((offset) => ({
-    x: player.x + rear.x * (radius + CAR_ENGINE_NOZZLE_LENGTH + 0.5) + side.x * offset,
-    y: player.y + rear.y * (radius + CAR_ENGINE_NOZZLE_LENGTH + 0.5) + side.y * offset,
+    x: player.x + rear.x * rearOffset + side.x * offset,
+    y: player.y + rear.y * rearOffset + side.y * offset,
     nozzleWidth: CAR_ENGINE_NOZZLE_WIDTH + 1,
     medialOffset: offset,
     medialRadius
@@ -12174,11 +13211,13 @@ function drawTireTrackStamp(ctx, x, y) {
 
 function tireTrackColors(colors) {
   const base = colors.background || CAR_MODE_COLORS.background;
-  return TIRE_TRACK_DARKEN_LEVELS.map((amount) => darkenHexColor(base, amount));
+  const sampleTarget = colors.backgroundDark || CAR_MODE_COLORS.backgroundDark || base;
+  return TIRE_TRACK_BACKGROUND_MIXES.map((amount) => mixHexColors(base, sampleTarget, amount));
 }
 
 function drawParticles(ctx, particles, camera, colors, timeSeconds) {
-  ctx.fillStyle = colors.foreground;
+  let currentColor = colors.foreground;
+  ctx.fillStyle = currentColor;
 
   for (const particle of particles) {
     const progress = particle.age / particle.life;
@@ -12187,6 +13226,12 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
     }
 
     const screen = worldToScreen(particle, camera);
+    const color = particleColor(particle, colors);
+    if (color !== currentColor) {
+      ctx.fillStyle = color;
+      currentColor = color;
+    }
+
     const heat = particleHeatFromLife(particle);
     if (heat > 0.05) {
       drawHotParticle(ctx, screen, particle);
@@ -12196,6 +13241,31 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
     const size = particle.size || (progress < 0.18 && particle.seed % 7 === 0 ? 2 : 1);
     ctx.fillRect(screen.x, screen.y, size, size);
   }
+}
+
+function particleColor(particle, colors) {
+  if (particle?.kind === CAR_THRUSTER_PARTICLE_KIND) {
+    return carThrusterParticleColor(particle);
+  }
+
+  return colors.foreground;
+}
+
+function carThrusterParticleColor(particle) {
+  const life = Math.max(0.001, Number(particle.life || 0));
+  const progress = clamp(Number(particle.age || 0) / life, 0, 1);
+  const initialHeat = clamp(Number(particle.heat || 0), 0, 1);
+  const heat = clamp(initialHeat * (1 - progress), 0, 1);
+  if (heat >= 0.86) {
+    return CAR_THRUSTER_HEAT_COLORS[0];
+  }
+  const scaled = (1 - heat) * (CAR_THRUSTER_HEAT_COLORS.length - 1);
+  const index = Math.min(CAR_THRUSTER_HEAT_COLORS.length - 2, Math.floor(scaled));
+  return mixHexColors(
+    CAR_THRUSTER_HEAT_COLORS[index],
+    CAR_THRUSTER_HEAT_COLORS[index + 1],
+    scaled - index
+  );
 }
 
 function drawHotParticle(ctx, screen, particle) {
@@ -12969,6 +14039,11 @@ function clamp(value, min, max) {
 
 function lerp(start, end, amount) {
   return start + (end - start) * amount;
+}
+
+function smoothstep01(amount) {
+  const t = clamp(amount, 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 function normalize3d(x, y, z) {
