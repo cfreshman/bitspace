@@ -4593,6 +4593,15 @@ function serializeLocalBotPlayer(player) {
     kills: player.kills || 0,
     lastKillDropAmount: player.lastKillDropAmount || 0,
     lastKillDropTick: player.lastKillDropTick,
+    lastHit: player.lastHitTargetId
+      ? {
+          targetId: player.lastHitTargetId,
+          tick: player.lastHitTick,
+          health: player.lastHitHealth,
+          maxHealth: player.lastHitMaxHealth,
+          healthBars: player.lastHitHealthBars
+        }
+      : null,
     lastDamageTick: player.lastDamageTick,
     killedById: player.killedById,
     eliminatedAtTick: player.eliminatedAtTick,
@@ -4838,6 +4847,13 @@ function restoreLocalBotPlayer(player, savedPlayer) {
   player.thrusting = savedPlayer.thrusting === true;
   player.upgrades = { ...player.upgrades, ...(savedPlayer.upgrades || {}) };
   player.killedById = savedPlayer.killedById ?? null;
+  if (savedPlayer.lastHit?.targetId) {
+    player.lastHitTargetId = String(savedPlayer.lastHit.targetId);
+    player.lastHitTick = numberOr(savedPlayer.lastHit.tick, Number.NEGATIVE_INFINITY);
+    player.lastHitHealth = numberOr(savedPlayer.lastHit.health, 0);
+    player.lastHitMaxHealth = numberOr(savedPlayer.lastHit.maxHealth, 0);
+    player.lastHitHealthBars = numberOr(savedPlayer.lastHit.healthBars, ENGINE.player.startingHealthBars);
+  }
   player.resources = {
     rock: numberOr(savedPlayer.resources?.rock, 0),
     ore: numberOr(savedPlayer.resources?.ore, 0),

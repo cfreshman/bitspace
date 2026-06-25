@@ -69,7 +69,7 @@ export const ENGINE = Object.freeze({
     steerRate: 8.5,
     wheelBase: 9,
     tileScale: 2,
-    speedMultiplier: 5,
+    speedMultiplier: 10 / 3,
     friction: Math.max(0, SHIP_FRICTION - 0.045),
     frontAxleOffsetScale: 0.82,
     rearAxleOffsetScale: -0.82,

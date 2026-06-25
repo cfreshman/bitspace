@@ -41,6 +41,7 @@ const DEFAULT_ARENA_ID = "main";
 const INITIAL_SPAWN_ANGLE = Math.PI / 4;
 const KILL_DROP_SINGLE_DIAMOND_CHANCE = 2 / 3;
 const KILL_DROP_NOTICE_TICKS = ENGINE.tickRate * 3;
+const LAST_HIT_NOTICE_TICKS = ENGINE.tickRate * 5;
 const RANDOM_DIAMOND_SPAWN_TICKS = ENGINE.tickRate * 15;
 const CAR_GROUND_VARIANTS = Object.freeze({
   desert: "desert",
@@ -136,6 +137,11 @@ export function addPlayer(arena, playerOptions) {
     kills: 0,
     lastKillDropAmount: 0,
     lastKillDropTick: Number.NEGATIVE_INFINITY,
+    lastHitTargetId: null,
+    lastHitTick: Number.NEGATIVE_INFINITY,
+    lastHitHealth: 0,
+    lastHitMaxHealth: 0,
+    lastHitHealthBars: ENGINE.player.startingHealthBars,
     lastDamageTick: Number.NEGATIVE_INFINITY,
     killedById: null,
     eliminatedAtTick: null,
@@ -2405,6 +2411,16 @@ function damagePlayer(arena, player, amount, tick = 0, attackerId = null) {
 
   player.lastDamageTick = tick;
   player.health = clamp(player.health - damage, 0, player.maxHealth);
+  if (damage > 0 && attackerId && attackerId !== player.id) {
+    const attacker = arena?.players?.get(attackerId);
+    if (attacker?.alive !== false) {
+      attacker.lastHitTargetId = player.id;
+      attacker.lastHitTick = tick;
+      attacker.lastHitHealth = player.health;
+      attacker.lastHitMaxHealth = player.maxHealth;
+      attacker.lastHitHealthBars = player.healthBars;
+    }
+  }
   if (player.health > 0) {
     return;
   }
@@ -2681,6 +2697,16 @@ function snapshotPlayer(player, tick = 0) {
         tick: player.lastKillDropTick
       }
     : null;
+  const lastHitAge = tick - Number(player.lastHitTick ?? Number.NEGATIVE_INFINITY);
+  const lastHit = player.lastHitTargetId && lastHitAge >= 0 && lastHitAge <= LAST_HIT_NOTICE_TICKS
+    ? {
+        targetId: player.lastHitTargetId,
+        tick: player.lastHitTick,
+        health: roundForSnapshot(player.lastHitHealth),
+        maxHealth: player.lastHitMaxHealth,
+        healthBars: player.lastHitHealthBars
+      }
+    : null;
 
   return {
     id: player.id,
@@ -2713,6 +2739,7 @@ function snapshotPlayer(player, tick = 0) {
     maxHealth: player.maxHealth,
     kills: Math.max(0, Math.floor(Number(player.kills || 0))),
     killDrop,
+    lastHit,
     killedById: player.killedById,
     eliminatedAtTick: player.eliminatedAtTick,
     resources: {

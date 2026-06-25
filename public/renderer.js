@@ -31,7 +31,7 @@ const ENTITY_PIXEL_SIZE = 1;
 const CAR_MODE_COLORS = Object.freeze({
   foreground: "#ffe69a",
   background: "#c2531c",
-  backgroundDark: "#b96a1c",
+  backgroundDark: "#973b0e",
   grassground: "#5f7d37",
   grassgroundDark: "#4f6f32",
   backing: "#1f0d0a",
@@ -50,14 +50,14 @@ const CAR_MODE_COLORS = Object.freeze({
   health: "#28100c"
 });
 const CAR_BODY_COLORS = Object.freeze([
-  "#ff1a12",
-  "#ff8a00",
-  "#ffd400",
-  "#18e84f",
-  "#00d9ff",
-  "#2458ff",
-  "#9a2cff",
-  "#ff2fc3"
+  "#ff3024",
+  "#2f60ff",
+  "#1fe84f",
+  "#ff8f1f",
+  "#9c35ff",
+  "#ff36c4",
+  "#ffd81f",
+  "#12d6ff",
 ]);
 const CAR_TIRE_COLOR = "#000000";
 const CAR_TIRE_LENGTH = 6;
@@ -70,11 +70,13 @@ const CAR_BODY_MID_LIGHT_MIX = 0.08;
 const CAR_BODY_MID_DARKEN = 0.76;
 const CAR_BODY_DARKEN = 0.54;
 const CAR_BODY_LEAN_VISUAL_SHIFT = 1.5;
-const CAR_ENGINE_NOZZLE_LENGTH = 4;
+const CAR_ENGINE_NOZZLE_LENGTH = 8;
 const CAR_ENGINE_NOZZLE_WIDTH = 2;
-const CAR_ENGINE_NOZZLE_CENTER_REAR_OFFSET = 1;
-const CAR_ENGINE_SIDE_OFFSET_SCALE = 0.52;
-const CAR_ENGINE_PLUME_SIDE_OFFSET_SCALE = 1.18;
+const CAR_ENGINE_NOZZLE_BODY_OVERLAP = 0.75;
+const CAR_ENGINE_SIDE_OFFSET_SCALE = 1.04;
+const CAR_ENGINE_SIDE_OFFSET_INSET = 0.8;
+const CAR_ENGINE_PLUME_START_GAP = 1;
+const CAR_CENTER_TIRE_LEAN_CLIP_EXPAND = 0.5;
 const GROUND_DEBRIS_CELL_SIZE = 8;
 const GROUND_DEBRIS_DENSITY_MOD = 5;
 const GROUND_GRASS_DENSITY_MOD = 53;
@@ -237,12 +239,12 @@ const CAR_THRUSTER_ENGINE_RAMP = Object.freeze({
   plumeSpeedMax: 1,
   lifeMin: 0.5,
   lifeMax: 1,
-  nozzleMin: 2,
-  nozzleMax: 5,
+  nozzleMin: 1,
+  nozzleMax: 2,
   spreadMin: 2,
   spreadMax: 5,
-  sideOffsetScaleMin: CAR_ENGINE_PLUME_SIDE_OFFSET_SCALE,
-  sideOffsetScaleMax: CAR_ENGINE_PLUME_SIDE_OFFSET_SCALE
+  sideOffsetScaleMin: 1,
+  sideOffsetScaleMax: 1
 });
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
@@ -4039,7 +4041,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         drawSpectatorHud(ctx, options, localPlayer, cameraPlayer, colors, textRenderer, snapshot);
       } else {
         const playersLeft = (snapshot.players || []).filter((player) => player.alive === true).length;
-        drawPlayerHud(
+        const playerHudPanel = drawPlayerHud(
           ctx,
           localPlayer,
           colors,
@@ -4049,9 +4051,10 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           playersLeft,
           mobilePlayerHudLayout(ctx, options)
         );
-        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings);
-        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings);
-        drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings);
+        const controlBasePanel = drawCarsEnemyHitHud(ctx, localPlayer, snapshot, options, colors, textRenderer, playerHudPanel) || playerHudPanel;
+        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
+        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
+        drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
         drawMobileLeaveHud(ctx, localPlayer, options, colors, textRenderer);
       }
     }
@@ -4296,7 +4299,7 @@ function drawMenuPreviewHud(ctx, options, localPlayer, colors, textRenderer) {
     return;
   }
 
-  drawPlayerHud(
+  const playerHudPanel = drawPlayerHud(
     ctx,
     localPlayer,
     colors,
@@ -4306,16 +4309,16 @@ function drawMenuPreviewHud(ctx, options, localPlayer, colors, textRenderer) {
     0,
     mobilePlayerHudLayout(ctx, options)
   );
-  drawMenuLeaveHud(ctx, options, colors, textRenderer);
+  drawMenuLeaveHud(ctx, options, colors, textRenderer, playerHudPanel);
 }
 
-function drawMenuLeaveHud(ctx, options, colors, textRenderer) {
+function drawMenuLeaveHud(ctx, options, colors, textRenderer, basePanel = null) {
   if (options.mobileActive) {
     drawMobileHudAction(ctx, "LEAVE", HUD_EDGE_INSET, mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT), colors, textRenderer);
     return;
   }
 
-  const position = hudControlPosition(ctx, 0, options.settings, controllerHudPositionOptions(options));
+  const position = hudControlPosition(ctx, 0, options.settings, controllerHudPositionOptions({ ...options, panel: basePanel }));
   if (options.controllerActive) {
     drawControllerHudAction(ctx, "faceRight", "LEAVE", position.x, position.y, colors, textRenderer);
     return;
@@ -11551,6 +11554,7 @@ function drawCenterCarTire(ctx, sphereX, sphereY, tireX, tireY, player, radius, 
   const leanY = sphereY - tireY;
   const tireCenterX = sphereX + leanX;
   const tireCenterY = sphereY + leanY;
+  const tireClipRadius = radius + Math.hypot(leanX, leanY) * CAR_CENTER_TIRE_LEAN_CLIP_EXPAND;
 
   ctx.fillStyle = CAR_TIRE_COLOR;
   drawCarWheelBand(
@@ -11562,7 +11566,7 @@ function drawCenterCarTire(ctx, sphereX, sphereY, tireX, tireY, player, radius, 
     forward,
     sphereX,
     sphereY,
-    radius
+    tireClipRadius
   );
 
   const speed = Math.hypot(Number(player.vx) || 0, Number(player.vy) || 0);
@@ -11633,8 +11637,8 @@ function drawFilledCapsuleClippedCircle(ctx, from, to, capsuleRadius, circleX, c
 
   for (let py = minY; py <= maxY; py += 1) {
     for (let px = minX; px <= maxX; px += 1) {
-      const pointX = px + 0.5;
-      const pointY = py + 0.5;
+      const pointX = px;
+      const pointY = py;
       const circleDx = pointX - circleX;
       const circleDy = pointY - circleY;
       if (circleDx * circleDx + circleDy * circleDy > circleRadiusSq) {
@@ -11745,24 +11749,71 @@ function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
 function drawCarEngineNozzles(ctx, x, y, forward, side, radius) {
   ctx.fillStyle = CAR_TIRE_COLOR;
   for (const offset of carEngineSideOffsets(radius)) {
-    const centerRearOffset = carEngineNozzleCenterRearOffset(radius);
-    const cx = x - forward.x * centerRearOffset + side.x * offset;
-    const cy = y - forward.y * centerRearOffset + side.y * offset;
-    fillRotatedRect(ctx, cx, cy, forward, side, CAR_ENGINE_NOZZLE_LENGTH, CAR_ENGINE_NOZZLE_WIDTH);
+    const centerRearOffset = carEngineNozzleCenterRearOffset(radius, offset);
+    const center = snapCarEngineNozzleCenter(
+      x - forward.x * centerRearOffset + side.x * offset,
+      y - forward.y * centerRearOffset + side.y * offset,
+      forward
+    );
+    fillRotatedRect(ctx, center.x, center.y, forward, side, CAR_ENGINE_NOZZLE_LENGTH, CAR_ENGINE_NOZZLE_WIDTH);
   }
 }
 
-function carEngineNozzleCenterRearOffset(radius) {
-  return radius + CAR_ENGINE_NOZZLE_CENTER_REAR_OFFSET;
+function snapCarEngineNozzleCenter(x, y, forward) {
+  if (Math.abs(forward.x) > 0.999 && Math.abs(forward.y) < 0.001) {
+    return {
+      x,
+      y: Math.ceil(y)
+    };
+  }
+
+  if (Math.abs(forward.y) > 0.999 && Math.abs(forward.x) < 0.001) {
+    return {
+      x: Math.ceil(x),
+      y
+    };
+  }
+
+  return { x, y };
 }
 
-function carEnginePlumeRearOffset(radius) {
-  return carEngineNozzleCenterRearOffset(radius) +
-    CAR_ENGINE_NOZZLE_LENGTH / 2;
+function carEngineNozzleCenterRearOffset(radius, sideOffset = 0) {
+  return carEngineCircleRearDistance(radius, sideOffset) +
+    CAR_ENGINE_NOZZLE_LENGTH / 2 -
+    CAR_ENGINE_NOZZLE_BODY_OVERLAP;
+}
+
+function carEngineNozzlePlumeOrigin(center, rear, forward) {
+  const x = center.x + rear.x * CAR_ENGINE_NOZZLE_LENGTH / 2;
+  const y = center.y + rear.y * CAR_ENGINE_NOZZLE_LENGTH / 2;
+
+  if (Math.abs(forward.x) > 0.999 && Math.abs(forward.y) < 0.001) {
+    return {
+      x: Math.floor(x),
+      y
+    };
+  }
+
+  if (Math.abs(forward.y) > 0.999 && Math.abs(forward.x) < 0.001) {
+    return {
+      x,
+      y: Math.floor(y)
+    };
+  }
+
+  return { x, y };
+}
+
+function carEngineCircleRearDistance(radius, sideOffset = 0) {
+  const safeRadius = Math.max(1, Number(radius) || 1);
+  const clampedSideOffset = Math.min(Math.abs(Number(sideOffset) || 0), safeRadius);
+  return Math.sqrt(Math.max(0, safeRadius * safeRadius - clampedSideOffset * clampedSideOffset));
 }
 
 function carEngineSideOffsets(radius) {
-  const offset = Math.max(2, radius * CAR_ENGINE_SIDE_OFFSET_SCALE);
+  const maxAttachedOffset = Math.max(2, radius - (CAR_ENGINE_NOZZLE_WIDTH + 1) / 2);
+  const offset = Math.min(maxAttachedOffset, Math.max(2, radius * CAR_ENGINE_SIDE_OFFSET_SCALE)) *
+    CAR_ENGINE_SIDE_OFFSET_INSET;
   return [-offset, offset];
 }
 
@@ -12145,6 +12196,73 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   return panel;
 }
 
+function drawCarsEnemyHitHud(ctx, player, snapshot, options, colors, textRenderer, previousPanel) {
+  if (options.gameMode !== GAME_MODES.cars || !player || !previousPanel) {
+    return null;
+  }
+
+  const hit = recentPlayerLastHit(player, snapshot, options.timeSeconds);
+  if (!hit) {
+    return null;
+  }
+
+  const width = previousPanel.width || HUD_PANEL_MIN_WIDTH;
+  const height = hudPanelHeightForRows(1);
+  const panel = hudStackPanelRect(previousPanel, width, height, options.settings);
+  const padding = HUD_PANEL_PADDING;
+  const labelX = panel.x + padding;
+  const labelY = panel.y + padding;
+  const barX = panel.x + 42;
+  const barY = labelY + 1;
+  const barWidth = Math.max(12, panel.x + panel.width - padding - barX);
+  const maxHealth = Math.max(1, Number(hit.maxHealth) || ENGINE.player.healthPerBar);
+  const health = clamp(Number(hit.health) || 0, 0, maxHealth);
+  const healthBars = clamp(
+    Math.round(Number(hit.healthBars) || maxHealth / ENGINE.player.healthPerBar || ENGINE.player.startingHealthBars),
+    1,
+    ENGINE.player.maxHealthBars
+  );
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  textRenderer.draw(ctx, "ENEMY", labelX, labelY, {
+    fontSize: 8,
+    color: colors.foreground,
+    width: 36
+  });
+  drawHudHealthBars(ctx, barX, barY, barWidth, 5, health, maxHealth, healthBars, colors);
+  return panel;
+}
+
+function recentPlayerLastHit(player, snapshot, timeSeconds = 0) {
+  const hit = player?.lastHit;
+  if (!hit?.targetId) {
+    return null;
+  }
+
+  const hitTick = Number(hit.tick);
+  const nowTick = Number.isFinite(snapshot?.tick)
+    ? Number(snapshot.tick)
+    : Math.floor(Number(timeSeconds || 0) * ENGINE.tickRate);
+  if (!Number.isFinite(hitTick) || nowTick - hitTick < 0 || nowTick - hitTick > ENGINE.tickRate * 5) {
+    return null;
+  }
+
+  return hit;
+}
+
+function hudStackPanelRect(previousPanel, width, height, settings = {}, gap = 6) {
+  const panel = {
+    x: previousPanel.x,
+    y: previousPanel.y + previousPanel.height + gap,
+    width,
+    height
+  };
+  if (hudStacksUp(settings)) {
+    panel.y = Math.max(HUD_EDGE_INSET, previousPanel.y - height - gap);
+  }
+  return panel;
+}
+
 function mobilePlayerHudLayout(ctx, options = {}) {
   if (!options.mobileActive) {
     return {
@@ -12263,6 +12381,7 @@ function hudControlPosition(ctx, index, settings = {}, options = {}) {
   const lineHeight = Math.max(1, Math.min(step, Math.floor(Number(options.lineHeight) || HUD_CONTROL_VISIBLE_HEIGHT)));
   const count = Math.max(1, Math.floor(Number(options.count) || 3));
   const panelHeight = Math.max(1, Math.floor(Number(options.panelHeight) || playerHudPanelHeight("", settings)));
+  const basePanel = options.panel || null;
   if (placement === "top") {
     return {
       x: HUD_EDGE_INSET,
@@ -12278,7 +12397,7 @@ function hudControlPosition(ctx, index, settings = {}, options = {}) {
     };
   }
 
-  const panel = mainHudPanelRect(ctx, HUD_PANEL_MIN_WIDTH, panelHeight, settings);
+  const panel = basePanel || mainHudPanelRect(ctx, HUD_PANEL_MIN_WIDTH, panelHeight, settings);
   return {
     x: panel.x + 2,
     y: panel.y + panel.height + HUD_PANEL_ACTION_GAP + index * step
@@ -12317,7 +12436,7 @@ function terminalActionLineStep(options = {}) {
   return options.controllerActive ? 15 : 14;
 }
 
-function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}) {
+function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}, basePanel = null) {
   if (!player) {
     return;
   }
@@ -12328,7 +12447,7 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
       return;
     }
 
-    const position = hudControlPosition(ctx, 0, settings, controllerHudPositionOptions({ controllerActive }));
+    const position = hudControlPosition(ctx, 0, settings, controllerHudPositionOptions({ controllerActive, panel: basePanel }));
     if (controllerActive) {
       drawControllerHudAction(ctx, "faceTop", "UPGRADES", position.x, position.y, colors, textRenderer);
       return;
@@ -12345,7 +12464,7 @@ function drawUpgradeHud(ctx, player, upgradesUi, colors, textRenderer, controlle
   drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive, mobileActive);
 }
 
-function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}) {
+function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}, basePanel = null) {
   if (!player || upgradesUi?.active) {
     return;
   }
@@ -12362,7 +12481,7 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
     return;
   }
 
-  const position = hudControlPosition(ctx, 1, settings, controllerHudPositionOptions({ controllerActive }));
+  const position = hudControlPosition(ctx, 1, settings, controllerHudPositionOptions({ controllerActive, panel: basePanel }));
   if (controllerActive) {
     drawControllerHudAction(
       ctx,
@@ -12383,7 +12502,7 @@ function drawBuildHud(ctx, player, buildUi, upgradesUi, colors, textRenderer, co
   });
 }
 
-function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}) {
+function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false, mapFeatureEnabled = true, settings = {}, basePanel = null) {
   if (!mapFeatureEnabled || !player || upgradesUi?.active) {
     return;
   }
@@ -12393,7 +12512,7 @@ function drawMapHud(ctx, player, upgradesUi, colors, textRenderer, controllerAct
     return;
   }
 
-  const position = hudControlPosition(ctx, 2, settings, controllerHudPositionOptions({ controllerActive }));
+  const position = hudControlPosition(ctx, 2, settings, controllerHudPositionOptions({ controllerActive, panel: basePanel }));
   if (controllerActive) {
     drawControllerDpadHudAction(ctx, "dpadUp", "MAP", position.x, position.y, colors, textRenderer);
     return;
@@ -12415,7 +12534,10 @@ function drawMobileLeaveHud(ctx, player, options, colors, textRenderer) {
 }
 
 function controllerHudPositionOptions(options = {}) {
-  return options.controllerActive ? { lineHeight: CONTROLLER_HUD_CONTROL_HEIGHT } : {};
+  return {
+    ...(options.controllerActive ? { lineHeight: CONTROLLER_HUD_CONTROL_HEIGHT } : {}),
+    ...(options.panel ? { panel: options.panel } : {})
+  };
 }
 
 function drawUpgradeMenu(ctx, player, upgradesUi, colors, textRenderer, controllerActive = false, mobileActive = false) {
@@ -12959,6 +13081,9 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
       const sideJitter = sampleProjectedNozzleOffset(seed, nozzleRadius);
       const sideRatio = clamp(Math.abs(sideJitter) / Math.max(1, nozzleRadius), 0, 1);
       const capOffset = 1 + sideRatio * sideRatio * Math.max(1, nozzleRadius * 0.7);
+      const rearOffset = Number.isFinite(origin.fixedRearOffset)
+        ? origin.fixedRearOffset
+        : capOffset;
       const rearJitter = randomUnit(seed, 2) * 0.9;
       const speed = (92 + randomUnit(seed, 3) * 90) * Math.sqrt(particleMultiplier) * engineRamp.plumeSpeed;
       const spread = (randomUnit(seed, 4) - 0.5) * 10 * Math.sqrt(particleMultiplier) * engineRamp.spread;
@@ -12973,8 +13098,8 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
       const particleHeat = clamp(0.18 + centerHeat * 0.88 + randomUnit(seed, 10) * 0.08, 0, 1);
 
       state.particles.push({
-        x: origin.x + side.x * sideJitter + rear.x * (capOffset + rearJitter),
-        y: origin.y + side.y * sideJitter + rear.y * (capOffset + rearJitter),
+        x: origin.x + side.x * sideJitter + rear.x * (rearOffset + rearJitter),
+        y: origin.y + side.y * sideJitter + rear.y * (rearOffset + rearJitter),
         vx: rear.x * speed + side.x * spread,
         vy: rear.y * speed + side.y * spread,
         age: randomUnit(seed, 6) * 0.025,
@@ -13162,14 +13287,30 @@ function carRearEnginePlumeOrigins(player, rear, side, engineRamp = {}) {
   const sideOffsetScale = Number(engineRamp.sideOffsetScale || 1);
   const offsets = carEngineSideOffsets(radius).map((offset) => offset * sideOffsetScale);
   const medialRadius = Math.max(1, Math.max(...offsets.map((offset) => Math.abs(offset))));
-  const rearOffset = carEnginePlumeRearOffset(radius);
-  return offsets.map((offset) => ({
-    x: player.x + rear.x * rearOffset + side.x * offset,
-    y: player.y + rear.y * rearOffset + side.y * offset,
-    nozzleWidth: CAR_ENGINE_NOZZLE_WIDTH + 1,
-    medialOffset: offset,
-    medialRadius
-  }));
+  const forward = {
+    x: -rear.x,
+    y: -rear.y
+  };
+  const leanShift = -clamp(carVisualLean(player, carBodyAngle(player)), -1, 1) * CAR_BODY_LEAN_VISUAL_SHIFT;
+  const originX = player.x + side.x * leanShift;
+  const originY = player.y + side.y * leanShift;
+  return offsets.map((offset) => {
+    const centerRearOffset = carEngineNozzleCenterRearOffset(radius, offset);
+    const center = snapCarEngineNozzleCenter(
+      originX + rear.x * centerRearOffset + side.x * offset,
+      originY + rear.y * centerRearOffset + side.y * offset,
+      forward
+    );
+    const plumeOrigin = carEngineNozzlePlumeOrigin(center, rear, forward);
+    return {
+      x: plumeOrigin.x,
+      y: plumeOrigin.y,
+      nozzleWidth: CAR_ENGINE_NOZZLE_WIDTH + 1,
+      medialOffset: offset,
+      medialRadius,
+      fixedRearOffset: CAR_ENGINE_PLUME_START_GAP
+    };
+  });
 }
 
 function updateStaticParticles(particles, dtSeconds) {
