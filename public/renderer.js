@@ -4368,6 +4368,12 @@ function settingsMenuRows(options) {
       value: Number(settings.effectsVolume ?? 1)
     },
     {
+      id: "musicVolume",
+      label: "MUSIC",
+      type: "slider",
+      value: Number(settings.musicVolume ?? 0.5)
+    },
+    {
       id: "voiceVolume",
       label: "VOICE",
       type: "slider",
