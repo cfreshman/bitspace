@@ -143,6 +143,8 @@ const MUSIC_TRACKS = Object.freeze({
 const MUSIC_TRACK_FULL_VOLUME_SETTING = 0.5;
 const MUSIC_VISIBLE_OTHER_HOLD_MS = 2500;
 const MUSIC_CROSSFADE_SECONDS = 0.16;
+const MUSIC_ROOM_START_FORCE_ARENA_MS = 750;
+const MUSIC_ROOM_START_CROSSFADE_SECONDS = 0.045;
 const MENU_ROOMS = Object.freeze({
   ready: "ready",
   theme: "theme",
@@ -283,7 +285,8 @@ const mobileAimJoystickCanvas = document.querySelector("#mobile-aim-joystick-can
 const perfDebugRoot = document.querySelector("#perf-debug");
 const perfDebugPanel = document.querySelector("#perf-debug-panel");
 const perfDebugCopy = document.querySelector("#perf-debug-copy");
-const renderer = createRenderer(canvas, minimapCanvas);
+const mapGenMode = isMapGenMode();
+const renderer = mapGenMode ? createMapGenRendererStub() : createRenderer(canvas, minimapCanvas);
 const gamepadControls = createGamepadControls();
 const talkInput = createTalkInput();
 const themeSource = document.querySelector("#bitspace-theme-source");
@@ -322,7 +325,9 @@ const audio = {
     gain: null,
     currentKey: "",
     lastPlayAttemptAtMs: 0,
-    visibleOtherUntilMs: 0
+    visibleOtherUntilMs: 0,
+    forceArenaUntilMs: 0,
+    fastSwitchUntilMs: 0
   }
 };
 const voice = {
@@ -527,8 +532,8 @@ if (typeof mobilePointerMedia?.addEventListener === "function") {
 } else if (typeof mobilePointerMedia?.addListener === "function") {
   mobilePointerMedia.addListener(syncMobileControlsEnabled);
 }
+document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
 
-const mapGenMode = isMapGenMode();
 if (!mapGenMode) {
   restoreLocalBotGame();
 }
@@ -669,6 +674,9 @@ function applyServerRoom(room) {
     state.prediction.huckRockCooldownSeconds = 0;
     clearPredictedHuckRocks();
     cancelMiningRay();
+  }
+  if (previousState === "waiting" && room?.state === "active") {
+    beginMusicRoomStartTransition();
   }
   if (room?.state === "menu") {
     state.menu.readySent = false;
@@ -2013,29 +2021,31 @@ function cycleMenuSpeedUpgrade() {
   };
 }
 
-setInterval(() => {
-  if (isLocalBotGame()) {
-    return;
-  }
+if (!mapGenMode) {
+  setInterval(() => {
+    if (isLocalBotGame()) {
+      return;
+    }
 
-  if (!socket.connected || !state.playerId) {
-    return;
-  }
+    if (!socket.connected || !state.playerId) {
+      return;
+    }
 
-  const now = performance.now();
-  if (needsReattachRepair()) {
-    requestRoomReattach(now, true);
-  }
+    const now = performance.now();
+    if (needsReattachRepair()) {
+      requestRoomReattach(now, true);
+    }
 
-  state.net.inputSentCount += 1;
-  socket.emit(CLIENT_EVENTS.input, readInput());
-}, 1000 / ENGINE.tickRate);
+    state.net.inputSentCount += 1;
+    socket.emit(CLIENT_EVENTS.input, readInput());
+  }, 1000 / ENGINE.tickRate);
 
-setInterval(() => {
-  emitHeartbeat();
-}, ENGINE.heartbeat.intervalSeconds * 1000);
+  setInterval(() => {
+    emitHeartbeat();
+  }, ENGINE.heartbeat.intervalSeconds * 1000);
 
-requestAnimationFrame(draw);
+  requestAnimationFrame(draw);
+}
 
 function emitHeartbeat() {
   if (!socket.connected || !state.clientId) {
@@ -2515,7 +2525,8 @@ function createTalkInput() {
 
 function isMapGenMode() {
   const params = new URLSearchParams(window.location.search);
-  return params.get("mapgen") === "1" || window.location.hash === "#mapgen";
+  const path = window.location.pathname.replace(/\/+$/, "");
+  return path === "/mapgen" || params.get("mapgen") === "1" || window.location.hash === "#mapgen";
 }
 
 function createMapGenSocketStub() {
@@ -2527,6 +2538,15 @@ function createMapGenSocketStub() {
   };
 }
 
+function createMapGenRendererStub() {
+  return {
+    resize() {},
+    draw() {
+      return {};
+    }
+  };
+}
+
 function setupMapGenMode() {
   const panel = document.querySelector("#mapgen-panel");
   const preview = document.querySelector("#mapgen-preview");
@@ -2534,6 +2554,9 @@ function setupMapGenMode() {
   if (!panel || !preview || !stats) {
     return;
   }
+
+  document.body.classList.add("mapgen-active");
+  panel.hidden = false;
 
   const controls = {
     seed: document.querySelector("#mapgen-seed"),
@@ -2548,6 +2571,11 @@ function setupMapGenMode() {
     regenerate: document.querySelector("#mapgen-regenerate"),
     random: document.querySelector("#mapgen-random")
   };
+  if (Object.values(controls).some((control) => !control)) {
+    stats.textContent = "mapgen controls missing";
+    return;
+  }
+
   const params = new URLSearchParams(window.location.search);
   const defaults = {
     seed: params.get("seed") || "bitspace-main:asteroid",
@@ -2561,8 +2589,6 @@ function setupMapGenMode() {
     feather: 0.58
   };
 
-  document.body.classList.add("mapgen-active");
-  panel.hidden = false;
   panel.addEventListener("keydown", (event) => {
     event.stopPropagation();
   });
@@ -2635,22 +2661,47 @@ function mapGenOptionsFromControls(controls) {
 }
 
 function mapGenNumber(input, fallback) {
-  const value = Number(input.value);
+  const rawValue = input.value;
+  if (rawValue === "") {
+    return fallback;
+  }
+
+  const value = Number(rawValue);
   return Number.isFinite(value) ? value : fallback;
 }
 
 function mapGenParamNumber(params, key, fallback) {
-  const value = Number(params.get(key));
+  const rawValue = params.get(key);
+  if (rawValue === null || rawValue === "") {
+    return fallback;
+  }
+
+  const value = Number(rawValue);
   return Number.isFinite(value) ? value : fallback;
 }
 
 function renderMapGenPreview(canvasElement, statsElement, options) {
-  const asteroid = createNaturalAsteroid({
-    seed: options.seed,
-    playerCount: options.playerCount,
-    generation: options.generation
-  });
   const ctx = canvasElement.getContext("2d", { alpha: false });
+  if (!ctx) {
+    statsElement.textContent = "mapgen preview canvas unavailable";
+    return;
+  }
+
+  let asteroid = null;
+  try {
+    asteroid = createNaturalAsteroid({
+      seed: options.seed,
+      playerCount: options.playerCount,
+      generation: options.generation
+    });
+  } catch (error) {
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+    statsElement.textContent = `mapgen render failed: ${error?.message || error}`;
+    console.error("BITSPACE mapgen render failed", error);
+    return;
+  }
+
   const scale = Math.max(
     1,
     Math.floor(Math.min(canvasElement.width / asteroid.widthTiles, canvasElement.height / asteroid.heightTiles))
@@ -2787,11 +2838,13 @@ function mapGenComponents(asteroid, passable) {
     }
 
     const queue = [index];
+    let head = 0;
     let size = 0;
     visited.add(index);
 
-    while (queue.length > 0) {
-      const current = queue.shift();
+    while (head < queue.length) {
+      const current = queue[head];
+      head += 1;
       size += 1;
       for (const neighbor of mapGenNeighborIndexes(current, asteroid.widthTiles, asteroid.heightTiles)) {
         if (visited.has(neighbor) || !passable(neighbor)) {
@@ -4080,6 +4133,7 @@ function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFA
   state.room = localBotRoomFromArena(arena, { state: "active" });
   state.lastRoomId = LOCAL_BOT_ROOM_ID;
   state.lastActiveMatchKey = `${LOCAL_BOT_ROOM_ID}:${seed}`;
+  beginMusicRoomStartTransition();
   resetControlStateForNewMatch();
   resetLocalDamageAudioState();
   resetEntitySmoothing();
@@ -8427,15 +8481,45 @@ function musicVolumeScale(settings = state.settings) {
   return master * music / MUSIC_TRACK_FULL_VOLUME_SETTING;
 }
 
+function handleDocumentVisibilityChange() {
+  if (document.hidden) {
+    pauseMusicTracks();
+    return;
+  }
+
+  if (audio.unlocked) {
+    updateMusicPlayback({ force: true });
+  }
+}
+
 function desiredMusicTrackKey(snapshot = null, cameraPlayerId = state.playerId, nowMs = performance.now()) {
-  if (state.room?.state === "active" || state.room?.state === "waiting") {
+  if (state.room?.state === "active") {
+    if (nowMs <= audio.music.forceArenaUntilMs) {
+      audio.music.visibleOtherUntilMs = 0;
+      return "arena";
+    }
+    if (musicHasVisibleOtherPlayer(snapshot, cameraPlayerId)) {
+      audio.music.visibleOtherUntilMs = nowMs + MUSIC_VISIBLE_OTHER_HOLD_MS;
+    }
+    return nowMs <= audio.music.visibleOtherUntilMs ? "lobby" : "arena";
+  }
+
+  if (state.room?.state === "waiting") {
+    audio.music.forceArenaUntilMs = 0;
     if (musicHasVisibleOtherPlayer(snapshot, cameraPlayerId)) {
       audio.music.visibleOtherUntilMs = nowMs + MUSIC_VISIBLE_OTHER_HOLD_MS;
     }
     return nowMs <= audio.music.visibleOtherUntilMs ? "lobby" : "arena";
   }
   audio.music.visibleOtherUntilMs = 0;
+  audio.music.forceArenaUntilMs = 0;
   return "menu";
+}
+
+function beginMusicRoomStartTransition(nowMs = performance.now()) {
+  audio.music.visibleOtherUntilMs = 0;
+  audio.music.forceArenaUntilMs = nowMs + MUSIC_ROOM_START_FORCE_ARENA_MS;
+  audio.music.fastSwitchUntilMs = nowMs + MUSIC_ROOM_START_FORCE_ARENA_MS;
 }
 
 function musicHasVisibleOtherPlayer(snapshot, cameraPlayerId) {
@@ -8493,6 +8577,11 @@ function ensureMusicAudio() {
 }
 
 function updateMusicPlayback(options = {}) {
+  if (document.hidden) {
+    pauseMusicTracks();
+    return false;
+  }
+
   if (!audio.unlocked && !options.force) {
     return false;
   }
@@ -8530,7 +8619,10 @@ function updateMusicPlayback(options = {}) {
     music.currentKey = desiredKey;
   }
 
-  setMusicTrackGains(desiredKey, previousKey && previousKey !== desiredKey ? MUSIC_CROSSFADE_SECONDS : 0.04);
+  const switchFadeSeconds = desiredKey === "arena" && nowMs <= music.fastSwitchUntilMs
+    ? MUSIC_ROOM_START_CROSSFADE_SECONDS
+    : MUSIC_CROSSFADE_SECONDS;
+  setMusicTrackGains(desiredKey, previousKey && previousKey !== desiredKey ? switchFadeSeconds : 0.04);
   startMusicTracks(options.force === true, nowMs);
   return musicTrackIsPlaying(desiredKey);
 }
@@ -8558,6 +8650,17 @@ function startMusicTracks(force = false, nowMs = performance.now()) {
     track.element.play().catch(() => {});
   }
   return true;
+}
+
+function pauseMusicTracks() {
+  const tracks = audio.music.tracks;
+  if (!tracks) {
+    return;
+  }
+
+  for (const track of tracks.values()) {
+    track.element.pause();
+  }
 }
 
 function setMusicTrackGains(activeKey, fadeSeconds = MUSIC_CROSSFADE_SECONDS) {

@@ -162,8 +162,14 @@ body.mapgen-active {
 body.mapgen-active #scene,
 body.mapgen-active #scene-present,
 body.mapgen-active #hud-present,
-body.mapgen-active #minimap {
+body.mapgen-active #minimap,
+body.mapgen-active #mobile-controls,
+body.mapgen-active #perf-debug {
   display: none;
+}
+
+body.mapgen-active canvas:not(#mapgen-preview) {
+  display: none !important;
 }
 
 html.controller-pointer-hidden,
