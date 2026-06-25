@@ -532,10 +532,12 @@ export function createRoomManager(options = {}) {
     const name = kind === ROOM_KIND.named ? sanitizeNamedRoomName(options.name) : "";
     const nameKey = kind === ROOM_KIND.named ? namedRoomNameKey(options.nameKey || name) : "";
 
+    const arena = createLobbyArena(`room-${roomNumber}:waiting`, `${seed}:waiting`, mode);
     const room = {
       id: `room-${roomNumber}`,
       kind,
       mode,
+      params: arena.params || {},
       name,
       nameKey,
       cycle: 1,
@@ -547,7 +549,7 @@ export function createRoomManager(options = {}) {
       hostClientId: null,
       participants: new Map(),
       lobbySpawnNumbers: randomizedSpawnNumbers(`${seed}:lobby`, ENGINE.maxPlayers),
-      arena: createLobbyArena(`room-${roomNumber}:waiting`, `${seed}:waiting`, mode),
+      arena,
       startedAtMs: null,
       endedAtMs: null,
       startReason: null,
@@ -659,6 +661,7 @@ export function createRoomManager(options = {}) {
       id: room.id,
       seed: matchSeed,
       mode: room.mode,
+      params: room.params,
       playerCount: participants.length
     });
 
@@ -1000,7 +1003,7 @@ export function createRoomManager(options = {}) {
     room.countdownLastBeepSecond = null;
     room.countdownBeepSeq = 0;
     room.lobbySpawnNumbers = randomizedSpawnNumbers(`${room.seed}:lobby:${room.cycle}`, ENGINE.maxPlayers);
-    room.arena = createLobbyArena(`${room.id}:waiting:${room.cycle}`, `${room.seed}:waiting:${room.cycle}`);
+    room.arena = createLobbyArena(`${room.id}:waiting:${room.cycle}`, `${room.seed}:waiting:${room.cycle}`, room.mode, room.params);
     syncNamedRoomQueue(room);
   }
 
@@ -1024,7 +1027,7 @@ export function createRoomManager(options = {}) {
   };
 }
 
-function createLobbyArena(id, seed, mode = GAME_MODES.bitspace) {
+function createLobbyArena(id, seed, mode = GAME_MODES.bitspace, params = {}) {
   const normalizedMode = normalizeGameMode(mode);
   const tileSize = normalizedMode === GAME_MODES.cars
     ? RENDER.tileSize * ENGINE.car.tileScale
@@ -1039,6 +1042,7 @@ function createLobbyArena(id, seed, mode = GAME_MODES.bitspace) {
     id,
     seed,
     mode: normalizedMode,
+    params,
     asteroid,
     playerDamage: false
   });
@@ -1165,6 +1169,7 @@ function snapshotRoom(room, clientId) {
     roomId: room.id,
     roomKind: room.kind || ROOM_KIND.public,
     mode: normalizeGameMode(room.mode),
+    params: room.params || room.arena?.params || {},
     roomName: room.name || "",
     roomPath: room.nameKey ? `/${room.nameKey}` : "",
     clientId,

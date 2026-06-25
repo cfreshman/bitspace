@@ -32,6 +32,8 @@ const CAR_MODE_COLORS = Object.freeze({
   foreground: "#ffe69a",
   background: "#c2531c",
   backgroundDark: "#b96a1c",
+  grassground: "#5f7d37",
+  grassgroundDark: "#4f6f32",
   backing: "#1f0d0a",
   trueBacking: "#1f0d0a",
   ore: "#c1aa7d",
@@ -67,7 +69,7 @@ const CAR_BODY_LIGHT_MIX = 0.24;
 const CAR_BODY_MID_LIGHT_MIX = 0.08;
 const CAR_BODY_MID_DARKEN = 0.76;
 const CAR_BODY_DARKEN = 0.54;
-const CAR_BODY_LEAN_VISUAL_SHIFT = 1.3;
+const CAR_BODY_LEAN_VISUAL_SHIFT = 1.5;
 const CAR_ENGINE_NOZZLE_LENGTH = 4;
 const CAR_ENGINE_NOZZLE_WIDTH = 2;
 const CAR_ENGINE_NOZZLE_CENTER_REAR_OFFSET = 1;
@@ -95,15 +97,26 @@ function renderGameMode(snapshot, options = {}) {
   return snapshot?.mode || options.room?.mode || GAME_MODES.bitspace;
 }
 
-function colorsForGameMode(colors, gameMode) {
+function renderGameParams(snapshot, options = {}) {
+  return snapshot?.params || options.room?.params || {};
+}
+
+function colorsForGameMode(colors, gameMode, params = {}) {
   if (gameMode !== GAME_MODES.cars) {
     return colors;
   }
 
-  return {
+  const carColors = {
     ...colors,
     ...CAR_MODE_COLORS
   };
+
+  if (params.carGround === "grass") {
+    carColors.background = CAR_MODE_COLORS.grassground;
+    carColors.backgroundDark = CAR_MODE_COLORS.grassgroundDark;
+  }
+
+  return carColors;
 }
 
 function trueBackingColor(colors) {
@@ -218,10 +231,10 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   nozzleMax: 0.5,
 });
 const CAR_THRUSTER_ENGINE_RAMP = Object.freeze({
-  rateMin: 2,
-  rateMax: 5,
-  plumeSpeedMin: 2,
-  plumeSpeedMax: 5,
+  rateMin: 5,
+  rateMax: 10,
+  plumeSpeedMin: .5,
+  plumeSpeedMax: 1,
   lifeMin: 0.5,
   lifeMax: 1,
   nozzleMin: 2,
@@ -772,12 +785,14 @@ export function createRenderer(canvas, minimapCanvas = null) {
         colors.backing = options.theme.backing || colors.backing;
       }
       const gameMode = renderGameMode(snapshot, options);
-      const frameColors = colorsForGameMode(colors, gameMode);
+      const gameParams = renderGameParams(snapshot, options);
+      const frameColors = colorsForGameMode(colors, gameMode, gameParams);
       currentTextColors = frameColors;
       syncPageBackingColor(trueBackingColor(frameColors));
       const frameOptions = {
         ...options,
         gameMode,
+        gameParams,
         timeSeconds,
         dtSeconds,
         visualShipAngles,
@@ -11534,12 +11549,8 @@ function drawCenterCarTire(ctx, sphereX, sphereY, tireX, tireY, player, radius, 
   const tireRadius = Math.max(2, radius * CAR_CENTER_TIRE_RADIUS_SCALE);
   const leanX = sphereX - tireX;
   const leanY = sphereY - tireY;
-  const leanMagnitude = Math.hypot(leanX, leanY);
-  const bank = leanMagnitude > 0.001
-    ? { x: leanX / leanMagnitude, y: leanY / leanMagnitude }
-    : { x: 0, y: 0 };
-  const tireCenterX = sphereX + bank.x * tireRadius;
-  const tireCenterY = sphereY + bank.y * tireRadius;
+  const tireCenterX = sphereX + leanX;
+  const tireCenterY = sphereY + leanY;
 
   ctx.fillStyle = CAR_TIRE_COLOR;
   drawCarWheelBand(

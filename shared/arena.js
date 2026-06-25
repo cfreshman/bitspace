@@ -42,10 +42,15 @@ const INITIAL_SPAWN_ANGLE = Math.PI / 4;
 const KILL_DROP_SINGLE_DIAMOND_CHANCE = 2 / 3;
 const KILL_DROP_NOTICE_TICKS = ENGINE.tickRate * 3;
 const RANDOM_DIAMOND_SPAWN_TICKS = ENGINE.tickRate * 15;
+const CAR_GROUND_VARIANTS = Object.freeze({
+  desert: "desert",
+  grass: "grass"
+});
 
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
   const mode = normalizeGameMode(options.mode);
+  const params = createArenaParams(mode, seed, options.params);
   const asteroid = options.asteroid ?? createAsteroid({
     seed: `${seed}:asteroid`,
     playerCount: options.playerCount,
@@ -60,6 +65,7 @@ export function createArena(options = {}) {
   return {
     id: options.id ?? DEFAULT_ARENA_ID,
     mode,
+    params,
     seed,
     tick: 0,
     players: new Map(),
@@ -345,6 +351,7 @@ export function snapshotArena(arena) {
   return {
     arenaId: arena.id,
     mode: normalizeGameMode(arena.mode),
+    params: arena.params || {},
     tick: arena.tick,
     serverTime: Date.now(),
     render: RENDER,
@@ -354,6 +361,31 @@ export function snapshotArena(arena) {
     entities: Array.from(arena.entities.values()).filter((entity) => entity.destroyed !== true),
     effects: arena.effects
   };
+}
+
+function createArenaParams(mode, seed, params = {}) {
+  if (mode !== GAME_MODES.cars) {
+    return {};
+  }
+
+  const safeParams = params && typeof params === "object" ? params : {};
+  return {
+    carGround: sanitizeCarGroundVariant(safeParams.carGround) ||
+      randomCarGroundVariant(seed)
+  };
+}
+
+function sanitizeCarGroundVariant(value) {
+  return value === CAR_GROUND_VARIANTS.grass || value === CAR_GROUND_VARIANTS.desert
+    ? value
+    : null;
+}
+
+function randomCarGroundVariant(seed) {
+  const random = createSeededRandom(`${seed}:car-ground`);
+  return random() < 0.5
+    ? CAR_GROUND_VARIANTS.grass
+    : CAR_GROUND_VARIANTS.desert;
 }
 
 export function snapshotAsteroid(arena) {
