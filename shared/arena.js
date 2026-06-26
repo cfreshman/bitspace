@@ -464,7 +464,7 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   syncPlayerDerivedStats(player);
   const effects = aggregateUpgradeEffects(player.upgrades);
   const gameMode = normalizeGameMode(arena.mode);
-  applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
+  applyShipModeFriction(player, dtSeconds, gameMode);
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
@@ -633,6 +633,37 @@ function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.fric
   const friction = Math.pow(frictionPerTick, dtSeconds / fixedStepSeconds);
   player.vx *= friction;
   player.vy *= friction;
+}
+
+function applyShipModeFriction(player, dtSeconds, gameMode) {
+  if (gameMode !== GAME_MODES.subs) {
+    applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
+    return;
+  }
+
+  applyDirectionalShipFriction(
+    player,
+    dtSeconds,
+    ENGINE.subs.forwardFriction,
+    ENGINE.subs.sideFriction
+  );
+}
+
+function applyDirectionalShipFriction(player, dtSeconds, forwardFrictionPerTick, sideFrictionPerTick) {
+  const fixedStepSeconds = 1 / ENGINE.tickRate;
+  const forwardFriction = Math.pow(forwardFrictionPerTick, dtSeconds / fixedStepSeconds);
+  const sideFriction = Math.pow(sideFrictionPerTick, dtSeconds / fixedStepSeconds);
+  const angle = Number.isFinite(player.angle) ? player.angle : Number(player.aimAngle) || 0;
+  const forwardX = Math.cos(angle);
+  const forwardY = Math.sin(angle);
+  const sideX = -forwardY;
+  const sideY = forwardX;
+  const forwardSpeed = player.vx * forwardX + player.vy * forwardY;
+  const sideSpeed = player.vx * sideX + player.vy * sideY;
+  const dampedForwardSpeed = forwardSpeed * forwardFriction;
+  const dampedSideSpeed = sideSpeed * sideFriction;
+  player.vx = forwardX * dampedForwardSpeed + sideX * dampedSideSpeed;
+  player.vy = forwardY * dampedForwardSpeed + sideY * dampedSideSpeed;
 }
 
 function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = ENGINE.ship.thrust) {

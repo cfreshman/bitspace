@@ -85,11 +85,13 @@ export const ENGINE = Object.freeze({
     lateralFriction: 0.88
   },
   subs: {
-    tileSize: 12,
-    thrustMultiplier: 0.12,
+    tileSize: 10,
+    thrustMultiplier: 0.08,
     massScale: 6,
     miningTimeScale: 0.5,
-    friction: SUB_FRICTION
+    friction: SUB_FRICTION,
+    forwardFriction: Math.min(0.999, 1 - (1 - SUB_FRICTION) * 0.275),
+    sideFriction: Math.min(0.999, 1 - (1 - Math.max(0, SUB_FRICTION - 0.035)) * 0.5)
   },
   player: {
     startingHealthBars: 3,

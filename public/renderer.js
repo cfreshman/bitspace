@@ -211,6 +211,9 @@ const ASTEROID_VISIBILITY_ALL_CORNERS =
   ASTEROID_VISIBILITY_CORNER.bottomRight |
   ASTEROID_VISIBILITY_CORNER.bottomLeft;
 const ASTEROID_VISIBILITY_FULL_CIRCLE = Math.PI * 2;
+const SUB_LIT_VISIBILITY_ANGLE = (Math.PI * 2) / 3;
+const SUB_LIT_VISIBILITY_HALF_COS = Math.cos(SUB_LIT_VISIBILITY_ANGLE / 2);
+const SUB_LIT_VISIBILITY_HALF_COS_SQ = SUB_LIT_VISIBILITY_HALF_COS * SUB_LIT_VISIBILITY_HALF_COS;
 const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
   { x: -1, y: -1 },
   { x: 0, y: -1 },
@@ -4335,8 +4338,12 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   let localPlayer = sharedState?.localPlayer;
   let cameraPlayer = sharedState?.cameraPlayer;
   let visibility = sharedState?.visibility;
+  let litVisibility = sharedState?.litVisibility;
   let worldRenderPlayers = sharedState?.worldRenderPlayers;
   let localShipDrawsAfterVisibility = sharedState?.localShipDrawsAfterVisibility || false;
+  if (options.gameMode !== GAME_MODES.subs) {
+    litVisibility = null;
+  }
 
   if (!sharedState?.ready) {
     predictedPlayer = options.predictedPlayer?.id === options.playerId ? options.predictedPlayer : null;
@@ -4373,10 +4380,12 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         createAsteroidVisibilityMask(ctx, options, options.asteroid, cameraPlayer, camera)
       ))
       : null;
-    worldRenderPlayers = visibility
-      ? renderPlayers.filter((player) => !player.hidden && playerTouchesAsteroidVisibility(visibility, player))
+    litVisibility = createLitVisibilityForGameMode(options.gameMode, visibility, cameraPlayer);
+    const visualVisibility = litVisibility || visibility;
+    worldRenderPlayers = visualVisibility
+      ? renderPlayers.filter((player) => !player.hidden && playerTouchesAsteroidVisibility(visualVisibility, player))
       : renderPlayers.filter((player) => !player.hidden);
-    localShipDrawsAfterVisibility = Boolean(visibility && localPlayer?.alive && !localPlayer.hidden);
+    localShipDrawsAfterVisibility = Boolean(visualVisibility && localPlayer?.alive && !localPlayer.hidden);
 
     if (sharedState) {
       Object.assign(sharedState, {
@@ -4388,41 +4397,54 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         localPlayer,
         cameraPlayer,
         visibility,
+        litVisibility,
         worldRenderPlayers,
         localShipDrawsAfterVisibility
       });
     }
   }
+  const visualVisibility = litVisibility || visibility;
 
   if (shouldDrawWorldBase) {
     if (options.playerMapLarge && options.playerMap?.cells && options.asteroid) {
       drawFullPlayerMapFrame(ctx, options, colors);
     } else {
-      beginWorldViewport(ctx, colors, !visibility, true);
-      if (visibility) {
+      beginWorldViewport(ctx, colors, !visualVisibility, true);
+      if (visualVisibility) {
         measureBucket("ghostMs", () => drawAsteroidVisibilityGhostMap(
           ctx,
           options.asteroid,
           camera,
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
-          visibility,
+          visualVisibility,
           options.gpuStormRenderer,
           options.gpuFrameStormReady === true && gpuWorldEffectsAllowed,
           options.gpuFrameCheckerReady === true && gpuWorldEffectsAllowed,
           perfBuckets,
           options.gameMode
         ));
-        if (typeof ctx.beginWorldMask === "function") {
-          ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
+        if (options.gameMode === GAME_MODES.subs) {
+          measureBucket("particlesMs", () => drawSubOwnBubblesInBaseOcean(
+            ctx,
+            particleState.particles,
+            cameraPlayer,
+            camera,
+            visualVisibility,
+            colors,
+            options.timeSeconds ?? snapshot.tick / 60
+          ));
         }
-        measureBucket("backgroundMs", () => drawVisibleBackground(ctx, options.asteroid, camera, visibility, colors));
+        if (typeof ctx.beginWorldMask === "function") {
+          ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visualVisibility));
+        }
+        measureBucket("backgroundMs", () => drawVisibleBackground(ctx, options.asteroid, camera, visualVisibility, colors));
         ctx.fillStyle = colors.foreground;
         measureBucket("starsMs", () => drawWorldAmbient(
           ctx,
           snapshot,
           camera,
-          visibility,
+          visualVisibility,
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
           options.gameMode
@@ -4446,7 +4468,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
           asteroidMiningTargets,
-          visibility,
+          visualVisibility,
           options.gpuStormRenderer,
           cameraPlayer,
           options.gpuFrameStormReady === true && gpuWorldEffectsAllowed,
@@ -4461,8 +4483,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
   if (shouldDrawWorldOverlay && !(options.playerMapLarge && options.playerMap?.cells && options.asteroid)) {
     beginWorldViewport(ctx, colors, false);
-    if (visibility && typeof ctx.beginWorldMask === "function") {
-      ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visibility));
+    if (visualVisibility && typeof ctx.beginWorldMask === "function") {
+      ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visualVisibility));
     }
 
     measureBucket("particleEmitMs", () => {
@@ -7955,6 +7977,81 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
   };
 }
 
+function createLitVisibilityForGameMode(gameMode, visibility, player) {
+  if (gameMode !== GAME_MODES.subs || !visibility || !player) {
+    return null;
+  }
+
+  const heading = shipVisualAngle(player);
+  return createSubLitVisibility(visibility, heading);
+}
+
+function createSubLitVisibility(visibility, heading) {
+  const spans = visibility?.spans;
+  if (!spans?.rows || !Number.isFinite(heading)) {
+    return visibility;
+  }
+
+  const originX = Number(visibility.origin?.x || 0);
+  const originY = Number(visibility.origin?.y || 0);
+  const offsetY = Math.floor(Number(spans.offsetY || 0));
+  const dirX = Math.cos(heading);
+  const dirY = Math.sin(heading);
+  const rows = spans.rows.map((row, rowIndex) => {
+    if (!Array.isArray(row) || row.length <= 0) {
+      return null;
+    }
+
+    const screenY = offsetY + rowIndex + 0.5;
+    const dy = screenY - originY;
+    const clipped = [];
+    for (let spanIndex = 0; spanIndex + 1 < row.length; spanIndex += 2) {
+      const start = Math.floor(row[spanIndex]);
+      const end = Math.ceil(row[spanIndex + 1]);
+      let runStart = null;
+      for (let x = start; x < end; x += 1) {
+        const dx = x + 0.5 - originX;
+        if (subLitVisibilityPointInCone(dx, dy, dirX, dirY)) {
+          if (runStart === null) {
+            runStart = x;
+          }
+        } else if (runStart !== null) {
+          clipped.push(runStart, x);
+          runStart = null;
+        }
+      }
+
+      if (runStart !== null) {
+        clipped.push(runStart, end);
+      }
+    }
+
+    return clipped.length > 0 ? clipped : null;
+  });
+
+  return {
+    ...visibility,
+    spans: {
+      ...spans,
+      rows
+    },
+    litCone: {
+      heading,
+      angle: SUB_LIT_VISIBILITY_ANGLE
+    }
+  };
+}
+
+function subLitVisibilityPointInCone(dx, dy, dirX, dirY) {
+  const distanceSq = dx * dx + dy * dy;
+  if (distanceSq <= 1) {
+    return true;
+  }
+
+  const dot = dx * dirX + dy * dirY;
+  return dot > 0 && dot * dot >= SUB_LIT_VISIBILITY_HALF_COS_SQ * distanceSq;
+}
+
 function asteroidVisibilityCanStartAt(asteroid, tileX, tileY) {
   if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
     return false;
@@ -10894,7 +10991,7 @@ function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = nu
 }
 
 function resourceGeometryScale(tileSize) {
-  return Math.max(1, tileSize / RESOURCE_BASE_TILE_SIZE);
+  return Math.max(0.5, tileSize / RESOURCE_BASE_TILE_SIZE);
 }
 
 function fillConvexPolygon(ctx, points, color) {
@@ -14113,7 +14210,8 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
         life,
         seed,
         heat: thrusterKind ? particleHeat : null,
-        kind: thrusterKind
+        kind: thrusterKind,
+        ownerId: key
       });
     }
   }
@@ -14434,6 +14532,49 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
   }
 }
 
+function drawSubOwnBubblesInBaseOcean(ctx, particles, player, camera, visibility, colors, timeSeconds) {
+  const ownerId = player?.id || (Number.isFinite(player?.number) ? String(player.number) : null);
+  if (!ownerId || !Array.isArray(particles) || particles.length <= 0) {
+    return;
+  }
+
+  drawWithoutWorldMask(ctx, () => {
+    let currentColor = colors.foreground;
+    ctx.fillStyle = currentColor;
+    for (const particle of particles) {
+      if (particle.kind !== SUB_THRUSTER_PARTICLE_KIND || particle.ownerId !== ownerId) {
+        continue;
+      }
+
+      const progress = particle.age / particle.life;
+      if (progress > 0.7 && ((Math.floor(timeSeconds * 30) + particle.seed) & 1) === 0) {
+        continue;
+      }
+
+      const screen = worldToScreen(particle, camera);
+      if (visibility && asteroidVisibilityScreenPointVisible(visibility, screen.x, screen.y)) {
+        continue;
+      }
+
+      const color = shadowedSubThrusterParticleColor(particle, colors);
+      if (color !== currentColor) {
+        ctx.fillStyle = color;
+        currentColor = color;
+      }
+      drawSubThrusterBubbleParticle(ctx, screen, particle);
+    }
+  });
+}
+
+function shadowedSubThrusterParticleColor(particle, colors) {
+  const bubbleColor = subThrusterParticleColor(particle, colors);
+  const shadowColor = colors.shadow || SUB_MODE_COLORS.shadow || "#000000";
+  const shadowAlpha = Number.isFinite(colors.shadowAlpha)
+    ? colors.shadowAlpha
+    : SUB_MODE_COLORS.shadowAlpha;
+  return mixHexColors(bubbleColor, shadowColor, clamp(shadowAlpha, 0, 1));
+}
+
 function particleColor(particle, colors) {
   if (particle?.kind === CAR_THRUSTER_PARTICLE_KIND) {
     return carThrusterParticleColor(particle);
@@ -14468,8 +14609,9 @@ function subThrusterParticleColor(particle, colors) {
   const progress = clamp(Number(particle.age || 0) / life, 0, 1);
   const initialHeat = clamp(Number(particle.heat || 0), 0, 1);
   const waterColor = colors.water || colors.background || SUB_MODE_COLORS.water;
+  const bubbleColor = colors.bubble || colors.foreground || SUB_MODE_COLORS.bubble;
   const warmProgress = clamp(progress * (1.1 - initialHeat * 0.2), 0, 1);
-  return mixHexColors("#ffffff", waterColor, warmProgress);
+  return mixHexColors(bubbleColor, waterColor, warmProgress);
 }
 
 function drawSubThrusterBubbleParticle(ctx, screen, particle) {
