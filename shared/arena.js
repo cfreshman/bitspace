@@ -500,9 +500,11 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
 }
 
 function resolveStaticCollisions(arena, player, options = {}) {
+  const gameMode = normalizeGameMode(arena.mode);
   return arena.asteroid
     ? resolveAsteroidCollisions(arena.asteroid, player, {
       blockNonPlayable: !arena.storm,
+      boundaryRestitution: boundaryRestitutionForGameMode(gameMode),
       onImpact: options.onAsteroidImpact
         ? (speed, blocker, hit) => options.onAsteroidImpact(arena, player, speed, blocker, hit)
         : null
@@ -532,8 +534,9 @@ function resolveAsteroidCollisions(asteroid, player, options = {}) {
         if (typeof options.onImpact === "function") {
           options.onImpact(-normalSpeed, blocker, hit);
         }
-        player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
-        player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
+        const restitution = options.boundaryRestitution ?? ENGINE.collision.boundaryRestitution;
+        player.vx -= (1 + restitution) * normalSpeed * hit.normalX;
+        player.vy -= (1 + restitution) * normalSpeed * hit.normalY;
       }
 
       resolved = true;
@@ -645,11 +648,18 @@ function applyShipModeFriction(player, dtSeconds, gameMode) {
     player,
     dtSeconds,
     ENGINE.subs.forwardFriction,
-    ENGINE.subs.sideFriction
+    ENGINE.subs.sideFriction,
+    ENGINE.subs.sideToForwardConversion
   );
 }
 
-function applyDirectionalShipFriction(player, dtSeconds, forwardFrictionPerTick, sideFrictionPerTick) {
+function applyDirectionalShipFriction(
+  player,
+  dtSeconds,
+  forwardFrictionPerTick,
+  sideFrictionPerTick,
+  sideToForwardConversion = 0
+) {
   const fixedStepSeconds = 1 / ENGINE.tickRate;
   const forwardFriction = Math.pow(forwardFrictionPerTick, dtSeconds / fixedStepSeconds);
   const sideFriction = Math.pow(sideFrictionPerTick, dtSeconds / fixedStepSeconds);
@@ -660,8 +670,14 @@ function applyDirectionalShipFriction(player, dtSeconds, forwardFrictionPerTick,
   const sideY = forwardX;
   const forwardSpeed = player.vx * forwardX + player.vy * forwardY;
   const sideSpeed = player.vx * sideX + player.vy * sideY;
-  const dampedForwardSpeed = forwardSpeed * forwardFriction;
-  const dampedSideSpeed = sideSpeed * sideFriction;
+  const baseForwardSpeed = forwardSpeed * forwardFriction;
+  const baseSideSpeed = sideSpeed * sideFriction;
+  const redirect = clamp(sideToForwardConversion, 0, 1);
+  const dampedSideSpeed = baseSideSpeed * (1 - redirect);
+  const dampedSpeedSq = baseForwardSpeed * baseForwardSpeed + baseSideSpeed * baseSideSpeed;
+  const redirectedForwardMagnitude = Math.sqrt(Math.max(0, dampedSpeedSq - dampedSideSpeed * dampedSideSpeed));
+  const forwardSign = baseForwardSpeed < -0.0001 ? -1 : 1;
+  const dampedForwardSpeed = redirectedForwardMagnitude * forwardSign;
   player.vx = forwardX * dampedForwardSpeed + sideX * dampedSideSpeed;
   player.vy = forwardY * dampedForwardSpeed + sideY * dampedSideSpeed;
 }
@@ -1055,7 +1071,7 @@ function huckRockPlayerHit(arena, rock, previousX = rock.x, previousY = rock.y) 
     }
 
     const relativeSpeed = Math.hypot(rock.vx - player.vx, rock.vy - player.vy);
-    applyHuckRockPlayerImpulse(rock, player, hit);
+    applyHuckRockPlayerImpulse(arena, rock, player, hit);
     addShake(player, Math.max(ENGINE.collision.shakeThreshold + 10, relativeSpeed * 0.35));
     if (arena.rules.playerDamage) {
       damagePlayer(arena, player, ENGINE.huckRock.damage, arena.tick, rock.ownerId);
@@ -1067,7 +1083,7 @@ function huckRockPlayerHit(arena, rock, previousX = rock.x, previousY = rock.y) 
   return false;
 }
 
-function applyHuckRockPlayerImpulse(rock, player, hit) {
+function applyHuckRockPlayerImpulse(arena, rock, player, hit) {
   const normalX = Number.isFinite(hit.normalX) ? hit.normalX : 0;
   const normalY = Number.isFinite(hit.normalY) ? hit.normalY : 0;
   if (normalX === 0 && normalY === 0) {
@@ -2614,10 +2630,11 @@ function circleTileOverlap(circle, tile) {
 
 function resolvePlayerCollisions(arena) {
   const players = Array.from(arena.players.values()).filter((player) => player.alive);
+  const gameMode = normalizeGameMode(arena.mode);
 
   for (let aIndex = 0; aIndex < players.length; aIndex += 1) {
     for (let bIndex = aIndex + 1; bIndex < players.length; bIndex += 1) {
-      resolvePlayerPair(players[aIndex], players[bIndex], aIndex + bIndex);
+      resolvePlayerPair(players[aIndex], players[bIndex], aIndex + bIndex, gameMode);
     }
   }
 
@@ -2626,7 +2643,7 @@ function resolvePlayerCollisions(arena) {
   }
 }
 
-function resolvePlayerPair(a, b, fallbackSeed) {
+function resolvePlayerPair(a, b, fallbackSeed, gameMode = GAME_MODES.bitspace) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const minDistance = a.radius + b.radius;
@@ -2653,18 +2670,20 @@ function resolvePlayerPair(a, b, fallbackSeed) {
   let impact = Math.abs(relativeNormalSpeed);
 
   if (relativeNormalSpeed < 0) {
-    impact = Math.max(impact, ENGINE.collision.shipPush);
-    const impulse = (-(1 + ENGINE.collision.shipRestitution) * relativeNormalSpeed) / 2;
+    const shipPush = shipPushForGameMode(gameMode);
+    impact = Math.max(impact, shipPush);
+    const impulse = (-(1 + shipRestitutionForGameMode(gameMode)) * relativeNormalSpeed) / 2;
     a.vx -= nx * impulse;
     a.vy -= ny * impulse;
     b.vx += nx * impulse;
     b.vy += ny * impulse;
   } else {
-    impact = Math.max(impact, ENGINE.collision.shipPush);
-    a.vx -= nx * ENGINE.collision.shipPush;
-    a.vy -= ny * ENGINE.collision.shipPush;
-    b.vx += nx * ENGINE.collision.shipPush;
-    b.vy += ny * ENGINE.collision.shipPush;
+    const shipPush = shipPushForGameMode(gameMode);
+    impact = Math.max(impact, shipPush);
+    a.vx -= nx * shipPush;
+    a.vy -= ny * shipPush;
+    b.vx += nx * shipPush;
+    b.vy += ny * shipPush;
   }
 
   addShake(a, impact);
@@ -2674,6 +2693,18 @@ function resolvePlayerPair(a, b, fallbackSeed) {
 function addShake(player, impact) {
   const amount = Math.max(0, impact - ENGINE.collision.shakeThreshold) * ENGINE.collision.shakeScale;
   player.shake = clamp(player.shake + amount, 0, ENGINE.collision.maxShake);
+}
+
+function boundaryRestitutionForGameMode(gameMode) {
+  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.boundaryRestitution;
+}
+
+function shipRestitutionForGameMode(gameMode) {
+  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.shipRestitution;
+}
+
+function shipPushForGameMode(gameMode) {
+  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.shipPush;
 }
 
 function nextPlayerNumber(arena) {

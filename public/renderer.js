@@ -212,6 +212,7 @@ const ASTEROID_VISIBILITY_ALL_CORNERS =
   ASTEROID_VISIBILITY_CORNER.bottomRight |
   ASTEROID_VISIBILITY_CORNER.bottomLeft;
 const ASTEROID_VISIBILITY_FULL_CIRCLE = Math.PI * 2;
+const SUB_ARC_MASKS_ENABLED = false;
 const SUB_LIT_VISIBILITY_ANGLE = (Math.PI * 2) / 3;
 const SUB_LIT_VISIBILITY_HALF_COS = Math.cos(SUB_LIT_VISIBILITY_ANGLE / 2);
 const SUB_LIT_VISIBILITY_HALF_COS_SQ = SUB_LIT_VISIBILITY_HALF_COS * SUB_LIT_VISIBILITY_HALF_COS;
@@ -958,6 +959,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         perf.visibilityGpuCalls = stormStats?.visibilityCalls || 0;
         perf.visibilityGpuRequests = stormStats?.visibilityRequests || 0;
       }
+      cleanupSubsCircleFringe(surface, overlaySurface, frameOptions.gameMode, frameColors);
       const presentStart = measurePerf ? performance.now() : 0;
       surface.present(framePresenter, hudPresentCanvas ? [overlaySurface] : [overlaySurface, hudSurface]);
       if (hudPresentCanvas) {
@@ -1090,6 +1092,7 @@ function createPixelSurface(canvasContext, width, height) {
   const colorCache = new Map();
   const circleClip = createCircleClipSpans(width, height);
   const circleBorderSpanCache = new Map([[0, circleClip]]);
+  const circleOuterBorderSpanCache = new Map();
   const lensProjectionCache = new Map();
   let currentColor = packColor(RENDER.foreground);
   let activeClip = null;
@@ -1111,6 +1114,16 @@ function createPixelSurface(canvasContext, width, height) {
     if (!spans) {
       spans = createCircleClipSpans(width, height, key);
       circleBorderSpanCache.set(key, spans);
+    }
+    return spans;
+  }
+
+  function circleSpansForOutset(outset) {
+    const key = Math.max(1, Math.floor(outset));
+    let spans = circleOuterBorderSpanCache.get(key);
+    if (!spans) {
+      spans = createCircleClipSpans(width, height, -key);
+      circleOuterBorderSpanCache.set(key, spans);
     }
     return spans;
   }
@@ -1421,6 +1434,32 @@ function createPixelSurface(canvasContext, width, height) {
       const offset = Math.max(0, Math.floor(inset));
       const outer = circleSpansForInset(offset);
       const inner = circleSpansForInset(offset + line);
+      for (let y = 0; y < height; y += 1) {
+        const outerStart = outer.starts[y];
+        const outerEnd = outer.ends[y];
+        if (outerStart >= outerEnd) {
+          continue;
+        }
+
+        const row = y * width;
+        const innerStart = inner.starts[y];
+        const innerEnd = inner.ends[y];
+        const leftEnd = Math.min(outerEnd, innerStart);
+        for (let x = outerStart; x < leftEnd; x += 1) {
+          pixels[row + x] = packed;
+        }
+
+        const rightStart = Math.max(outerStart, innerEnd);
+        for (let x = rightStart; x < outerEnd; x += 1) {
+          pixels[row + x] = packed;
+        }
+      }
+    },
+    drawCircleOuterBorder(color, thickness = 1) {
+      const packed = colorFor(color || RENDER.background, colorCache);
+      const line = Math.max(1, Math.floor(thickness));
+      const outer = circleSpansForOutset(line);
+      const inner = circleClip;
       for (let y = 0; y < height; y += 1) {
         const outerStart = outer.starts[y];
         const outerEnd = outer.ends[y];
@@ -1867,6 +1906,18 @@ function createPixelSurface(canvasContext, width, height) {
       canvasContext.putImageData(imageData, 0, 0);
     }
   };
+}
+
+function cleanupSubsCircleFringe(surface, overlaySurface, gameMode, colors) {
+  if (gameMode !== GAME_MODES.subs) {
+    return;
+  }
+
+  const color = colors.backing || "#000000";
+  surface?.drawCircleOuterBorder?.(color, 1);
+  surface?.drawCircleBorder?.(color, 1, 0);
+  overlaySurface?.drawCircleOuterBorder?.(color, 1);
+  overlaySurface?.drawCircleBorder?.(color, 1, 0);
 }
 
 function createGpuFramePresenter(canvas, width, height) {
@@ -4051,7 +4102,7 @@ function createCircleClipSpans(width, height, inset = 0) {
   const ends = new Int16Array(height);
   const centerX = width / 2;
   const centerY = height / 2;
-  const radius = Math.max(0, Math.min(width, height) / 2 - Math.max(0, inset));
+  const radius = Math.max(0, Math.min(width, height) / 2 - Number(inset || 0));
   const radiusSquared = radius * radius;
 
   for (let y = 0; y < height; y += 1) {
@@ -4674,7 +4725,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     }
 
     measureBucket("particleEmitMs", () => {
-      for (const renderPlayer of worldRenderPlayers) {
+      const particleEmitPlayers = particleEmissionPlayersForFrame(options.gameMode, worldRenderPlayers, localPlayer, cameraPlayer);
+      for (const renderPlayer of particleEmitPlayers) {
         if (options.gameMode === GAME_MODES.cars) {
           emitTireTrackParticles(particleState, renderPlayer, options.dtSeconds);
         }
@@ -4705,7 +4757,13 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     });
 
     measureBucket("particlesMs", () => {
-      drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
+      if (options.gameMode === GAME_MODES.subs) {
+        drawWithoutWorldMask(ctx, () => {
+          drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
+        });
+      } else {
+        drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
+      }
     });
 
     measureBucket("raysMs", () => {
@@ -8398,7 +8456,7 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
 }
 
 function createLitVisibilityForGameMode(gameMode, visibility, player, headingOverride = null) {
-  if (gameMode !== GAME_MODES.subs || !visibility || !player) {
+  if (!SUB_ARC_MASKS_ENABLED || gameMode !== GAME_MODES.subs || !visibility || !player) {
     return null;
   }
 
@@ -8407,6 +8465,10 @@ function createLitVisibilityForGameMode(gameMode, visibility, player, headingOve
 }
 
 function createSubLitVisibility(visibility, heading) {
+  if (!SUB_ARC_MASKS_ENABLED) {
+    return visibility;
+  }
+
   const spans = visibility?.spans;
   if (!spans?.rows || !Number.isFinite(heading)) {
     return visibility;
@@ -8470,7 +8532,7 @@ function createSubLitVisibility(visibility, heading) {
 }
 
 function createRenderMaskForGameMode(gameMode, ctx, asteroid, player, camera, headingOverride = null) {
-  if (gameMode !== GAME_MODES.subs || !ctx || !player || !camera) {
+  if (!SUB_ARC_MASKS_ENABLED || gameMode !== GAME_MODES.subs || !ctx || !player || !camera) {
     return null;
   }
 
@@ -8479,6 +8541,10 @@ function createRenderMaskForGameMode(gameMode, ctx, asteroid, player, camera, he
 }
 
 function createSubRenderMask(ctx, asteroid, player, camera, heading) {
+  if (!SUB_ARC_MASKS_ENABLED) {
+    return null;
+  }
+
   if (!Number.isFinite(heading)) {
     return null;
   }
@@ -12932,10 +12998,22 @@ function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRendere
     color: textColor
   };
   const labelWidth = textRenderer.measure(label, textOptions);
-  textRenderer.draw(ctx, label, Math.round(x + (width - labelWidth) / 2), y + Math.floor((height - 14) / 2), {
+  const labelX = Math.round(x + (width - labelWidth) / 2);
+  const labelY = y + Math.floor((height - 14) / 2);
+  textRenderer.draw(ctx, label, labelX, labelY, {
     ...textOptions,
     width: width - 4
   });
+  if (entity.strike) {
+    ctx.fillStyle = textColor;
+    const strikeThickness = Math.max(1, Math.round((textOptions.fontSize || 8) / 5));
+    const strikePad = Math.max(1, Math.round((textOptions.fontSize || 8) / 5));
+    const strikeStartY = labelY + 10;
+    const strikeEndY = labelY + 4;
+    for (let offset = 0; offset < strikeThickness; offset += 1) {
+      drawPixelLine(ctx, labelX - strikePad, strikeStartY + offset, labelX + labelWidth - 1 + strikePad, strikeEndY + offset);
+    }
+  }
 }
 
 function drawRectOutline(ctx, x, y, width, height) {
@@ -13788,6 +13866,32 @@ function drawShipHealthIndicator(ctx, x, y, player, colors, angleOrigin = null) 
     const fallbackY = Math.round(y + Math.sin(absoluteFallbackAngle) * radius);
     drawPoint(ctx, fallbackX, fallbackY);
   }
+}
+
+function particleEmissionPlayersForFrame(gameMode, worldRenderPlayers, localPlayer, cameraPlayer) {
+  const players = Array.isArray(worldRenderPlayers) ? [...worldRenderPlayers] : [];
+  if (gameMode !== GAME_MODES.subs) {
+    return players;
+  }
+
+  const seen = new Set(players.map((player) => player?.id || `#${player?.number}`));
+  const addPlayer = (player) => {
+    if (!player || player.hidden || player.alive === false) {
+      return;
+    }
+
+    const key = player.id || `#${player.number}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    players.push(player);
+  };
+
+  addPlayer(cameraPlayer);
+  addPlayer(localPlayer);
+  return players;
 }
 
 function drawTalkBubble(ctx, player, camera, colors, textRenderer) {

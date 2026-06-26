@@ -322,10 +322,13 @@ export function createLobbyAsteroid(options = {}) {
 }
 
 export function createThemeAsteroid(options = {}) {
-  const widthTiles = options.widthTiles || 48;
-  const heightTiles = options.heightTiles || 48;
+  const widthTiles = options.widthTiles || 80;
+  const heightTiles = options.heightTiles || 80;
   const tileSize = Math.max(1, Math.floor(Number(options.tileSize) || RENDER.tileSize));
   const clearRadius = options.clearRadius ?? 116;
+  const playableExpansionTiles = Number.isFinite(Number(options.playableExpansionTiles))
+    ? Number(options.playableExpansionTiles)
+    : 6;
   const center = {
     x: (widthTiles * tileSize) / 2,
     y: (heightTiles * tileSize) / 2
@@ -339,7 +342,7 @@ export function createThemeAsteroid(options = {}) {
     createPockets: false,
     seedResources: options.seedResources,
     clearCircles: [{ x: center.x, y: center.y, radius: clearRadius }],
-    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + tileSize * 2 }],
+    playableCircles: [{ x: center.x, y: center.y, radius: clearRadius + tileSize * playableExpansionTiles }],
     generation: {
       ...THEME_ASTEROID_GENERATION,
       ...(options.generation || {})
@@ -384,9 +387,9 @@ const THEME_ASTEROID_GENERATION = Object.freeze({
   resourceMaxSpawnTiles: 260,
   oreChance: 0.84,
   diamondChance: 0.07,
-  boundaryDilate: 8,
-  boundaryShrink: 4,
-  boundaryGap: 4
+  boundaryDilate: 24,
+  boundaryShrink: 12,
+  boundaryGap: 12
 });
 
 function createCenteredLobbyPockets(asteroid, center, orbitRadius) {

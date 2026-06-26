@@ -6,7 +6,6 @@ import {
   STORM_STATE,
   blockingTilesNearCircle,
   circleBlockerOverlap,
-  createLobbyAsteroid,
   createNaturalAsteroid,
   createThemeAsteroid,
   isAsteroidRockTile,
@@ -188,6 +187,7 @@ const PERF_DEBUG_PANEL_INTERVAL_MS = 250;
 const THEME_SWATCH_RADIUS = 15.5;
 const THEME_SWATCH_RING_RADIUS = 84;
 const THEME_ASTEROID_GAP = 24;
+const MENU_ASTEROID_CLEAR_RADIUS = 184;
 const THEME_RANDOM_ID = "menu-theme-random";
 const THEME_BACK_ID = "menu-theme-back";
 const THEME_SWATCH_EFFECT_HOLD_MS = 1000;
@@ -2123,6 +2123,9 @@ function draw(now = 0) {
   let snapshot = null;
   measureUpdateBucket("snapshotMs", () => {
     snapshot = loadingRoom ? null : readyMenu ? menuSnapshot() : renderSnapshot(timeSeconds);
+    if (readyMenu) {
+      state.snapshot = snapshot;
+    }
   });
   let mapAllowed = false;
   let playerMap = null;
@@ -2929,17 +2932,20 @@ function createControllerState() {
 }
 
 function createMenuState() {
-  const readyAsteroid = createLobbyAsteroid({ seed: "bitspace-menu" });
+  const mode = loadMenuMode();
+  const readyAsteroid = createReadyMenuAsteroid(mode);
   const asteroids = {
     [MENU_ROOMS.ready]: readyAsteroid,
-    [MENU_ROOMS.theme]: createThemeMenuAsteroid(),
+    [MENU_ROOMS.theme]: createThemeMenuAsteroid(mode),
     [MENU_ROOMS.settings]: readyAsteroid
   };
   const asteroid = asteroids[MENU_ROOMS.ready];
+  const arena = createMenuArena(MENU_ROOMS.ready, asteroid, mode);
 
   return {
     room: MENU_ROOMS.ready,
-    mode: loadMenuMode(),
+    mode: normalizeMenuMode(arena.mode),
+    arena,
     tick: 0,
     lastTimeSeconds: 0,
     readySent: false,
@@ -2957,7 +2963,7 @@ function createMenuState() {
     themeFocusUntilMs: 0,
     themeFocusTheme: null,
     themeBaseId: null,
-    player: createMenuPlayer(asteroid)
+    player: arena.players.get(MENU_PLAYER_ID)
   };
 }
 
@@ -2995,62 +3001,146 @@ function toggleMenuMode() {
   const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs];
   const current = selectedMenuMode();
   const index = modes.indexOf(current);
-  state.menu.mode = modes[(index + 1) % modes.length];
+  setMenuMode(modes[(index + 1) % modes.length]);
+}
+
+function setMenuMode(mode) {
+  state.menu.mode = normalizeMenuMode(mode);
   saveMenuMode(state.menu.mode);
+  rebuildMenuAsteroidsForMode(state.menu.mode);
+  rebuildMenuArena();
   requestMechanicalBeep();
 }
 
-function createThemeMenuAsteroid() {
+function rebuildMenuAsteroidsForMode(mode = selectedMenuMode()) {
+  const readyAsteroid = createReadyMenuAsteroid(mode);
+  state.menu.asteroids = {
+    [MENU_ROOMS.ready]: readyAsteroid,
+    [MENU_ROOMS.theme]: createThemeMenuAsteroid(mode),
+    [MENU_ROOMS.settings]: readyAsteroid
+  };
+  state.menu.asteroid = state.menu.asteroids[state.menu.room] || readyAsteroid;
+}
+
+function createReadyMenuAsteroid(mode = selectedMenuMode()) {
+  return emptyAsteroidTiles(createThemeAsteroid({
+    seed: "bitspace-menu",
+    tileSize: mapTileSizeForGameMode(normalizeMenuMode(mode)),
+    clearRadius: MENU_ASTEROID_CLEAR_RADIUS
+  }));
+}
+
+function emptyAsteroidTiles(asteroid) {
+  asteroid.tiles.fill(ASTEROID_TILE.empty);
+  asteroid.amounts.fill(0);
+  return asteroid;
+}
+
+function createThemeMenuAsteroid(mode = selectedMenuMode()) {
   const clearRadius = THEME_SWATCH_RING_RADIUS + THEME_SWATCH_RADIUS + THEME_ASTEROID_GAP;
 
   return createThemeAsteroid({
     seed: "bitspace-menu-theme",
+    tileSize: mapTileSizeForGameMode(normalizeMenuMode(mode)),
     clearRadius
   });
 }
 
-function createMenuPlayer(asteroid) {
-  const maxHealth = ENGINE.player.startingHealthBars * ENGINE.player.healthPerBar;
-  const center = menuCenter(asteroid);
-  return {
+function createMenuArena(room, asteroid, mode = selectedMenuMode()) {
+  const arena = createArena({
+    id: `menu-${room}`,
+    seed: `${asteroid.seed}:${room}`,
+    mode: normalizeMenuMode(mode),
+    asteroid,
+    playerDamage: false,
+    asteroidMining: false,
+    storm: false
+  });
+  const result = addPlayer(arena, {
     id: MENU_PLAYER_ID,
-    number: 1,
     name: "READY",
-    talk: "",
-    x: center.x,
-    y: center.y,
-    vx: 0,
-    vy: 0,
-    angle: Math.PI / 4,
-    facingMoveX: 0,
-    facingMoveY: 0,
-    pendingFacingSignX: 0,
-    pendingFacingSignY: 0,
-    pendingFacingSeconds: 0,
-    aimAngle: Math.PI / 2,
-    mining: false,
-    miningRay: null,
-    miningHoldSeconds: 0,
-    rayExtension: 0,
-    prototypeMiningRayCount: 1,
-    huckRockEngineCutoutSeconds: 0,
-    thrusting: false,
-    shake: 0,
-    radius: ENGINE.ship.radius,
-    upgrades: {},
-    healthBars: ENGINE.player.startingHealthBars,
-    health: maxHealth,
-    maxHealth,
-    kills: 0,
-    lastKillDropAmount: 0,
-    lastKillDropTick: Number.NEGATIVE_INFINITY,
-    resources: {
-      rock: 0,
-      ore: 0,
-      diamond: 0
-    },
-    alive: true
+    spawnNumber: 1
+  });
+  const player = result.player;
+  if (player) {
+    resetMenuPlayer(player, asteroid);
+  }
+  return arena;
+}
+
+function rebuildMenuArena(options = {}) {
+  const previousPlayer = options.preservePlayer ? state.menu.player : null;
+  const arena = createMenuArena(state.menu.room, state.menu.asteroid, state.menu.mode);
+  const player = arena.players.get(MENU_PLAYER_ID);
+  if (player && previousPlayer) {
+    player.x = previousPlayer.x;
+    player.y = previousPlayer.y;
+    player.vx = previousPlayer.vx || 0;
+    player.vy = previousPlayer.vy || 0;
+    player.angle = previousPlayer.angle || player.angle;
+    player.aimAngle = previousPlayer.aimAngle || player.aimAngle;
+    player.facingMoveX = previousPlayer.facingMoveX || 0;
+    player.facingMoveY = previousPlayer.facingMoveY || 0;
+    player.talk = previousPlayer.talk || "";
+  }
+  state.menu.arena = arena;
+  state.menu.player = player;
+  syncMenuRoomState();
+}
+
+function syncMenuRoomState() {
+  if (state.room?.state !== "menu" || !state.menu?.arena) {
+    return;
+  }
+
+  state.room = {
+    ...state.room,
+    state: "menu",
+    roomId: "local-menu",
+    local: true,
+    localMenu: true,
+    mode: selectedMenuMode(),
+    maxPlayers: 1,
+    playerSlots: 1,
+    players: Array.from(state.menu.arena.players.values()).map((player) => ({
+      id: player.id,
+      clientId: state.clientId,
+      name: player.name,
+      alive: player.alive,
+      connected: true,
+      host: true,
+      playerSlot: true
+    }))
   };
+}
+
+function resetMenuPlayer(player, asteroid) {
+  const center = menuCenter(asteroid);
+  player.name = "READY";
+  player.x = center.x;
+  player.y = center.y;
+  player.vx = 0;
+  player.vy = 0;
+  player.angle = Math.PI / 4;
+  player.facingMoveX = 0;
+  player.facingMoveY = 0;
+  player.pendingFacingSignX = 0;
+  player.pendingFacingSignY = 0;
+  player.pendingFacingSeconds = 0;
+  player.aimAngle = Math.PI / 2;
+  player.mining = false;
+  player.miningRay = null;
+  player.miningHoldSeconds = 0;
+  player.rayExtension = 0;
+  player.prototypeMiningRayCount = 1;
+  player.huckRockEngineCutoutSeconds = 0;
+  player.thrusting = false;
+  player.shake = 0;
+  player.kills = 0;
+  player.lastKillDropAmount = 0;
+  player.lastKillDropTick = Number.NEGATIVE_INFINITY;
+  player.alive = true;
+  return player;
 }
 
 function cancelMiningRay() {
@@ -3088,7 +3178,6 @@ function enterMenuRoom(room) {
   cancelMiningRay();
   releaseSpaceUntilKeyup();
 
-  const player = state.menu.player;
   const preserveMenuCamera = room === MENU_ROOMS.settings && state.menu.room === MENU_ROOMS.ready;
   state.menu.room = room;
   state.menu.asteroid = state.menu.asteroids[room];
@@ -3097,28 +3186,33 @@ function enterMenuRoom(room) {
   const center = menuCenter(state.menu.asteroid);
   state.menu.activeTargetId = null;
   resetMenuButtonTarget();
-  if (!preserveMenuCamera) {
-    player.x = center.x;
-    player.y = center.y;
+  rebuildMenuArena({ preservePlayer: preserveMenuCamera });
+  const nextPlayer = state.menu.player;
+  if (!nextPlayer) {
+    return;
   }
-  player.vx = 0;
-  player.vy = 0;
   if (!preserveMenuCamera) {
-    player.angle = Math.PI / 4;
+    nextPlayer.x = center.x;
+    nextPlayer.y = center.y;
   }
-  player.facingMoveX = 0;
-  player.facingMoveY = 0;
-  clearPendingFacing(player);
+  nextPlayer.vx = 0;
+  nextPlayer.vy = 0;
   if (!preserveMenuCamera) {
-    player.aimAngle = Math.PI / 2;
+    nextPlayer.angle = Math.PI / 4;
   }
-  player.mining = false;
-  player.miningRay = null;
-  player.miningHoldSeconds = 0;
-  player.rayExtension = 0;
-  player.prototypeMiningRayCount = state.menu.rayCount;
-  player.huckRockEngineCutoutSeconds = 0;
-  player.thrusting = false;
+  nextPlayer.facingMoveX = 0;
+  nextPlayer.facingMoveY = 0;
+  clearPendingFacing(nextPlayer);
+  if (!preserveMenuCamera) {
+    nextPlayer.aimAngle = Math.PI / 2;
+  }
+  nextPlayer.mining = false;
+  nextPlayer.miningRay = null;
+  nextPlayer.miningHoldSeconds = 0;
+  nextPlayer.rayExtension = 0;
+  nextPlayer.prototypeMiningRayCount = state.menu.rayCount;
+  nextPlayer.huckRockEngineCutoutSeconds = 0;
+  nextPlayer.thrusting = false;
   updateMobileControlUi();
 }
 
@@ -3128,6 +3222,9 @@ function updateMenuSimulation(timeSeconds) {
   const dtSeconds = clamp(timeSeconds - previousTime, 0, 1 / 15) || 1 / ENGINE.tickRate;
   state.menu.lastTimeSeconds = timeSeconds;
   state.menu.tick += 1;
+  if (state.menu.arena) {
+    state.menu.arena.tick = state.menu.tick;
+  }
   player.shake = Math.max(0, (player.shake || 0) - ENGINE.collision.shakeDecay * dtSeconds);
   player.huckRockEngineCutoutSeconds = 0;
   if (state.menu.room === MENU_ROOMS.settings) {
@@ -3135,6 +3232,7 @@ function updateMenuSimulation(timeSeconds) {
     player.vy = 0;
     player.moveX = 0;
     player.moveY = 0;
+    setMenuPlayerInput(0, 0, false);
     player.thrusting = false;
     player.mining = false;
     player.miningRay = null;
@@ -3146,7 +3244,7 @@ function updateMenuSimulation(timeSeconds) {
   }
 
   const gameMode = selectedMenuMode();
-  applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
+  applyShipModeFriction(player, dtSeconds, gameMode);
 
   updateMenuAim(player);
   player.prototypeMiningRayCount = state.menu.rayCount;
@@ -3170,6 +3268,7 @@ function updateMenuSimulation(timeSeconds) {
 
   player.thrusting = canThrust;
   player.mining = physicalMiningInputActive() && !state.chat.active;
+  setMenuPlayerInput(move.x, move.y, player.mining);
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
   } else {
@@ -3179,10 +3278,23 @@ function updateMenuSimulation(timeSeconds) {
 
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
-  resolveMenuAsteroidCollisions(player);
+  resolveMenuAsteroidCollisions(player, gameMode);
 
   updateMenuMiningRay(player, dtSeconds);
   updateMenuHuckRocks(player, dtSeconds);
+}
+
+function setMenuPlayerInput(moveX, moveY, mining) {
+  if (!state.menu?.arena || !state.menu.player) {
+    return;
+  }
+
+  setPlayerInput(state.menu.arena, MENU_PLAYER_ID, {
+    moveX,
+    moveY,
+    aimAngle: state.menu.player.aimAngle,
+    mining
+  });
 }
 
 function updateMenuAim(player) {
@@ -3868,7 +3980,8 @@ function resetMenuButtonTarget() {
   state.menu.buttonTargetActivated = false;
 }
 
-function resolveMenuAsteroidCollisions(player) {
+function resolveMenuAsteroidCollisions(player, gameMode = selectedMenuMode()) {
+  const restitution = boundaryRestitutionForGameMode(gameMode);
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
   const blockers = blockingTilesNearCircle(state.menu.asteroid, player.x, player.y, player.radius);
@@ -3885,8 +3998,8 @@ function resolveMenuAsteroidCollisions(player) {
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       if (normalSpeed < 0) {
         requestRockThump(-normalSpeed);
-        player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
-        player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
+        player.vx -= (1 + restitution) * normalSpeed * hit.normalX;
+        player.vy -= (1 + restitution) * normalSpeed * hit.normalY;
       }
 
       resolved = true;
@@ -3927,6 +4040,10 @@ function raycastMenuEntities(start, direction, maxDistance) {
 }
 
 function activateMenuEntity(entity) {
+  if (entity.disabled) {
+    return;
+  }
+
   if (entity.action === "ready") {
     activateReadyFromMenu();
     return;
@@ -3934,6 +4051,11 @@ function activateMenuEntity(entity) {
 
   if (entity.action === "toggle-mode") {
     toggleMenuMode();
+    return;
+  }
+
+  if (entity.action === "set-mode") {
+    setMenuMode(entity.targetMode);
     return;
   }
 
@@ -5156,22 +5278,25 @@ function rayCircleIntersection(start, direction, circle, maxDistance) {
 }
 
 function menuSnapshot() {
+  const arena = state.menu.arena;
+  if (!arena) {
+    return null;
+  }
   const world = menuWorld(state.menu.asteroid);
   const settingsMenu = state.menu.room === MENU_ROOMS.settings;
   const entities = menuEntities().concat(
     settingsMenu ? [] : state.menu.huckRocks.filter((entity) => entity.destroyed !== true)
   );
+  const snapshot = snapshotArena(arena);
+  const players = settingsMenu
+    ? snapshot.players.map((player) => player.id === MENU_PLAYER_ID ? { ...player, hidden: true } : player)
+    : snapshot.players;
   return {
-    arenaId: settingsMenu ? `menu-${MENU_ROOMS.ready}` : `menu-${state.menu.room}`,
-    tick: state.menu.tick,
-    serverTime: Date.now(),
-    mode: selectedMenuMode(),
-    render: RENDER,
+    ...snapshot,
+    arenaId: settingsMenu ? `menu-${MENU_ROOMS.ready}` : snapshot.arenaId,
     world,
-    players: settingsMenu ? [{ ...state.menu.player, hidden: true }] : [{ ...state.menu.player }],
-    asteroidMining: [],
-    entities,
-    effects: []
+    players,
+    entities: snapshot.entities.concat(entities)
   };
 }
 
@@ -5200,25 +5325,53 @@ function menuEntities() {
   const readyY = center.y + 38;
   const controlsY = readyY + MENU_BUTTON_HEIGHT + 9;
   const carsY = controlsY + controlsRows.length * 11 + 8;
-  const modeButtonLabel = selectedMenuMode() === GAME_MODES.bitspace
-    ? "CARS"
-    : selectedMenuMode() === GAME_MODES.cars
-      ? "SUBS"
-      : "SHIPS";
+  const currentMode = selectedMenuMode();
+  const modeButtonGap = 8;
+  const modeButtonX = center.x - buttonWidth - modeButtonGap / 2;
+  const alternateModes = menuAlternateModes(currentMode);
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
+  const themeDisabled = currentMode !== GAME_MODES.bitspace;
 
   return [
     menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, titleY),
     menuButton("menu-ready", "ready", "READY", center.x - buttonWidth / 2, readyY, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
-    menuButton("menu-cars", "toggle-mode", modeButtonLabel, center.x - buttonWidth / 2, carsY, buttonWidth),
+    menuButton(`menu-mode-${alternateModes[0]}`, "set-mode", menuModeLabel(alternateModes[0]), modeButtonX, carsY, buttonWidth, {
+      targetMode: alternateModes[0]
+    }),
+    menuButton(`menu-mode-${alternateModes[1]}`, "set-mode", menuModeLabel(alternateModes[1]), modeButtonX + buttonWidth + modeButtonGap, carsY, buttonWidth, {
+      targetMode: alternateModes[1]
+    }),
     menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
-    menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
+    menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth, {
+      disabled: themeDisabled,
+      strike: themeDisabled
+    }),
     menuButton("menu-prefs", "prefs", "PREFS", center.x + sideXGap - buttonWidth / 2, sideBottomY, buttonWidth)
   ];
+}
+
+function menuAlternateModes(mode) {
+  if (mode === GAME_MODES.cars) {
+    return [GAME_MODES.bitspace, GAME_MODES.subs];
+  }
+  if (mode === GAME_MODES.subs) {
+    return [GAME_MODES.cars, GAME_MODES.bitspace];
+  }
+  return [GAME_MODES.cars, GAME_MODES.subs];
+}
+
+function menuModeLabel(mode) {
+  if (mode === GAME_MODES.cars) {
+    return "CARS";
+  }
+  if (mode === GAME_MODES.subs) {
+    return "SUBS";
+  }
+  return "SHIPS";
 }
 
 function menuControlHintRows() {
@@ -5758,7 +5911,7 @@ function menuHint(id, rows, x, y) {
   };
 }
 
-function menuButton(id, action, label, x, y, width) {
+function menuButton(id, action, label, x, y, width, options = {}) {
   return {
     id,
     type: "lobbyButton",
@@ -5768,7 +5921,10 @@ function menuButton(id, action, label, x, y, width) {
     y,
     width,
     height: MENU_BUTTON_HEIGHT,
-    active: state.menu.activeTargetId === id
+    active: state.menu.activeTargetId === id,
+    disabled: options.disabled === true,
+    strike: options.strike === true,
+    targetMode: options.targetMode || null
   };
 }
 
@@ -9514,6 +9670,50 @@ function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.fric
   player.vy *= friction;
 }
 
+function applyShipModeFriction(player, dtSeconds, gameMode) {
+  if (gameMode !== GAME_MODES.subs) {
+    applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
+    return;
+  }
+
+  applyDirectionalShipFriction(
+    player,
+    dtSeconds,
+    ENGINE.subs.forwardFriction,
+    ENGINE.subs.sideFriction,
+    ENGINE.subs.sideToForwardConversion
+  );
+}
+
+function applyDirectionalShipFriction(
+  player,
+  dtSeconds,
+  forwardFrictionPerTick,
+  sideFrictionPerTick,
+  sideToForwardConversion = 0
+) {
+  const fixedStepSeconds = 1 / ENGINE.tickRate;
+  const forwardFriction = Math.pow(forwardFrictionPerTick, dtSeconds / fixedStepSeconds);
+  const sideFriction = Math.pow(sideFrictionPerTick, dtSeconds / fixedStepSeconds);
+  const angle = Number.isFinite(player.angle) ? player.angle : Number(player.aimAngle) || 0;
+  const forwardX = Math.cos(angle);
+  const forwardY = Math.sin(angle);
+  const sideX = -forwardY;
+  const sideY = forwardX;
+  const forwardSpeed = player.vx * forwardX + player.vy * forwardY;
+  const sideSpeed = player.vx * sideX + player.vy * sideY;
+  const baseForwardSpeed = forwardSpeed * forwardFriction;
+  const baseSideSpeed = sideSpeed * sideFriction;
+  const redirect = Math.max(0, Math.min(1, sideToForwardConversion));
+  const dampedSideSpeed = baseSideSpeed * (1 - redirect);
+  const dampedSpeedSq = baseForwardSpeed * baseForwardSpeed + baseSideSpeed * baseSideSpeed;
+  const redirectedForwardMagnitude = Math.sqrt(Math.max(0, dampedSpeedSq - dampedSideSpeed * dampedSideSpeed));
+  const forwardSign = baseForwardSpeed < -0.0001 ? -1 : 1;
+  const dampedForwardSpeed = redirectedForwardMagnitude * forwardSign;
+  player.vx = forwardX * dampedForwardSpeed + sideX * dampedSideSpeed;
+  player.vy = forwardY * dampedForwardSpeed + sideY * dampedSideSpeed;
+}
+
 function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = ENGINE.ship.thrust) {
   player.vx += move.x * thrust * effects.thrustMultiplier * dtSeconds;
   player.vy += move.y * thrust * effects.thrustMultiplier * dtSeconds;
@@ -9727,7 +9927,7 @@ function updatePrediction(timeSeconds) {
   const effects = aggregateUpgradeEffects(predicted.upgrades);
   predicted.huckRockEngineCutoutSeconds = 0;
   const gameMode = activeGameMode();
-  applyShipFriction(predicted, dtSeconds, shipFrictionForGameMode(gameMode));
+  applyShipModeFriction(predicted, dtSeconds, gameMode);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
 
@@ -10388,15 +10588,17 @@ function resetEntitySmoothing() {
 }
 
 function resolvePredictionCollisions(player) {
-  resolvePredictionAsteroidCollisions(player);
-  resolvePredictionPlayerCollisions(player);
+  const gameMode = activeGameMode();
+  resolvePredictionAsteroidCollisions(player, gameMode);
+  resolvePredictionPlayerCollisions(player, gameMode);
 }
 
-function resolvePredictionAsteroidCollisions(player) {
+function resolvePredictionAsteroidCollisions(player, gameMode = activeGameMode()) {
   if (!state.asteroid) {
     return;
   }
 
+  const restitution = boundaryRestitutionForGameMode(gameMode);
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
     const blockers = blockingTilesNearCircle(state.asteroid, player.x, player.y, player.radius, {
@@ -10415,8 +10617,8 @@ function resolvePredictionAsteroidCollisions(player) {
       const normalSpeed = player.vx * hit.normalX + player.vy * hit.normalY;
       if (normalSpeed < 0) {
         requestRockThump(-normalSpeed);
-        player.vx -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalX;
-        player.vy -= (1 + ENGINE.collision.boundaryRestitution) * normalSpeed * hit.normalY;
+        player.vx -= (1 + restitution) * normalSpeed * hit.normalX;
+        player.vy -= (1 + restitution) * normalSpeed * hit.normalY;
       }
 
       resolved = true;
@@ -10428,11 +10630,12 @@ function resolvePredictionAsteroidCollisions(player) {
   }
 }
 
-function resolvePredictionPlayerCollisions(player) {
+function resolvePredictionPlayerCollisions(player, gameMode = activeGameMode()) {
   if (!state.snapshot) {
     return;
   }
 
+  const restitution = shipRestitutionForGameMode(gameMode);
   for (const other of state.snapshot.players) {
     if (!other.alive || other.id === player.id) {
       continue;
@@ -10455,10 +10658,18 @@ function resolvePredictionPlayerCollisions(player) {
     const normalSpeed = player.vx * normalX + player.vy * normalY;
     if (normalSpeed < 0) {
       requestCollisionClunk(-normalSpeed);
-      player.vx -= (1 + ENGINE.collision.shipRestitution) * normalSpeed * normalX;
-      player.vy -= (1 + ENGINE.collision.shipRestitution) * normalSpeed * normalY;
+      player.vx -= (1 + restitution) * normalSpeed * normalX;
+      player.vy -= (1 + restitution) * normalSpeed * normalY;
     }
   }
+}
+
+function boundaryRestitutionForGameMode(gameMode) {
+  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.boundaryRestitution;
+}
+
+function shipRestitutionForGameMode(gameMode) {
+  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.shipRestitution;
 }
 
 function circleTileOverlap(circle, tile) {
@@ -11709,7 +11920,8 @@ function tileOverlapsVisiblePlayer(tileX, tileY, tileSize) {
 }
 
 function localPlayerFromSnapshot() {
-  return state.snapshot?.players.find((candidate) => candidate.id === state.playerId) || null;
+  const playerId = isReadyMenu() ? MENU_PLAYER_ID : state.playerId;
+  return state.snapshot?.players.find((candidate) => candidate.id === playerId) || null;
 }
 
 function roomAllowsBuilding() {
