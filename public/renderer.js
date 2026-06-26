@@ -70,7 +70,7 @@ const CAR_BODY_MID_LIGHT_MIX = 0.08;
 const CAR_BODY_MID_DARKEN = 0.76;
 const CAR_BODY_DARKEN = 0.54;
 const CAR_BODY_LEAN_VISUAL_SHIFT = 1.5;
-const CAR_ENGINE_NOZZLE_LENGTH = 8;
+const CAR_ENGINE_NOZZLE_LENGTH = 5;
 const CAR_ENGINE_NOZZLE_WIDTH = 2;
 const CAR_ENGINE_NOZZLE_BODY_OVERLAP = 0.75;
 const CAR_ENGINE_SIDE_OFFSET_SCALE = 1.04;
@@ -232,19 +232,31 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   nozzleMin: 0.33,
   nozzleMax: 0.5,
 });
+const CAR_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
+  rate: 2,
+  plumeSpeed: 0.5,
+  life: 0.5,
+  nozzle: 4,
+  spread: .5,
+  sideOffsetScale: 1
+});
+const CAR_THRUSTER_ENGINE_RAMP_MAXES = Object.freeze({
+  rate: 20,
+  plumeSpeed: 5,
+  life: .5,
+  nozzle: 7,
+  spread: 1,
+  sideOffsetScale: 1
+});
+const CAR_THRUSTER_ENGINE_RAMP_MAX_DEBUG = false;
 const CAR_THRUSTER_ENGINE_RAMP = Object.freeze({
-  rateMin: 5,
-  rateMax: 10,
-  plumeSpeedMin: .5,
-  plumeSpeedMax: 1,
-  lifeMin: 0.5,
-  lifeMax: 1,
-  nozzleMin: 1,
-  nozzleMax: 2,
-  spreadMin: 2,
-  spreadMax: 5,
-  sideOffsetScaleMin: 1,
-  sideOffsetScaleMax: 1
+  ...Object.keys(CAR_THRUSTER_ENGINE_RAMP_MINS).reduce((acc, key) => {
+    const min = CAR_THRUSTER_ENGINE_RAMP_MAX_DEBUG ? CAR_THRUSTER_ENGINE_RAMP_MAXES[key] : CAR_THRUSTER_ENGINE_RAMP_MINS[key];
+    const max = CAR_THRUSTER_ENGINE_RAMP_MAXES[key];
+    acc[key + 'Min'] = min;
+    acc[key + 'Max'] = max;
+    return acc;
+  }, {})
 });
 const MINING_PARTICLE_RATE = 150;
 const MINING_RAY_VISUAL_RADIUS = 2;
@@ -3928,7 +3940,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         }
 
         if (renderPlayer.thrusting) {
-          emitThrusterParticles(particleState, renderPlayer, options.dtSeconds, options.gameMode);
+          emitThrusterParticles(particleState, renderPlayer, options.dtSeconds, options.gameMode, camera);
         }
 
         if (renderPlayer.mining && miningRayHasHit(renderPlayer.miningRay)) {
@@ -11748,15 +11760,38 @@ function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
 
 function drawCarEngineNozzles(ctx, x, y, forward, side, radius) {
   ctx.fillStyle = CAR_TIRE_COLOR;
-  for (const offset of carEngineSideOffsets(radius)) {
+  for (const placement of carEngineNozzlePlacements(x, y, forward, side, radius)) {
+    fillRotatedRect(
+      ctx,
+      placement.center.x,
+      placement.center.y,
+      forward,
+      side,
+      CAR_ENGINE_NOZZLE_LENGTH,
+      CAR_ENGINE_NOZZLE_WIDTH
+    );
+  }
+}
+
+function carEngineNozzlePlacements(x, y, forward, side, radius) {
+  const rear = {
+    x: -forward.x,
+    y: -forward.y
+  };
+
+  return carEngineSideOffsets(radius).map((offset) => {
     const centerRearOffset = carEngineNozzleCenterRearOffset(radius, offset);
     const center = snapCarEngineNozzleCenter(
       x - forward.x * centerRearOffset + side.x * offset,
       y - forward.y * centerRearOffset + side.y * offset,
       forward
     );
-    fillRotatedRect(ctx, center.x, center.y, forward, side, CAR_ENGINE_NOZZLE_LENGTH, CAR_ENGINE_NOZZLE_WIDTH);
-  }
+    return {
+      offset,
+      center,
+      plumeOrigin: carEngineNozzlePlumeOrigin(center, rear, forward)
+    };
+  });
 }
 
 function snapCarEngineNozzleCenter(x, y, forward) {
@@ -11789,7 +11824,7 @@ function carEngineNozzlePlumeOrigin(center, rear, forward) {
 
   if (Math.abs(forward.x) > 0.999 && Math.abs(forward.y) < 0.001) {
     return {
-      x: Math.floor(x),
+      x: roundCarEngineNozzleOuterEdge(x, rear.x),
       y
     };
   }
@@ -11797,11 +11832,21 @@ function carEngineNozzlePlumeOrigin(center, rear, forward) {
   if (Math.abs(forward.y) > 0.999 && Math.abs(forward.x) < 0.001) {
     return {
       x,
-      y: Math.floor(y)
+      y: roundCarEngineNozzleOuterEdge(y, rear.y)
     };
   }
 
   return { x, y };
+}
+
+function roundCarEngineNozzleOuterEdge(value, rearAxis) {
+  if (rearAxis < -0.999) {
+    return Math.ceil(value);
+  }
+  if (rearAxis > 0.999) {
+    return Math.floor(value);
+  }
+  return value;
 }
 
 function carEngineCircleRearDistance(radius, sideOffset = 0) {
@@ -13046,7 +13091,7 @@ function breakPixelWord(word, maxWidth, textRenderer, options) {
   return chunks;
 }
 
-function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.bitspace) {
+function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.bitspace, camera = null) {
   const basis = thrusterParticleBasis(player, gameMode);
   if (!basis) {
     return;
@@ -13055,7 +13100,7 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
   const effects = aggregateUpgradeEffects(player.upgrades);
   const { rear, side } = basis;
   const engineRamp = thrusterEngineRamp(player, gameMode);
-  const origins = rearEnginePlumeOrigins(player, rear, side, gameMode, engineRamp);
+  const origins = rearEnginePlumeOrigins(player, rear, side, gameMode, engineRamp, camera);
   const key = player.id || String(player.number);
   const particleMultiplier = effects.thrusterParticleMultiplier;
   const turnIntensity = Number.isFinite(basis.intensity)
@@ -13076,13 +13121,17 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
 
     for (let index = 0; index < count; index += 1) {
       const seed = state.nextSeed();
-      const nozzleWidth = Math.max(2, (origin.nozzleWidth || 0) * engineRamp.nozzle);
+      const nozzleWidth = origin.useRampNozzleWidth
+        ? Math.max(0.01, Number(engineRamp.nozzle) || Number(origin.nozzleWidth) || 0.01)
+        : origin.lockNozzleWidth
+          ? Math.max(0.01, Number(origin.nozzleWidth) || 0.01)
+          : Math.max(2, (origin.nozzleWidth || 0) * engineRamp.nozzle);
       const nozzleRadius = nozzleWidth * 0.5;
-      const sideJitter = sampleProjectedNozzleOffset(seed, nozzleRadius);
+      const sideJitter = sampleProjectedNozzleOffset(seed, nozzleRadius) + (origin.nozzlePixelBias || 0);
       const sideRatio = clamp(Math.abs(sideJitter) / Math.max(1, nozzleRadius), 0, 1);
       const capOffset = 1 + sideRatio * sideRatio * Math.max(1, nozzleRadius * 0.7);
       const rearOffset = Number.isFinite(origin.fixedRearOffset)
-        ? origin.fixedRearOffset
+        ? origin.fixedRearOffset + (origin.roundedNozzleCap ? capOffset - 1 : 0)
         : capOffset;
       const rearJitter = randomUnit(seed, 2) * 0.9;
       const speed = (92 + randomUnit(seed, 3) * 90) * Math.sqrt(particleMultiplier) * engineRamp.plumeSpeed;
@@ -13260,9 +13309,9 @@ function carTireTrackWheels(player) {
   }));
 }
 
-function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspace, engineRamp = {}) {
+function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspace, engineRamp = {}, camera = null) {
   if (gameMode === GAME_MODES.cars) {
-    return carRearEnginePlumeOrigins(player, rear, side, engineRamp);
+    return carRearEnginePlumeOrigins(player, rear, side, engineRamp, camera);
   }
 
   const mainRadius = shipMainRadius(player);
@@ -13282,35 +13331,41 @@ function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspa
   }));
 }
 
-function carRearEnginePlumeOrigins(player, rear, side, engineRamp = {}) {
+function carRearEnginePlumeOrigins(player, rear, side, engineRamp = {}, camera = null) {
   const radius = shipMainRadius(player);
-  const sideOffsetScale = Number(engineRamp.sideOffsetScale || 1);
-  const offsets = carEngineSideOffsets(radius).map((offset) => offset * sideOffsetScale);
+  const offsets = carEngineSideOffsets(radius);
   const medialRadius = Math.max(1, Math.max(...offsets.map((offset) => Math.abs(offset))));
   const forward = {
     x: -rear.x,
     y: -rear.y
   };
   const leanShift = -clamp(carVisualLean(player, carBodyAngle(player)), -1, 1) * CAR_BODY_LEAN_VISUAL_SHIFT;
-  const originX = player.x + side.x * leanShift;
-  const originY = player.y + side.y * leanShift;
-  return offsets.map((offset) => {
-    const centerRearOffset = carEngineNozzleCenterRearOffset(radius, offset);
-    const center = snapCarEngineNozzleCenter(
-      originX + rear.x * centerRearOffset + side.x * offset,
-      originY + rear.y * centerRearOffset + side.y * offset,
-      forward
-    );
-    const plumeOrigin = carEngineNozzlePlumeOrigin(center, rear, forward);
+  const bodyX = carVisualWorldCoordinate(player.x, camera?.x) + side.x * leanShift;
+  const bodyY = carVisualWorldCoordinate(player.y, camera?.y) + side.y * leanShift;
+  return carEngineNozzlePlacements(bodyX, bodyY, forward, side, radius).map((placement) => {
+    const plumeOrigin = placement.plumeOrigin;
     return {
       x: plumeOrigin.x,
       y: plumeOrigin.y,
-      nozzleWidth: CAR_ENGINE_NOZZLE_WIDTH + 1,
-      medialOffset: offset,
+      nozzleWidth: CAR_ENGINE_NOZZLE_WIDTH,
+      useRampNozzleWidth: true,
+      nozzlePixelBias: -0.5,
+      medialOffset: placement.offset,
       medialRadius,
-      fixedRearOffset: CAR_ENGINE_PLUME_START_GAP
+      fixedRearOffset: CAR_ENGINE_PLUME_START_GAP,
+      roundedNozzleCap: true
     };
   });
+}
+
+function carVisualWorldCoordinate(value, cameraValue = 0) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  if (!Number.isFinite(cameraValue)) {
+    return value;
+  }
+  return Math.round(value - cameraValue) + cameraValue;
 }
 
 function updateStaticParticles(particles, dtSeconds) {
