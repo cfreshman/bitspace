@@ -62,7 +62,7 @@ const SUB_MODE_COLORS = Object.freeze({
 });
 const BUG_BACKING_COLOR = "#070b06";
 const BUG_MODE_COLORS = Object.freeze({
-  foreground: "#52a13a",
+  foreground: "#45b722",
   background: "#395530",
   backgroundDark: "#395530",
   backing: BUG_BACKING_COLOR,
@@ -92,6 +92,16 @@ const CAR_BODY_COLORS = Object.freeze([
   "#ffd81f",
   "#12d6ff",
 ]);
+const BUG_HEALTH_COLORS = Object.freeze([
+  BUG_MODE_COLORS.health,
+  "#2f63ff",
+  "#2fff63",
+  "#ff942f",
+  "#942fff",
+  "#ff2fc3",
+  "#ffdf2f",
+  "#2fdfff"
+]);
 const CAR_TIRE_COLOR = "#000000";
 const CAR_TIRE_LENGTH = 6;
 const CAR_TIRE_WIDTH = 3;
@@ -118,7 +128,7 @@ const GROUND_GRASS_SWAY_SPEED = 2.8;
 const TIRE_TRACK_LIFE_SECONDS = 8;
 const TIRE_TRACK_BACKGROUND_MIXES = Object.freeze([0.16, 0.22, 0.28]);
 const TIRE_TRACK_STAMP_SIZE = 3;
-const BUG_FOOTSTEP_DARKEN_MIX = 0.22;
+const BUG_FOOTSTEP_DARKEN_MIX = 0.14;
 const CAR_THRUSTER_PARTICLE_KIND = "car-thruster";
 const SUB_THRUSTER_PARTICLE_KIND = "sub-thruster";
 const BUG_LEG_CONFIGS = Object.freeze(
@@ -13182,7 +13192,10 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
       }
     });
     drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
-    drawShipHealthIndicator(ctx, x, y, player, colors);
+    drawShipHealthIndicator(ctx, x, y, player, {
+      ...colors,
+      health: bugHealthColor(player)
+    });
     drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
     return;
   }
@@ -14213,6 +14226,11 @@ function carBodyColor(player) {
   const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), CAR_BODY_COLORS.length);
   const color = CAR_BODY_COLORS[index];
   return player?.alive === false ? desaturateHexColor(color, 0.5) : color;
+}
+
+function bugHealthColor(player) {
+  const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), BUG_HEALTH_COLORS.length);
+  return BUG_HEALTH_COLORS[index] || BUG_MODE_COLORS.health;
 }
 
 function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
