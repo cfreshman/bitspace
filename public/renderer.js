@@ -7,6 +7,7 @@ import {
   miningRayCountForPlayer,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
+  miningSideRayOffsetForAsteroid,
   miningRayLanesForPlayer
 } from "/shared/mining.js";
 import {
@@ -59,6 +60,24 @@ const SUB_MODE_COLORS = Object.freeze({
   bodyFill: "#111111",
   health: "#48f06d"
 });
+const BUG_BACKING_COLOR = "#070b06";
+const BUG_MODE_COLORS = Object.freeze({
+  foreground: "#9ab870",
+  background: "#24341f",
+  backgroundDark: "#172314",
+  backing: BUG_BACKING_COLOR,
+  ore: "#d2b27a",
+  diamond: "#84ffe8",
+  rockFill: BUG_BACKING_COLOR,
+  rockLine: BUG_BACKING_COLOR,
+  wallFill: BUG_BACKING_COLOR,
+  wallLine: BUG_BACKING_COLOR,
+  rockDark: BUG_BACKING_COLOR,
+  bugBodyForeground: "#000000",
+  bugBodyFill: "#000000",
+  bugRay: "#ff4cff",
+  health: "#ff2f2f"
+});
 const SUB_SHADOW_MASK_COLOR = "#010203";
 const SUB_NON_RENDER_OCEAN_SHADOW_ALPHA = 0.95;
 const CAR_BODY_COLORS = Object.freeze([
@@ -99,6 +118,38 @@ const TIRE_TRACK_BACKGROUND_MIXES = Object.freeze([0.16, 0.22, 0.28]);
 const TIRE_TRACK_STAMP_SIZE = 3;
 const CAR_THRUSTER_PARTICLE_KIND = "car-thruster";
 const SUB_THRUSTER_PARTICLE_KIND = "sub-thruster";
+const BUG_LEG_CONFIGS = Object.freeze(
+  Array.from({ length: 8 }, (_, index) => ({
+    angleOffset: (index / 8) * Math.PI * 2 + Math.PI * 2 / 16
+  }))
+);
+const BUG_LEG_SHOULDER_SCALE = 1;
+const BUG_LEG_REST_EXTENSION_RATIO = 0.7;
+const BUG_LEG_MAX_EXTENSION_RATIO = 2;
+const BUG_LEG_MIN_EXTENSION_RATIO = 0.25;
+const BUG_LEG_STEP_SECONDS = 0.05;
+const BUG_LEG_MIN_STEP_SECONDS = 0.014;
+const BUG_LEG_STEP_TRIGGER_SCALE = 3;
+const BUG_LEG_MAX_ACTIVE_STEPS = 1;
+const BUG_LEG_SUBSTEP_DISTANCE = 1;
+const BUG_LEG_MAX_SUBSTEP_SECONDS = 1 / 60;
+const BUG_LEG_MAX_SUBSTEPS = 1;
+const BUG_LEG_HIP_HEIGHT_SCALE = 0.05;
+const BUG_LEG_SEGMENT_LENGTH_SCALE = 2;
+const BUG_LEG_STEP_HEIGHT_SCALE = 0.18;
+const BUG_LEG_TARGET_RADIAL_JITTER = 0.1;
+const BUG_LEG_TARGET_TANGENTIAL_JITTER = 0.12;
+const BUG_LEG_VELOCITY_LEAD_SECONDS = 0.055;
+const BUG_LEG_VELOCITY_LEAD_MAX = 2.5;
+const BUG_LEG_TEARDROP_MIN_SPEED = 2;
+const BUG_LEG_TEARDROP_CENTER_LEAD = 0.55;
+const BUG_LEG_TEARDROP_FRONT_REACH = 1;
+const BUG_LEG_TEARDROP_REAR_REACH = 0.5;
+const BUG_LEG_TEARDROP_FRONT_SIDE_SCALE = 1;
+const BUG_LEG_TEARDROP_REAR_SIDE_SCALE = 0;
+const BUG_LEG_LINE_WIDTH = 2;
+const BUG_LEG_PROJECT_X = 0;
+const BUG_LEG_PROJECT_Y = -0.45;
 const SUB_WAVE_SIM_SIZE = 256;
 const SUB_WAVE_SIM_FPS = 30;
 const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
@@ -123,6 +174,13 @@ function colorsForGameMode(colors, gameMode, params = {}) {
     return {
       ...colors,
       ...SUB_MODE_COLORS
+    };
+  }
+
+  if (gameMode === GAME_MODES.bugs) {
+    return {
+      ...colors,
+      ...BUG_MODE_COLORS
     };
   }
 
@@ -160,7 +218,7 @@ function asteroidVisibilityOuterBevelRadiusForGameMode(gameMode = GAME_MODES.bit
 }
 
 function usesCarRockRenderer(gameMode = GAME_MODES.bitspace) {
-  return gameMode === GAME_MODES.cars || gameMode === GAME_MODES.subs;
+  return gameMode === GAME_MODES.cars || gameMode === GAME_MODES.subs || gameMode === GAME_MODES.bugs;
 }
 
 const CANVAS_EDGE_PADDING_EM = 1;
@@ -233,6 +291,7 @@ const ROCK_OUTER_CORNER_RADIUS = Math.round(RENDER.tileSize / 3);
 const ROCK_INNER_CORNER_RADIUS = 1;
 const CAR_ROCK_OUTLINE_WIDTH = 8;
 const SUB_ROCK_OUTLINE_WIDTH = 2;
+const BUG_ROCK_OUTLINE_WIDTH = 2;
 const CAR_ROCK_OUTER_BEVEL_RADIUS = Math.max(1, ROCK_OUTER_CORNER_RADIUS - 1);
 const ROCK_BEVEL_INNER_EDGE_TOLERANCE = 0.25;
 const ROCK_INNER_BEVEL_ENDPOINT_TOLERANCE = 0.75;
@@ -569,6 +628,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   const miningParticles = [];
   const tireTrackParticles = [];
   const emitCarry = new Map();
+  const bugLegStates = new Map();
   let minimapSurface = null;
   let minimapTextRenderer = null;
   let particleSeed = 1;
@@ -870,6 +930,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         dtSeconds,
         visualShipAngles,
         subLightAngles,
+        bugLegStates,
         gpuStormRenderer,
         gpuFrameStormReady: framePresenter?.supportsStorm === true,
         gpuFrameCheckerReady: framePresenter?.supportsChecker === true,
@@ -4794,7 +4855,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           options.timeSeconds ?? snapshot.tick / 60,
           textRenderer,
           options.room?.state === "ended",
-          options.gameMode
+          options.gameMode,
+          options.bugLegStates
         );
       }
     });
@@ -4812,7 +4874,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           options.timeSeconds ?? snapshot.tick / 60,
           textRenderer,
           options.room?.state === "ended",
-          options.gameMode
+          options.gameMode,
+          options.bugLegStates
         );
       }));
     }
@@ -8270,7 +8333,9 @@ function drawAsteroidTiles(
     ? CAR_ROCK_OUTLINE_WIDTH
     : gameMode === GAME_MODES.subs
       ? SUB_ROCK_OUTLINE_WIDTH
-      : 1;
+      : gameMode === GAME_MODES.bugs
+        ? BUG_ROCK_OUTLINE_WIDTH
+        : 1;
   if (!usesCarRockRenderer(gameMode)) {
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
@@ -8328,7 +8393,7 @@ function drawAsteroidTiles(
   }
 
   const drawResources = () => {
-    const coloredResources = gameMode === GAME_MODES.cars || gameMode === GAME_MODES.subs;
+    const coloredResources = gameMode === GAME_MODES.cars || gameMode === GAME_MODES.subs || gameMode === GAME_MODES.bugs;
     ctx.fillStyle = colors.foreground;
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
@@ -8768,9 +8833,13 @@ function asteroidVisibilityCanStartAt(asteroid, tileX, tileY) {
 }
 
 function asteroidVisibilityDilationPixels(gameMode = GAME_MODES.bitspace) {
-  return gameMode === GAME_MODES.cars
-    ? Math.ceil(CAR_ROCK_OUTLINE_WIDTH / 2)
-    : ASTEROID_VISIBILITY_DILATE_PIXELS;
+  if (gameMode === GAME_MODES.cars) {
+    return Math.ceil(CAR_ROCK_OUTLINE_WIDTH / 2);
+  }
+  if (gameMode === GAME_MODES.bugs) {
+    return Math.ceil(BUG_ROCK_OUTLINE_WIDTH / 2);
+  }
+  return ASTEROID_VISIBILITY_DILATE_PIXELS;
 }
 
 function drawAsteroidVisibilityGhostMap(
@@ -12381,7 +12450,7 @@ function drawWorldAmbient(
   gameMode = GAME_MODES.bitspace,
   renderMask = null
 ) {
-  if (gameMode === GAME_MODES.cars) {
+  if (gameMode === GAME_MODES.cars || gameMode === GAME_MODES.bugs) {
     drawGroundDebris(ctx, snapshot, camera, visibility, colors, timeSeconds);
     return;
   }
@@ -12595,7 +12664,7 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
       drawCarModeHuckRockEntity(ctx, entity, camera, colors);
     } else {
       drawHuckRockEntity(ctx, entity, camera, colors, {
-        filled: options.gameMode === GAME_MODES.subs
+        filled: options.gameMode === GAME_MODES.subs || options.gameMode === GAME_MODES.bugs
       });
     }
     return;
@@ -13036,7 +13105,7 @@ function shipSmallOrbRadius(geometryScale) {
   return Math.max(1, SMALL_ORB_RADIUS * geometryScale);
 }
 
-function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false, gameMode = GAME_MODES.bitspace) {
+function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false, gameMode = GAME_MODES.bitspace, bugLegStates = null) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -13081,6 +13150,20 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
       }
       drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
     });
+    drawShipHealthIndicator(ctx, x, y, player, colors);
+    drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+    return;
+  }
+
+  if (gameMode === GAME_MODES.bugs) {
+    drawBugBody(ctx, x, y, player, camera, mainRadius, 0, colors, timeSeconds, bugLegStates, () => {
+      if (player.mining) {
+        drawWithoutWorldMask(ctx, () => {
+          drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameMode);
+        });
+      }
+    });
+    drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
     drawShipHealthIndicator(ctx, x, y, player, colors);
     drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
     return;
@@ -13292,6 +13375,572 @@ function snapSubmarineBracketDiagonalEndpoint(from, to) {
     };
   }
   return to;
+}
+
+function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSeconds, legStates = null, drawMiddleLayer = null) {
+  const legs = bugLegPlacements(player, camera, radius, angle, timeSeconds, legStates);
+  const legColor = colors.bugBodyForeground || colors.foreground || RENDER.foreground;
+  const bodyColors = {
+    ...colors,
+    foreground: colors.bugBodyForeground || colors.foreground,
+    background: colors.bugBodyFill || colors.background
+  };
+
+  ctx.fillStyle = legColor;
+  for (const leg of legs) {
+    drawBugLeg(ctx, player, camera, radius, angle, leg);
+  }
+
+  if (typeof drawMiddleLayer === "function") {
+    drawMiddleLayer();
+  }
+
+  drawSphere(ctx, x, y, radius, angle, bodyColors);
+}
+
+function drawBugLeg(ctx, player, camera, radius, angle, leg) {
+  const radial = bugLegRadial(angle, leg.config);
+  const shoulderWorld = bugLegWorldPoint(player, radial, radius * BUG_LEG_SHOULDER_SCALE);
+  const hip = {
+    x: shoulderWorld.x,
+    y: shoulderWorld.y,
+    z: radius * BUG_LEG_HIP_HEIGHT_SCALE
+  };
+  const step = bugLegRenderStep(leg.step);
+  const pose = step
+    ? bugLegInterpolatedStepPose(hip, radial, radius, step, leg.lift)
+    : bugLegIkPose(hip, radial, radius, {
+        x: leg.foot.x,
+        y: leg.foot.y,
+        z: leg.lift
+      });
+  const hipScreen = bugProjectWorldPoint(pose.hip, camera);
+  const kneeScreen = bugProjectWorldPoint(pose.knee, camera);
+  const footScreen = bugProjectWorldPoint(pose.foot, camera);
+  drawBugLegLine(ctx, hipScreen, kneeScreen);
+  drawBugLegLine(ctx, kneeScreen, footScreen);
+  drawBugLegStamp(ctx, footScreen.x, footScreen.y);
+}
+
+function bugLegIkPose(hip, radial, radius, foot) {
+  return {
+    hip,
+    knee: bugLegIkKnee(
+      hip,
+      foot,
+      radial,
+      radius * BUG_LEG_SEGMENT_LENGTH_SCALE,
+      radius * BUG_LEG_SEGMENT_LENGTH_SCALE
+    ),
+    foot
+  };
+}
+
+function bugLegInterpolatedStepPose(hip, radial, radius, step, lift) {
+  const progress = clamp(Number(step.progress) || 0, 0, 1);
+  const eased = smoothstep01(progress);
+  const stepLift = Number.isFinite(lift) ? lift : 0;
+  const fromPose = bugLegIkPose(hip, radial, radius, {
+    x: step.fromX,
+    y: step.fromY,
+    z: 0
+  });
+  const targetPose = bugLegIkPose(hip, radial, radius, {
+    x: step.targetX,
+    y: step.targetY,
+    z: 0
+  });
+  return {
+    hip,
+    knee: {
+      x: lerp(fromPose.knee.x, targetPose.knee.x, eased),
+      y: lerp(fromPose.knee.y, targetPose.knee.y, eased),
+      z: lerp(fromPose.knee.z || 0, targetPose.knee.z || 0, eased) + stepLift * 0.7
+    },
+    foot: {
+      x: lerp(fromPose.foot.x, targetPose.foot.x, eased),
+      y: lerp(fromPose.foot.y, targetPose.foot.y, eased),
+      z: stepLift
+    }
+  };
+}
+
+function bugLegRenderStep(step) {
+  if (!step) {
+    return null;
+  }
+
+  const fromX = Number(step.fromX);
+  const fromY = Number(step.fromY);
+  const targetX = Number(step.targetX);
+  const targetY = Number(step.targetY);
+  if (![fromX, fromY, targetX, targetY].every(Number.isFinite)) {
+    return null;
+  }
+
+  const progress = Number.isFinite(step.progress)
+    ? step.progress
+    : Number.isFinite(step.elapsed) && Number.isFinite(step.duration)
+      ? step.elapsed / Math.max(0.001, step.duration)
+      : 0;
+
+  return {
+    fromX,
+    fromY,
+    targetX,
+    targetY,
+    progress
+  };
+}
+
+function drawBugLegLine(ctx, from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const steps = Math.max(Math.abs(dx), Math.abs(dy));
+  if (steps <= 0) {
+    drawBugLegStamp(ctx, from.x, from.y);
+    return;
+  }
+
+  for (let step = 0; step <= steps; step += 1) {
+    const t = step / steps;
+    drawBugLegStamp(
+      ctx,
+      Math.round(from.x + dx * t),
+      Math.round(from.y + dy * t)
+    );
+  }
+}
+
+function drawBugLegStamp(ctx, x, y) {
+  if (BUG_LEG_LINE_WIDTH <= 1) {
+    ctx.fillRect(x, y, 1, 1);
+    return;
+  }
+
+  const offset = Math.floor(BUG_LEG_LINE_WIDTH / 2);
+  ctx.fillRect(x - offset, y - offset, BUG_LEG_LINE_WIDTH, BUG_LEG_LINE_WIDTH);
+}
+
+function bugLegPlacements(player, camera, radius, angle, timeSeconds, legStates = null) {
+  if (Array.isArray(player?.bugLegs) && player.bugLegs.length >= BUG_LEG_CONFIGS.length) {
+    void camera;
+    void radius;
+    void angle;
+    void timeSeconds;
+    void legStates;
+    return BUG_LEG_CONFIGS.map((config, index) => {
+      const leg = player.bugLegs[index] || {};
+      return {
+        config,
+        foot: {
+          x: Number.isFinite(leg.x) ? leg.x : player.x,
+          y: Number.isFinite(leg.y) ? leg.y : player.y
+        },
+        lift: Number.isFinite(leg.lift) ? leg.lift : 0,
+        step: bugLegRenderStep(leg.step)
+      };
+    });
+  }
+
+  const state = bugLegStateForPlayer(legStates, player, timeSeconds);
+  const center = bugLegVisualCenter(player);
+  bugAdvanceLegState(state, center, radius, angle, timeSeconds);
+
+  const placements = [];
+  for (let index = 0; index < BUG_LEG_CONFIGS.length; index += 1) {
+    const leg = state.legs[index];
+    placements.push({
+      config: BUG_LEG_CONFIGS[index],
+      foot: leg.foot,
+      lift: leg.lift || 0,
+      step: null
+    });
+  }
+
+  state.lastSeenAt = timeSeconds;
+  pruneBugLegStates(legStates, timeSeconds);
+  void camera;
+  return placements;
+}
+
+function bugAdvanceLegState(state, center, radius, angle, timeSeconds) {
+  if (
+    !state.center ||
+    !Number.isFinite(state.center.x) ||
+    !Number.isFinite(state.center.y) ||
+    !Number.isFinite(state.lastUpdateTime) ||
+    timeSeconds < state.lastUpdateTime
+  ) {
+    bugInitializeLegState(state, center, radius, angle, timeSeconds);
+    return;
+  }
+
+  const previousCenter = state.center;
+  const dtSeconds = Math.max(0, timeSeconds - state.lastUpdateTime);
+  const dx = center.x - previousCenter.x;
+  const dy = center.y - previousCenter.y;
+  const distance = Math.hypot(dx, dy);
+  const moving = distance > 0.0001;
+
+  if (moving) {
+    state.direction = {
+      x: dx / distance,
+      y: dy / distance
+    };
+    state.gaitDistance = (Number(state.gaitDistance) || 0) + distance;
+  }
+
+  state.speed = dtSeconds > 0.000001 ? distance / dtSeconds : 0;
+  bugUpdateLegsAtCenter(state, center, radius, angle, moving);
+  state.center = { x: center.x, y: center.y };
+  state.lastUpdateTime = timeSeconds;
+}
+
+function bugInitializeLegState(state, center, radius, angle, timeSeconds) {
+  state.direction = bugLegMovementDirection(state);
+  state.gaitDistance = Number(state.gaitDistance) || 0;
+  state.speed = 0;
+  for (let index = 0; index < BUG_LEG_CONFIGS.length; index += 1) {
+    const leg = state.legs[index];
+    bugLegEnsureLegState(state, leg, index);
+    leg.phaseOffset = bugLegPhaseOffset(index);
+    leg.foot = bugLegRestFoot(state, center, radius, angle, index);
+    leg.lift = 0;
+  }
+  state.center = { x: center.x, y: center.y };
+  state.lastUpdateTime = timeSeconds;
+}
+
+function bugUpdateLegsAtCenter(state, center, radius, angle, moving) {
+  for (let index = 0; index < BUG_LEG_CONFIGS.length; index += 1) {
+    const leg = state.legs[index];
+    bugLegEnsureLegState(state, leg, index);
+    leg.phaseOffset = Number.isFinite(leg.phaseOffset) ? leg.phaseOffset : bugLegPhaseOffset(index);
+    if (!moving && leg.foot) {
+      leg.lift = 0;
+      continue;
+    }
+
+    const placement = bugLegGaitFoot(state, center, radius, angle, index);
+    leg.foot = placement.foot;
+    leg.lift = placement.lift;
+  }
+}
+
+function bugLegStateForPlayer(legStates, player, timeSeconds) {
+  const key = player?.id || `bug-${player?.number || 0}`;
+  if (!(legStates instanceof Map)) {
+    return {
+      key,
+      lastSeenAt: timeSeconds,
+      center: null,
+      lastUpdateTime: Number.NaN,
+      direction: { x: 1, y: 0 },
+      gaitDistance: 0,
+      speed: 0,
+      legs: bugCreateLegStates(key)
+    };
+  }
+
+  let state = legStates.get(key);
+  if (!state || !Array.isArray(state.legs) || state.legs.length !== BUG_LEG_CONFIGS.length) {
+    state = {
+      key,
+      lastSeenAt: timeSeconds,
+      center: null,
+      lastUpdateTime: Number.NaN,
+      direction: { x: 1, y: 0 },
+      gaitDistance: 0,
+      speed: 0,
+      legs: bugCreateLegStates(key)
+    };
+    legStates.set(key, state);
+  }
+  state.key = key;
+  return state;
+}
+
+function bugCreateLegStates(key) {
+  return BUG_LEG_CONFIGS.map((_config, index) => ({
+    foot: null,
+    lift: 0,
+    phaseOffset: bugLegPhaseOffset(index),
+    seed: hashCell("bug-leg", key, index)
+  }));
+}
+
+function bugLegEnsureLegState(state, leg, index) {
+  if (!Number.isFinite(leg.seed)) {
+    leg.seed = hashCell("bug-leg", state?.key || "local", index);
+  }
+  if (!Number.isFinite(leg.phaseOffset)) {
+    leg.phaseOffset = bugLegPhaseOffset(index);
+  }
+}
+
+function pruneBugLegStates(legStates, timeSeconds) {
+  if (!(legStates instanceof Map) || legStates.size <= ENGINE.maxPlayers * 4) {
+    return;
+  }
+
+  for (const [key, state] of legStates.entries()) {
+    if (timeSeconds - (state.lastSeenAt || 0) > 4) {
+      legStates.delete(key);
+    }
+  }
+}
+
+function bugLegPhaseOffset(index) {
+  return (((index % 2) * 0.5) + Math.floor(index / 2) * 0.125) % 1;
+}
+
+function bugLegMovementDirection(state) {
+  const direction = state?.direction;
+  const length = Math.hypot(direction?.x || 0, direction?.y || 0);
+  if (length > 0.0001) {
+    return {
+      x: direction.x / length,
+      y: direction.y / length
+    };
+  }
+  return { x: 1, y: 0 };
+}
+
+function bugLegRestFoot(state, center, radius, angle, index) {
+  const config = BUG_LEG_CONFIGS[index];
+  const leg = state.legs[index];
+  const radial = bugLegRadial(angle, config);
+  return bugLegTeardropRadialTarget(center, radius, radial, bugLegMovementDirection(state), leg);
+}
+
+function bugLegGaitFoot(state, center, radius, angle, index) {
+  const config = BUG_LEG_CONFIGS[index];
+  const leg = state.legs[index];
+  const radial = bugLegRadial(angle, config);
+  const forward = bugLegMovementDirection(state);
+  const target = bugLegTeardropRadialTarget(center, radius, radial, forward, leg);
+  const stride = Math.max(3, radius * 1.12);
+  const phase = positiveModulo((Number(state.gaitDistance) || 0) / stride + leg.phaseOffset, 1);
+  const duty = 0.68;
+  let travel;
+  let lift = 0;
+
+  if (phase < duty) {
+    travel = lerp(stride * 0.5, -stride * 0.5, phase / duty);
+  } else {
+    const swingProgress = (phase - duty) / (1 - duty);
+    const eased = smoothstep01(swingProgress);
+    travel = lerp(-stride * 0.5, stride * 0.5, eased);
+    lift = Math.sin(Math.PI * swingProgress) * radius * BUG_LEG_STEP_HEIGHT_SCALE;
+  }
+
+  return {
+    foot: {
+      x: target.x + forward.x * travel,
+      y: target.y + forward.y * travel
+    },
+    lift
+  };
+}
+
+function bugLegTeardropRadialTarget(center, radius, radial, forward, leg) {
+  const side = {
+    x: -forward.y,
+    y: forward.x
+  };
+  const forwardAmount = radial.x * forward.x + radial.y * forward.y;
+  const sideAmount = Math.abs(radial.x * side.x + radial.y * side.y);
+  const front01 = clamp((forwardAmount + 1) * 0.5, 0, 1);
+  const lengthScale = Math.abs(forwardAmount) * lerp(
+    BUG_LEG_TEARDROP_REAR_REACH,
+    BUG_LEG_TEARDROP_FRONT_REACH,
+    front01
+  ) + sideAmount * lerp(
+    BUG_LEG_TEARDROP_REAR_SIDE_SCALE,
+    BUG_LEG_TEARDROP_FRONT_SIDE_SCALE,
+    front01
+  );
+  const baseReach = radius * (BUG_LEG_SHOULDER_SCALE + BUG_LEG_SEGMENT_LENGTH_SCALE);
+  const reach = baseReach * lerp(0.72, 1.08, clamp(lengthScale, 0, 1.15));
+  const expectedCenter = {
+    x: center.x + forward.x * radius * BUG_LEG_TEARDROP_CENTER_LEAD * front01,
+    y: center.y + forward.y * radius * BUG_LEG_TEARDROP_CENTER_LEAD * front01
+  };
+  const jitter = bugLegTargetJitter(leg, radius);
+  const tangent = {
+    x: -radial.y,
+    y: radial.x
+  };
+  return {
+    x: expectedCenter.x +
+      radial.x * reach +
+      radial.x * jitter.radial +
+      tangent.x * jitter.tangent,
+    y: expectedCenter.y +
+      radial.y * reach +
+      radial.y * jitter.radial +
+      tangent.y * jitter.tangent
+  };
+}
+
+function bugLegTargetJitter(leg, radius) {
+  const radialRange = radius * BUG_LEG_TARGET_RADIAL_JITTER;
+  const tangentRange = radius * BUG_LEG_TARGET_TANGENTIAL_JITTER;
+  return {
+    radial: (randomUnit(leg.seed, 17) - 0.5) * 2 * radialRange,
+    tangent: (randomUnit(leg.seed, 18) - 0.5) * 2 * tangentRange
+  };
+}
+
+function bugLegMaxHorizontalExtension(totalLength, hipHeight) {
+  return Math.sqrt(Math.max(0.0001, totalLength * totalLength - hipHeight * hipHeight));
+}
+
+function bugLegVisualCenter(player) {
+  return {
+    x: Number.isFinite(player?.x) ? player.x : 0,
+    y: Number.isFinite(player?.y) ? player.y : 0
+  };
+}
+
+function bugLegWorldPoint(player, radial, distance) {
+  return {
+    x: player.x + radial.x * distance,
+    y: player.y + radial.y * distance
+  };
+}
+
+function bugLegIkKnee(hip, foot, radial, upperLength, lowerLength) {
+  const solution = bugLegIkSolution(hip, foot, radial, upperLength, lowerLength);
+  return solution.knee;
+}
+
+function bugLegPreferredIkValid(hip, foot, radial, upperLength, lowerLength) {
+  return bugLegIkSolution(hip, foot, radial, upperLength, lowerLength).placementValid;
+}
+
+function bugLegIkSolution(hip, foot, radial, upperLength, lowerLength) {
+  const footDelta = bugVec3Subtract(foot, hip);
+  const horizontalDistance = Math.hypot(footDelta.x, footDelta.y);
+  const legAxis = horizontalDistance > 0.0001
+    ? {
+        x: footDelta.x / horizontalDistance,
+        y: footDelta.y / horizontalDistance
+      }
+    : radial;
+  const reach = {
+    x: legAxis.x * Math.max(0.0001, horizontalDistance),
+    y: legAxis.y * Math.max(0.0001, horizontalDistance),
+    z: footDelta.z || 0
+  };
+  const distance = Math.max(0.0001, bugVec3Length(reach));
+  const direction = bugVec3Scale(reach, 1 / distance);
+  const maxReach = Math.max(0.0001, upperLength + lowerLength - 0.001);
+  const solvedDistance = Math.min(distance, maxReach);
+  const equalSegments = Math.abs(upperLength - lowerLength) <= 0.001;
+  const along = equalSegments
+    ? solvedDistance * 0.5
+    : clamp(
+        (upperLength * upperLength - lowerLength * lowerLength + solvedDistance * solvedDistance) / (2 * solvedDistance),
+        0,
+        upperLength
+      );
+  const bendHeight = Math.sqrt(Math.max(0, upperLength * upperLength - along * along));
+  const pole = bugLegPoleVector(legAxis);
+  const poleDot = bugVec3Dot(pole, direction);
+  let bend = bugVec3Subtract(pole, bugVec3Scale(direction, poleDot));
+  const bendLength = bugVec3Length(bend);
+  if (bendLength <= 0.0001) {
+    bend = { x: 0, y: 0, z: 1 };
+  } else {
+    bend = bugVec3Scale(bend, 1 / bendLength);
+  }
+
+  const base = bugVec3Add(hip, bugVec3Scale(direction, along));
+  const bendOffset = bugVec3Scale(bend, bendHeight);
+  const candidates = [
+    bugVec3Add(base, bendOffset),
+    bugVec3Subtract(base, bendOffset)
+  ].filter((candidate) => (candidate.z || 0) >= 0);
+
+  if (candidates.length <= 0) {
+    return {
+      knee: base,
+      placementValid: false
+    };
+  }
+
+  const knee = candidates.reduce((best, candidate) => (
+    bugProjectedSceneDepth(candidate) < bugProjectedSceneDepth(best) ? candidate : best
+  ));
+  return {
+    knee,
+    placementValid: bugProjectedSceneDepth(knee) <= bugProjectedSceneDepth(base) + 0.001
+  };
+}
+
+function bugLegPoleVector(radial) {
+  const pole = {
+    x: radial.x,
+    y: radial.y,
+    z: 0.35
+  };
+  const length = Math.max(0.0001, bugVec3Length(pole));
+  return bugVec3Scale(pole, 1 / length);
+}
+
+function bugProjectedSceneDepth(point) {
+  return -(point.z || 0);
+}
+
+function bugVec3Add(a, b) {
+  return {
+    x: a.x + b.x,
+    y: a.y + b.y,
+    z: (a.z || 0) + (b.z || 0)
+  };
+}
+
+function bugVec3Subtract(a, b) {
+  return {
+    x: a.x - b.x,
+    y: a.y - b.y,
+    z: (a.z || 0) - (b.z || 0)
+  };
+}
+
+function bugVec3Scale(value, scale) {
+  return {
+    x: value.x * scale,
+    y: value.y * scale,
+    z: (value.z || 0) * scale
+  };
+}
+
+function bugVec3Dot(a, b) {
+  return a.x * b.x + a.y * b.y + (a.z || 0) * (b.z || 0);
+}
+
+function bugVec3Length(value) {
+  return Math.hypot(value.x, value.y, value.z || 0);
+}
+
+function bugProjectWorldPoint(point, camera, z = null) {
+  const screen = camera ? worldToScreen(point, camera) : point;
+  const pointZ = Number.isFinite(z) ? z : Number(point?.z) || 0;
+  return {
+    x: Math.round(screen.x + pointZ * BUG_LEG_PROJECT_X),
+    y: Math.round(screen.y + pointZ * BUG_LEG_PROJECT_Y)
+  };
+}
+
+function bugLegRadial(angle, config) {
+  const legAngle = angle + config.angleOffset;
+  return {
+    x: Math.cos(legAngle),
+    y: Math.sin(legAngle)
+  };
 }
 
 function drawCarBody(ctx, x, y, player, radius, angle, colors, timeSeconds, drawMiddleLayer = null) {
@@ -13742,7 +14391,8 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
   const geometryScale = shipGeometryScaleForRadius(shipMainRadius(player));
   const emitterLength = MINING_RAY_EMITTER_LENGTH * geometryScale;
   const emitterRadius = Math.max(0.5, MINING_RAY_EMITTER_RADIUS * geometryScale);
-  const lanes = miningRayLanesForPlayer(player, angle, rayLength)
+  const sideOffset = miningSideRayOffsetForAsteroid(asteroid);
+  const lanes = miningRayLanesForPlayer(player, angle, rayLength, sideOffset)
     .map((lane) => clipRenderMiningRayLaneStart(player, asteroid, lane, angle))
     .filter((lane) => lane.offset !== 0);
   const emitterColors = miningRayEmitterRenderColors(colors, gameMode);
@@ -15042,6 +15692,10 @@ function thrusterEngineRamp(player, gameMode = GAME_MODES.bitspace) {
 }
 
 function thrusterParticleBasis(player, gameMode = GAME_MODES.bitspace) {
+  if (gameMode === GAME_MODES.bugs) {
+    return null;
+  }
+
   const rawMoveX = Number(player?.moveX ?? player?.input?.moveX);
   const rawMoveY = Number(player?.moveY ?? player?.input?.moveY);
   const moveX = Number.isFinite(rawMoveX) ? rawMoveX : 0;
@@ -15971,6 +16625,13 @@ function miningRayRenderColors(colors, gameMode, timeSeconds) {
     };
   }
 
+  if (gameMode === GAME_MODES.bugs) {
+    return {
+      ...colors,
+      foreground: colors.bugRay || "#ff4cff"
+    };
+  }
+
   if (gameMode !== GAME_MODES.cars) {
     return colors;
   }
@@ -15998,6 +16659,16 @@ function miningRayEmitterRenderColors(colors, gameMode) {
       ...colors,
       foreground: bodyColor,
       background: bodyColor,
+      solidEmitter: true
+    };
+  }
+
+  if (gameMode === GAME_MODES.bugs) {
+    const bodyColor = colors.bugBodyForeground || colors.foreground;
+    return {
+      ...colors,
+      foreground: bodyColor,
+      background: colors.bugBodyFill || colors.background,
       solidEmitter: true
     };
   }
@@ -16039,7 +16710,8 @@ function miningRayRenderLanes(player, asteroid, angle, rayLength, extension) {
     return lanes;
   }
 
-  return miningRayLanesForPlayer(player, angle, rayLength).map((lane) => {
+  const sideOffset = miningSideRayOffsetForAsteroid(asteroid);
+  return miningRayLanesForPlayer(player, angle, rayLength, sideOffset).map((lane) => {
     lane = clipRenderMiningRayLaneStart(player, asteroid, lane, angle);
     const activeDistance = lane.rayDistance * extension;
     const activeHit = asteroid

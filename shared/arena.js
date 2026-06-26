@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -14,6 +14,12 @@ import {
 } from "./asteroid.js";
 import { createEmptyInput, normalizeInput } from "./input.js";
 import { simulateCarMovement } from "./car-physics.js";
+import {
+  clampBugLegStateToCore,
+  ensureBugLegState,
+  serializeBugLegsForSnapshot,
+  simulateBugMovement as simulateBugMovementCore
+} from "./bug-physics.js";
 import {
   clamp,
   clampMagnitude,
@@ -34,6 +40,7 @@ import {
   miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
+  miningSideRayOffsetForAsteroid,
   miningRayLanesForPlayer
 } from "./mining.js";
 
@@ -108,6 +115,13 @@ export function addPlayer(arena, playerOptions) {
     carSteerAngle: 0,
     subReverseActive: false,
     subReverseConeAngle: spawn.angle + Math.PI,
+    bugLegCenterX: spawn.x,
+    bugLegCenterY: spawn.y,
+    bugLegs: null,
+    bugActiveLegIndex: -1,
+    bugMoveX: 1,
+    bugMoveY: 0,
+    bugStepCounter: 0,
     facingMoveX: 0,
     facingMoveY: 0,
     pendingFacingSignX: 0,
@@ -129,7 +143,7 @@ export function addPlayer(arena, playerOptions) {
     miningProgress: 0,
     thrusting: false,
     shake: 0,
-    radius: ENGINE.ship.radius,
+    radius: playerRadiusForGameMode(arena.mode),
     upgrades: createUpgradeState(),
     healthBars: ENGINE.player.startingHealthBars,
     health: playerMaxHealth(ENGINE.player.startingHealthBars),
@@ -362,7 +376,7 @@ export function snapshotArena(arena) {
     serverTime: Date.now(),
     render: RENDER,
     world: ENGINE.world,
-    players: Array.from(arena.players.values()).map((player) => snapshotPlayer(player, arena.tick)),
+    players: Array.from(arena.players.values()).map((player) => snapshotPlayer(player, arena.tick, arena.mode)),
     asteroidMining: snapshotAsteroidMining(arena),
     entities: Array.from(arena.entities.values()).filter((entity) => entity.destroyed !== true),
     effects: arena.effects
@@ -471,10 +485,12 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
-  player.thrusting = canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs ? false : canThrust;
 
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(player, move, effects, dtSeconds);
+  } else if (gameMode === GAME_MODES.bugs) {
+    simulateBugMovement(player, move, effects, dtSeconds, arena.asteroid);
   } else {
     updateShipModeFacing(player, move, dtSeconds, gameMode);
     if (canThrust) {
@@ -498,6 +514,9 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   player.y += player.vy * dtSeconds;
 
   resolveStaticCollisions(arena, player, options);
+  if (gameMode === GAME_MODES.bugs) {
+    clampBugLegCenterToCore(player, arena.asteroid);
+  }
   applyStormDamage(arena, player, dtSeconds);
 }
 
@@ -695,6 +714,18 @@ function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = EN
   const impulse = thrust * effects.thrustMultiplier * dtSeconds * scale * Math.min(1, magnitude);
   player.vx += direction.x * impulse;
   player.vy += direction.y * impulse;
+}
+
+function simulateBugMovement(player, move, effects, dtSeconds, terrain = null) {
+  simulateBugMovementCore(player, move, effects, dtSeconds, terrain);
+}
+
+function ensureBugLegCenter(player) {
+  ensureBugLegState(player);
+}
+
+function clampBugLegCenterToCore(player, terrain = null) {
+  clampBugLegStateToCore(player, terrain);
 }
 
 function thrustAccelerationScaleForGameMode(player, move, gameMode) {
@@ -1515,7 +1546,8 @@ function processPlayerMining(arena, player, dtSeconds) {
   const angle = player.aimAngle ?? player.angle;
   const effects = aggregateUpgradeEffects(player.upgrades);
   const fullRayLength = playerMiningRayLength(player, effects);
-  const lanes = miningRayLanesForPlayer(player, angle, fullRayLength).map((baseLane) => {
+  const sideOffset = miningSideRayOffsetForAsteroid(arena.asteroid);
+  const lanes = miningRayLanesForPlayer(player, angle, fullRayLength, sideOffset).map((baseLane) => {
     baseLane = clipMiningRayLaneStart(arena, player, baseLane, angle);
     const start = {
       x: baseLane.startX,
@@ -2841,7 +2873,7 @@ function spawnForPlayerNumber(number, asteroid) {
   return spawns[(number - 1) % spawns.length];
 }
 
-function snapshotPlayer(player, tick = 0) {
+function snapshotPlayer(player, tick = 0, mode = GAME_MODES.bitspace) {
   const killDropAge = tick - Number(player.lastKillDropTick ?? Number.NEGATIVE_INFINITY);
   const killDropAmount = Math.max(0, Math.floor(Number(player.lastKillDropAmount || 0)));
   const killDrop = killDropAmount > 0 && killDropAge >= 0 && killDropAge <= KILL_DROP_NOTICE_TICKS
@@ -2876,6 +2908,13 @@ function snapshotPlayer(player, tick = 0) {
     carAngularVelocity: roundForSnapshot(player.carAngularVelocity || 0),
     subReverseActive: Boolean(player.subReverseActive),
     subReverseConeAngle: roundForSnapshot(player.subReverseConeAngle ?? player.angle + Math.PI),
+    bugLegCenterX: roundForSnapshot(player.bugLegCenterX ?? player.x),
+    bugLegCenterY: roundForSnapshot(player.bugLegCenterY ?? player.y),
+    bugLegs: normalizeGameMode(mode) === GAME_MODES.bugs ? serializeBugLegsForSnapshot(player) : null,
+    bugActiveLegIndex: Number.isInteger(player.bugActiveLegIndex) ? player.bugActiveLegIndex : -1,
+    bugMoveX: roundForSnapshot(player.bugMoveX || 0),
+    bugMoveY: roundForSnapshot(player.bugMoveY || 0),
+    bugStepCounter: Number.isInteger(player.bugStepCounter) ? player.bugStepCounter : 0,
     aimAngle: roundForSnapshot(player.aimAngle),
     moveX: roundForSnapshot(player.input?.moveX || 0),
     moveY: roundForSnapshot(player.input?.moveY || 0),
@@ -2936,6 +2975,9 @@ function normalizeGameMode(mode) {
   }
   if (mode === GAME_MODES.subs) {
     return GAME_MODES.subs;
+  }
+  if (mode === GAME_MODES.bugs) {
+    return GAME_MODES.bugs;
   }
   return GAME_MODES.bitspace;
 }

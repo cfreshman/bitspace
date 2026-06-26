@@ -1,4 +1,4 @@
-import { ENGINE } from "./constants.js";
+import { ENGINE, RENDER } from "./constants.js";
 
 export function miningRayCountForPlayer(player) {
   const rawCount = Number(player?.prototypeMiningRayCount ?? player?.miningRayCount ?? 1);
@@ -22,6 +22,15 @@ export function miningRayLaneOffsets(count, sideOffset = ENGINE.mining.sideRayOf
   return [0, -sideOffset, sideOffset];
 }
 
+export function miningSideRayOffsetForAsteroid(asteroid) {
+  const tileSize = Number(asteroid?.tileSize);
+  if (!Number.isFinite(tileSize) || tileSize <= 0) {
+    return ENGINE.mining.sideRayOffset;
+  }
+
+  return ENGINE.mining.sideRayOffset * (tileSize / RENDER.tileSize);
+}
+
 export function miningRayLanePower(offset) {
   return offset === 0 ? 1 : 0.5;
 }
@@ -36,7 +45,8 @@ export function miningRaySideMinStartDistance(player, offset) {
 export function miningRayLanesForPlayer(
   player,
   angle = player?.aimAngle ?? player?.angle ?? 0,
-  forwardLength = ENGINE.mining.rayLength
+  forwardLength = ENGINE.mining.rayLength,
+  sideOffset = ENGINE.mining.sideRayOffset
 ) {
   const direction = {
     x: Math.cos(angle),
@@ -52,7 +62,7 @@ export function miningRayLanesForPlayer(
     y: Number(player?.y ?? 0) + direction.y * radius
   };
 
-  return miningRayLaneOffsets(miningRayCountForPlayer(player)).map((offset, index) => ({
+  return miningRayLaneOffsets(miningRayCountForPlayer(player), sideOffset).map((offset, index) => ({
     index,
     offset,
     ...miningRayLaneGeometry(start, direction, normal, offset, forwardLength)

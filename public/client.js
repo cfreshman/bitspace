@@ -15,6 +15,12 @@ import {
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import { simulateCarMovement } from "/shared/car-physics.js";
+import {
+  cloneBugLegs,
+  clampBugLegStateToCore,
+  ensureBugLegState,
+  simulateBugMovement as simulateBugMovementCore
+} from "/shared/bug-physics.js";
 import { createSeededRandom, inheritedVelocityLaunchAngle } from "/shared/math.js";
 import {
   addPlayer,
@@ -45,6 +51,7 @@ import {
   miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
+  miningSideRayOffsetForAsteroid,
   miningRayLanesForPlayer
 } from "/shared/mining.js";
 import {
@@ -2975,6 +2982,9 @@ function normalizeMenuMode(mode) {
   if (mode === GAME_MODES.subs) {
     return GAME_MODES.subs;
   }
+  if (mode === GAME_MODES.bugs) {
+    return GAME_MODES.bugs;
+  }
   return GAME_MODES.bitspace;
 }
 
@@ -2999,7 +3009,7 @@ function selectedMenuMode() {
 }
 
 function toggleMenuMode() {
-  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs];
+  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs];
   const current = selectedMenuMode();
   const index = modes.indexOf(current);
   setMenuMode(modes[(index + 1) % modes.length]);
@@ -3021,6 +3031,9 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   }
   if (normalized === GAME_MODES.subs) {
     return "BITSPACE: SUBS";
+  }
+  if (normalized === GAME_MODES.bugs) {
+    return "BITSPACE: BUGS";
   }
   return "BITSPACE";
 }
@@ -3100,6 +3113,19 @@ function rebuildMenuArena(options = {}) {
     player.aimAngle = previousPlayer.aimAngle || player.aimAngle;
     player.subReverseActive = Boolean(previousPlayer.subReverseActive);
     player.subReverseConeAngle = previousPlayer.subReverseConeAngle ?? player.angle + Math.PI;
+    player.bugLegCenterX = Number.isFinite(previousPlayer.bugLegCenterX)
+      ? previousPlayer.bugLegCenterX
+      : previousPlayer.x;
+    player.bugLegCenterY = Number.isFinite(previousPlayer.bugLegCenterY)
+      ? previousPlayer.bugLegCenterY
+      : previousPlayer.y;
+    player.bugLegs = cloneBugLegs(previousPlayer.bugLegs);
+    player.bugActiveLegIndex = Number.isInteger(previousPlayer.bugActiveLegIndex)
+      ? previousPlayer.bugActiveLegIndex
+      : -1;
+    player.bugMoveX = Number.isFinite(previousPlayer.bugMoveX) ? previousPlayer.bugMoveX : 1;
+    player.bugMoveY = Number.isFinite(previousPlayer.bugMoveY) ? previousPlayer.bugMoveY : 0;
+    player.bugStepCounter = Number.isInteger(previousPlayer.bugStepCounter) ? previousPlayer.bugStepCounter : 0;
     player.facingMoveX = previousPlayer.facingMoveX || 0;
     player.facingMoveY = previousPlayer.facingMoveY || 0;
     player.talk = previousPlayer.talk || "";
@@ -3143,6 +3169,13 @@ function resetMenuPlayer(player, asteroid) {
   player.vx = 0;
   player.vy = 0;
   player.angle = Math.PI / 4;
+  player.bugLegCenterX = center.x;
+  player.bugLegCenterY = center.y;
+  player.bugLegs = null;
+  player.bugActiveLegIndex = -1;
+  player.bugMoveX = 1;
+  player.bugMoveY = 0;
+  player.bugStepCounter = 0;
   player.facingMoveX = 0;
   player.facingMoveY = 0;
   player.pendingFacingSignX = 0;
@@ -3215,6 +3248,15 @@ function enterMenuRoom(room) {
   if (!preserveMenuCamera) {
     nextPlayer.x = center.x;
     nextPlayer.y = center.y;
+    nextPlayer.bugLegCenterX = center.x;
+    nextPlayer.bugLegCenterY = center.y;
+    nextPlayer.bugLegs = null;
+    nextPlayer.bugActiveLegIndex = -1;
+    nextPlayer.bugMoveX = 1;
+    nextPlayer.bugMoveY = 0;
+    nextPlayer.bugStepCounter = 0;
+  } else {
+    ensureBugLegCenter(nextPlayer);
   }
   nextPlayer.vx = 0;
   nextPlayer.vy = 0;
@@ -3280,6 +3322,8 @@ function updateMenuSimulation(timeSeconds) {
 
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(player, move, effects, dtSeconds);
+  } else if (gameMode === GAME_MODES.bugs) {
+    simulateBugMovement(player, move, effects, dtSeconds, state.menu.asteroid);
   } else {
     updateShipModeFacing(player, move, dtSeconds, gameMode);
     if (canThrust) {
@@ -3287,7 +3331,7 @@ function updateMenuSimulation(timeSeconds) {
     }
   }
 
-  player.thrusting = canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs ? false : canThrust;
   player.mining = physicalMiningInputActive() && !state.chat.active;
   setMenuPlayerInput(move.x, move.y, player.mining);
   if (player.mining) {
@@ -3300,6 +3344,9 @@ function updateMenuSimulation(timeSeconds) {
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
   resolveMenuAsteroidCollisions(player, gameMode);
+  if (gameMode === GAME_MODES.bugs) {
+    clampBugLegCenterToCore(player);
+  }
 
   updateMenuMiningRay(player, dtSeconds);
   updateMenuHuckRocks(player, dtSeconds);
@@ -3357,7 +3404,8 @@ function updateMenuMiningRay(player, dtSeconds) {
   const effects = aggregateUpgradeEffects(player.upgrades);
   const fullRayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const angle = player.aimAngle ?? player.angle;
-  const lanes = miningRayLanesForPlayer(player, angle, fullRayLength).map((baseLane) => {
+  const sideOffset = miningSideRayOffsetForAsteroid(state.menu.asteroid);
+  const lanes = miningRayLanesForPlayer(player, angle, fullRayLength, sideOffset).map((baseLane) => {
     baseLane = clipMenuMiningRayLaneStart(player, baseLane, angle);
     const start = {
       x: baseLane.startX,
@@ -4810,6 +4858,13 @@ function serializeLocalBotPlayer(player) {
     pendingFacingSignX: player.pendingFacingSignX,
     pendingFacingSignY: player.pendingFacingSignY,
     pendingFacingSeconds: player.pendingFacingSeconds,
+    bugLegCenterX: player.bugLegCenterX ?? player.x,
+    bugLegCenterY: player.bugLegCenterY ?? player.y,
+    bugLegs: cloneBugLegs(player.bugLegs),
+    bugActiveLegIndex: Number.isInteger(player.bugActiveLegIndex) ? player.bugActiveLegIndex : -1,
+    bugMoveX: Number.isFinite(player.bugMoveX) ? player.bugMoveX : 1,
+    bugMoveY: Number.isFinite(player.bugMoveY) ? player.bugMoveY : 0,
+    bugStepCounter: Number.isInteger(player.bugStepCounter) ? player.bugStepCounter : 0,
     subReverseActive: Boolean(player.subReverseActive),
     subReverseConeAngle: player.subReverseConeAngle ?? player.angle + Math.PI,
     aimAngle: player.aimAngle,
@@ -5052,6 +5107,12 @@ function restoreLocalBotPlayer(player, savedPlayer) {
     "pendingFacingSignX",
     "pendingFacingSignY",
     "pendingFacingSeconds",
+    "bugLegCenterX",
+    "bugLegCenterY",
+    "bugActiveLegIndex",
+    "bugMoveX",
+    "bugMoveY",
+    "bugStepCounter",
     "subReverseConeAngle",
     "aimAngle",
     "miningRayCount",
@@ -5091,6 +5152,8 @@ function restoreLocalBotPlayer(player, savedPlayer) {
   player.miningPhase = savedPlayer.miningPhase ?? null;
   player.thrusting = savedPlayer.thrusting === true;
   player.subReverseActive = savedPlayer.subReverseActive === true;
+  player.bugLegs = cloneBugLegs(savedPlayer.bugLegs);
+  ensureBugLegCenter(player);
   player.upgrades = { ...player.upgrades, ...(savedPlayer.upgrades || {}) };
   player.killedById = savedPlayer.killedById ?? null;
   if (savedPlayer.lastHit?.targetId) {
@@ -5352,8 +5415,9 @@ function menuEntities() {
   const carsY = controlsY + controlsRows.length * 11 + 8;
   const currentMode = selectedMenuMode();
   const modeButtonGap = 8;
-  const modeButtonX = center.x - buttonWidth - modeButtonGap / 2;
-  const alternateModes = menuAlternateModes(currentMode);
+  const modeButtons = menuModeButtons(currentMode);
+  const modeRowWidth = modeButtons.length * buttonWidth + Math.max(0, modeButtons.length - 1) * modeButtonGap;
+  const modeButtonX = center.x - modeRowWidth / 2;
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
@@ -5363,12 +5427,15 @@ function menuEntities() {
     menuTitle("menu-title", menuTitleLabelForMode(currentMode), MENU_ESRB_SUBTITLE, center.x, titleY),
     menuButton("menu-ready", "ready", "READY", center.x - buttonWidth / 2, readyY, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
-    menuButton(`menu-mode-${alternateModes[0]}`, "set-mode", menuModeLabel(alternateModes[0]), modeButtonX, carsY, buttonWidth, {
-      targetMode: alternateModes[0]
-    }),
-    menuButton(`menu-mode-${alternateModes[1]}`, "set-mode", menuModeLabel(alternateModes[1]), modeButtonX + buttonWidth + modeButtonGap, carsY, buttonWidth, {
-      targetMode: alternateModes[1]
-    }),
+    ...modeButtons.map((modeButton, index) => menuButton(
+      `menu-mode-${modeButton.slot}`,
+      "set-mode",
+      modeButton.label,
+      modeButtonX + index * (buttonWidth + modeButtonGap),
+      carsY,
+      buttonWidth,
+      { targetMode: modeButton.targetMode }
+    )),
     menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth, {
@@ -5379,14 +5446,16 @@ function menuEntities() {
   ];
 }
 
-function menuAlternateModes(mode) {
-  if (mode === GAME_MODES.cars) {
-    return [GAME_MODES.bitspace, GAME_MODES.subs];
-  }
-  if (mode === GAME_MODES.subs) {
-    return [GAME_MODES.cars, GAME_MODES.bitspace];
-  }
-  return [GAME_MODES.cars, GAME_MODES.subs];
+function menuModeButtons(mode) {
+  const currentMode = normalizeMenuMode(mode);
+  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs].map((slot) => {
+    const selected = currentMode === slot;
+    return {
+      slot,
+      targetMode: selected ? GAME_MODES.bitspace : slot,
+      label: selected ? menuModeLabel(GAME_MODES.bitspace) : menuModeLabel(slot)
+    };
+  });
 }
 
 function menuModeLabel(mode) {
@@ -5395,6 +5464,9 @@ function menuModeLabel(mode) {
   }
   if (mode === GAME_MODES.subs) {
     return "SUBS";
+  }
+  if (mode === GAME_MODES.bugs) {
+    return "BUGS";
   }
   return "SHIPS";
 }
@@ -9143,13 +9215,19 @@ function updateLocalShipAudio(player, timeSeconds) {
 
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
-  const inputLevel = alive ? playerThrustInputLevel(player) : 0;
+  const inputLevel = alive && audioGameMode() !== GAME_MODES.bugs
+    ? playerThrustInputLevel(player)
+    : 0;
   const miningActive = state.room?.state !== "ended" && alive && playerMiningAudioActive(player);
 
   updateEngineAudio(context, inputLevel, timeSeconds);
   updateMiningAudio(context, miningActive, timeSeconds);
   updateFocusedHuckRockAudio(player, timeSeconds);
   flushPendingDamageClunk(timeSeconds);
+}
+
+function audioGameMode() {
+  return isReadyMenu() ? selectedMenuMode() : activeGameMode();
 }
 
 function playerThrustInputLevel(player) {
@@ -9752,6 +9830,18 @@ function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = EN
   player.vy += direction.y * impulse;
 }
 
+function simulateBugMovement(player, move, effects, dtSeconds, terrain = null) {
+  simulateBugMovementCore(player, move, effects, dtSeconds, terrain);
+}
+
+function ensureBugLegCenter(player) {
+  ensureBugLegState(player);
+}
+
+function clampBugLegCenterToCore(player, terrain = null) {
+  clampBugLegStateToCore(player, terrain);
+}
+
 function thrustAccelerationScaleForGameMode(player, move, gameMode) {
   if (gameMode !== GAME_MODES.subs) {
     return 1;
@@ -9998,6 +10088,21 @@ function reconcilePrediction(snapshot, timeSeconds) {
     carHeading: Number.isFinite(predicted.carHeading) ? predicted.carHeading : predicted.angle,
     carSteerAngle: Number.isFinite(predicted.carSteerAngle) ? predicted.carSteerAngle : 0,
     carAngularVelocity: Number.isFinite(predicted.carAngularVelocity) ? predicted.carAngularVelocity : 0,
+    bugLegCenterX: Number.isFinite(predicted.bugLegCenterX)
+      ? predicted.bugLegCenterX + ((authoritative.bugLegCenterX ?? authoritative.x) - predicted.bugLegCenterX) * PREDICTION_POSITION_CORRECTION
+      : authoritative.bugLegCenterX ?? authoritative.x,
+    bugLegCenterY: Number.isFinite(predicted.bugLegCenterY)
+      ? predicted.bugLegCenterY + ((authoritative.bugLegCenterY ?? authoritative.y) - predicted.bugLegCenterY) * PREDICTION_POSITION_CORRECTION
+      : authoritative.bugLegCenterY ?? authoritative.y,
+    bugLegs: cloneBugLegs(predicted.bugLegs) || cloneBugLegs(authoritative.bugLegs),
+    bugActiveLegIndex: Number.isInteger(predicted.bugActiveLegIndex)
+      ? predicted.bugActiveLegIndex
+      : Number.isInteger(authoritative.bugActiveLegIndex)
+        ? authoritative.bugActiveLegIndex
+        : -1,
+    bugMoveX: Number.isFinite(predicted.bugMoveX) ? predicted.bugMoveX : authoritative.bugMoveX ?? 1,
+    bugMoveY: Number.isFinite(predicted.bugMoveY) ? predicted.bugMoveY : authoritative.bugMoveY ?? 0,
+    bugStepCounter: Number.isInteger(predicted.bugStepCounter) ? predicted.bugStepCounter : authoritative.bugStepCounter ?? 0,
     facingMoveX: predicted.facingMoveX,
     facingMoveY: predicted.facingMoveY,
     pendingFacingSignX: predicted.pendingFacingSignX,
@@ -10018,6 +10123,13 @@ function resetPredictedFacingState(player) {
     carHeading: Number.isFinite(player.carHeading) ? player.carHeading : player.angle,
     carSteerAngle: Number.isFinite(player.carSteerAngle) ? player.carSteerAngle : 0,
     carAngularVelocity: Number.isFinite(player.carAngularVelocity) ? player.carAngularVelocity : 0,
+    bugLegCenterX: Number.isFinite(player.bugLegCenterX) ? player.bugLegCenterX : player.x,
+    bugLegCenterY: Number.isFinite(player.bugLegCenterY) ? player.bugLegCenterY : player.y,
+    bugLegs: cloneBugLegs(player.bugLegs),
+    bugActiveLegIndex: Number.isInteger(player.bugActiveLegIndex) ? player.bugActiveLegIndex : -1,
+    bugMoveX: Number.isFinite(player.bugMoveX) ? player.bugMoveX : 1,
+    bugMoveY: Number.isFinite(player.bugMoveY) ? player.bugMoveY : 0,
+    bugStepCounter: Number.isInteger(player.bugStepCounter) ? player.bugStepCounter : 0,
     facingMoveX: 0,
     facingMoveY: 0,
     pendingFacingSignX: 0,
@@ -10053,6 +10165,8 @@ function updatePrediction(timeSeconds) {
 
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(predicted, move, effects, dtSeconds);
+  } else if (gameMode === GAME_MODES.bugs) {
+    simulateBugMovement(predicted, move, effects, dtSeconds, state.asteroid);
   } else {
     updateShipModeFacing(predicted, move, dtSeconds, gameMode);
     if (canThrust) {
@@ -10072,12 +10186,15 @@ function updatePrediction(timeSeconds) {
     predicted.miningHoldSeconds = 0;
   }
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
-  predicted.thrusting = canThrust;
+  predicted.thrusting = gameMode === GAME_MODES.bugs ? false : canThrust;
 
   applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds);
   predicted.x += predicted.vx * dtSeconds;
   predicted.y += predicted.vy * dtSeconds;
   resolvePredictionCollisions(predicted);
+  if (gameMode === GAME_MODES.bugs) {
+    clampBugLegCenterToCore(predicted, state.asteroid);
+  }
 }
 
 function activeGameMode() {
@@ -10101,6 +10218,13 @@ function predictedLocalPlayer() {
     carHeading: predicted.carHeading,
     carSteerAngle: predicted.carSteerAngle,
     carAngularVelocity: predicted.carAngularVelocity,
+    bugLegCenterX: predicted.bugLegCenterX,
+    bugLegCenterY: predicted.bugLegCenterY,
+    bugLegs: cloneBugLegs(predicted.bugLegs),
+    bugActiveLegIndex: predicted.bugActiveLegIndex,
+    bugMoveX: predicted.bugMoveX,
+    bugMoveY: predicted.bugMoveY,
+    bugStepCounter: predicted.bugStepCounter,
     aimAngle: predicted.aimAngle,
     moveX: predicted.moveX,
     moveY: predicted.moveY,
@@ -10124,7 +10248,8 @@ function predictedMiningRayForPlayer(player, authoritativeRay = null) {
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const extension = clamp(player.rayExtension ?? miningRayExtension(player.mining, player.miningHoldSeconds || 0), 0, 1);
   const angle = player.aimAngle ?? player.angle ?? 0;
-  const lanes = miningRayLanesForPlayer(player, angle, rayLength).map((baseLane) => {
+  const sideOffset = miningSideRayOffsetForAsteroid(asteroid);
+  const lanes = miningRayLanesForPlayer(player, angle, rayLength, sideOffset).map((baseLane) => {
     const lane = clipPredictedMiningRayLaneStart(player, baseLane, angle, asteroid);
     const activeDistance = lane.rayDistance * extension;
     const activeAsteroidHit = raycastAsteroid(asteroid, lane.startX, lane.startY, lane.rayAngle, activeDistance, {

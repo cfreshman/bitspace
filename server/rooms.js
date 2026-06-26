@@ -1054,6 +1054,9 @@ function normalizeGameMode(mode) {
   if (mode === GAME_MODES.subs) {
     return GAME_MODES.subs;
   }
+  if (mode === GAME_MODES.bugs) {
+    return GAME_MODES.bugs;
+  }
   return GAME_MODES.bitspace;
 }
 

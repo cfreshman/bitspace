@@ -5,7 +5,8 @@ export const BRAND = Object.freeze({
 export const GAME_MODES = Object.freeze({
   bitspace: "bitspace",
   cars: "cars",
-  subs: "subs"
+  subs: "subs",
+  bugs: "bugs"
 });
 
 export const RENDER = Object.freeze({
@@ -100,6 +101,27 @@ export const ENGINE = Object.freeze({
     sideFriction: Math.min(0.999, 1 - (1 - SUB_FRICTION) * 0.2),
     sideToForwardConversion: 0.34
   },
+  bugs: {
+    radius: 5,
+    tileSize: 12,
+    legSpeed: 72,
+    maxLegCenterOffset: 14,
+    corePull: 58,
+    coreDamping: 3.2,
+    legDriveSpeed: 174,
+    legDamping: 8,
+    legRadius: 21,
+    legSwingSpeed: 430,
+    legMaxStepSeconds: 0.09,
+    legLift: 8,
+    legAttachmentScale: 0.66,
+    legRestScale: 1.95,
+    legTargetRadiusScale: 2.32,
+    legFrontScale: 0.95,
+    legRandomForwardScale: 0.34,
+    legRandomSideScale: 0.72,
+    legDriveBias: 0.48
+  },
   player: {
     startingHealthBars: 3,
     maxHealthBars: 8,
@@ -185,7 +207,17 @@ export function mapTileSizeForGameMode(gameMode) {
   if (gameMode === GAME_MODES.subs) {
     return ENGINE.subs.tileSize;
   }
+  if (gameMode === GAME_MODES.bugs) {
+    return ENGINE.bugs.tileSize;
+  }
   return RENDER.tileSize;
+}
+
+export function playerRadiusForGameMode(gameMode) {
+  if (gameMode === GAME_MODES.bugs) {
+    return ENGINE.bugs.radius;
+  }
+  return ENGINE.ship.radius;
 }
 
 export function playerMassScaleForGameMode(gameMode) {
