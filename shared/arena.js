@@ -84,6 +84,7 @@ export function createArena(options = {}) {
       playerDamage,
       asteroidMining
     },
+    bugFootsteps: new Map(),
     // Extension channels are intentionally empty until the game design is explicit.
     entities: new Map(),
     huckRockButtonHits: [],
@@ -355,10 +356,14 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) 
   arena.tick += 1;
   stepStorm(arena);
   spawnRandomDiamond(arena);
+  const gameMode = normalizeGameMode(arena.mode);
 
   for (const player of arena.players.values()) {
     if (player.alive) {
       stepPlayer(arena, player, dtSeconds, options);
+      if (gameMode === GAME_MODES.bugs) {
+        stampBugFootstepsForPlayer(arena, player);
+      }
     }
   }
 
@@ -377,10 +382,53 @@ export function snapshotArena(arena) {
     render: RENDER,
     world: ENGINE.world,
     players: Array.from(arena.players.values()).map((player) => snapshotPlayer(player, arena.tick, arena.mode)),
+    bugFootsteps: snapshotBugFootsteps(arena),
     asteroidMining: snapshotAsteroidMining(arena),
     entities: Array.from(arena.entities.values()).filter((entity) => entity.destroyed !== true),
     effects: arena.effects
   };
+}
+
+function snapshotBugFootsteps(arena) {
+  if (normalizeGameMode(arena.mode) !== GAME_MODES.bugs) {
+    return [];
+  }
+
+  for (const player of arena.players.values()) {
+    if (player.alive) {
+      stampBugFootstepsForPlayer(arena, player);
+    }
+  }
+
+  return Array.from(arena.bugFootsteps?.values?.() || []);
+}
+
+function stampBugFootstepsForPlayer(arena, player) {
+  if (!arena || !player || normalizeGameMode(arena.mode) !== GAME_MODES.bugs) {
+    return;
+  }
+
+  ensureBugLegState(player);
+  if (!(arena.bugFootsteps instanceof Map)) {
+    arena.bugFootsteps = new Map();
+  }
+
+  for (const leg of player.bugLegs || []) {
+    if (leg?.step) {
+      continue;
+    }
+
+    const x = Math.round(Number(leg?.x));
+    const y = Math.round(Number(leg?.y));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      continue;
+    }
+
+    const id = `${x}:${y}`;
+    if (!arena.bugFootsteps.has(id)) {
+      arena.bugFootsteps.set(id, { id, x, y });
+    }
+  }
 }
 
 function createArenaParams(mode, seed, params = {}) {

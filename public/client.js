@@ -4858,6 +4858,7 @@ function createLocalBotSave() {
       .sort((a, b) => a.number - b.number)
       .map(serializeLocalBotPlayer),
     bots: Array.from(state.localGame.bots.values()).map(snapshotPilotBotBrain),
+    bugFootsteps: Array.from(state.localGame.arena.bugFootsteps?.values?.() || []),
     entities: Array.from(arena.entities.values())
       .filter((entity) => entity.destroyed !== true)
       .map((entity) => ({ ...entity }))
@@ -4973,6 +4974,7 @@ function restoreLocalBotGame() {
   arena.stormUpdates = [];
   arena.effects = [];
   arena.huckRockButtonHits = [];
+  arena.bugFootsteps = new Map();
 
   for (const savedPlayer of save.players.slice().sort((a, b) => numberOr(a.number, 0) - numberOr(b.number, 0))) {
     addPlayer(arena, {
@@ -4988,6 +4990,7 @@ function restoreLocalBotGame() {
 
   restoreLocalBotStorm(arena, save.asteroid);
   restoreLocalBotMining(arena, save.asteroidMining);
+  restoreLocalBotBugFootsteps(arena, save.bugFootsteps);
   restoreLocalBotEntities(arena, save.entities);
 
   const savedBrainById = new Map((save.bots || []).map((brain) => [String(brain.id), brain]));
@@ -5114,6 +5117,23 @@ function hydrateLocalBotAsteroid(savedAsteroid) {
         }))
       : []
   };
+}
+
+function restoreLocalBotBugFootsteps(arena, footsteps) {
+  arena.bugFootsteps = new Map();
+  if (!Array.isArray(footsteps)) {
+    return;
+  }
+
+  for (const footstep of footsteps) {
+    const x = Math.round(Number(footstep?.x));
+    const y = Math.round(Number(footstep?.y));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      continue;
+    }
+    const id = `${x}:${y}`;
+    arena.bugFootsteps.set(id, { id, x, y });
+  }
 }
 
 function restoreLocalBotPlayer(player, savedPlayer) {

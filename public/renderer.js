@@ -118,6 +118,7 @@ const GROUND_GRASS_SWAY_SPEED = 2.8;
 const TIRE_TRACK_LIFE_SECONDS = 8;
 const TIRE_TRACK_BACKGROUND_MIXES = Object.freeze([0.16, 0.22, 0.28]);
 const TIRE_TRACK_STAMP_SIZE = 3;
+const BUG_FOOTSTEP_DARKEN_MIX = 0.22;
 const CAR_THRUSTER_PARTICLE_KIND = "car-thruster";
 const SUB_THRUSTER_PARTICLE_KIND = "sub-thruster";
 const BUG_LEG_CONFIGS = Object.freeze(
@@ -4808,6 +4809,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       updateParticles(particleState.miningParticles, options.dtSeconds);
       if (options.gameMode === GAME_MODES.cars) {
         drawTireTrackParticles(ctx, particleState.tireTrackParticles, camera, colors);
+      } else if (options.gameMode === GAME_MODES.bugs) {
+        drawBugFootsteps(ctx, snapshot.bugFootsteps, camera, colors);
       }
     });
 
@@ -15970,9 +15973,31 @@ function drawTireTrackParticles(ctx, particles, camera, colors) {
   }
 }
 
+function drawBugFootsteps(ctx, footsteps, camera, colors) {
+  if (!Array.isArray(footsteps) || footsteps.length <= 0) {
+    return;
+  }
+
+  ctx.fillStyle = bugFootstepColor(colors);
+  for (const footstep of footsteps) {
+    const screen = worldToScreen(footstep, camera);
+    drawBugFootstepStamp(ctx, Math.round(screen.x), Math.round(screen.y));
+  }
+}
+
+function drawBugFootstepStamp(ctx, x, y) {
+  ctx.fillRect(x - 1, y - 1, 2, 2);
+}
+
 function drawTireTrackStamp(ctx, x, y) {
   const offset = Math.floor(TIRE_TRACK_STAMP_SIZE / 2);
   ctx.fillRect(x - offset, y - offset, TIRE_TRACK_STAMP_SIZE, TIRE_TRACK_STAMP_SIZE);
+}
+
+function bugFootstepColor(colors) {
+  const base = colors?.background || BUG_MODE_COLORS.background;
+  const shadow = colors?.backing || BUG_MODE_COLORS.backing || BUG_BACKING_COLOR;
+  return mixHexColors(base, shadow, BUG_FOOTSTEP_DARKEN_MIX);
 }
 
 function tireTrackColors(colors) {

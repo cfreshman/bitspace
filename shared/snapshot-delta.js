@@ -13,9 +13,13 @@ export function diffArenaSnapshot(previous, next) {
   };
 
   const players = diffKeyedArray(previous.players, next.players, "id");
+  const bugFootsteps = diffKeyedArray(previous.bugFootsteps, next.bugFootsteps, "id");
   const asteroidMining = diffKeyedArray(previous.asteroidMining, next.asteroidMining, "index");
   if (players) {
     delta.players = players;
+  }
+  if (bugFootsteps) {
+    delta.bugFootsteps = bugFootsteps;
   }
   if (asteroidMining) {
     delta.asteroidMining = asteroidMining;
@@ -41,6 +45,7 @@ export function applyArenaSnapshotDelta(base, payload) {
     tick: payload.tick,
     serverTime: payload.serverTime,
     players: applyKeyedArrayDelta(base.players, payload.players, "id"),
+    bugFootsteps: applyKeyedArrayDelta(base.bugFootsteps, payload.bugFootsteps, "id"),
     asteroidMining: applyKeyedArrayDelta(base.asteroidMining, payload.asteroidMining, "index"),
     entities: Array.isArray(payload.entities) ? payload.entities : base.entities,
     effects: Object.prototype.hasOwnProperty.call(payload, "effects")
