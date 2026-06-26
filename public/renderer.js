@@ -47,12 +47,12 @@ const CAR_MODE_COLORS = Object.freeze({
 const SUB_MODE_COLORS = Object.freeze({
   foreground: "#d8f6ff",
   background: "#226dce",
-  backgroundDark: "#265189",
-  backing: "#0a1a2f",
+  backgroundDark: "#226dce",
+  backing: "#1c1b1b",
   // trueBacking: "#000000",
   ore: "#d7b78f",
   diamond: "#00f7ff",
-  rockLine: "#17345a",
+  rockLine: "#364251",
   bodyFill: "#222222",
   health: "#48f06d"
 });
@@ -2066,7 +2066,7 @@ function createGpuFramePresenter(canvas, width, height) {
     function uploadStormGrid(asteroid) {
       const nextWidth = Math.max(0, asteroid?.widthTiles | 0);
       const nextHeight = Math.max(0, asteroid?.heightTiles | 0);
-      if (nextWidth <= 0 || nextHeight <= 0 || !asteroid?.storm) {
+      if (nextWidth <= 0 || nextHeight <= 0 || !asteroid?.tiles) {
         return false;
       }
 
@@ -2093,7 +2093,7 @@ function createGpuFramePresenter(canvas, width, height) {
         for (let tileX = 0; tileX < gridWidth; tileX += 1) {
           const index = tileY * gridWidth + tileX;
           const offset = index * 4;
-          gridData[offset] = Number(asteroid.storm[index] || STORM_STATE.safe);
+          gridData[offset] = Number(asteroid.storm?.[index] || STORM_STATE.safe);
           gridData[offset + 1] = isPlayableTile(asteroid, tileX, tileY) ? 255 : 0;
           gridData[offset + 2] = isSolidTile(asteroid.tiles[index]) ? 255 : 0;
           gridData[offset + 3] = 255;
@@ -3093,6 +3093,16 @@ uniform vec3 u_wallFillColor;
 uniform vec3 u_backingColor;
 varying vec2 v_texCoord;
 
+bool frameIsBackgroundColor(vec4 frame) {
+  vec3 frameByte = floor(clamp(frame.rgb, 0.0, 1.0) * 255.0 + 0.5);
+  vec3 backgroundByte = floor(clamp(u_backgroundColor, 0.0, 1.0) * 255.0 + 0.5);
+  return all(equal(frameByte, backgroundByte));
+}
+
+float sceneAlphaForFrame(vec4 frame) {
+  return frame.a * (frameIsBackgroundColor(frame) ? 0.0 : 1.0);
+}
+
 float waveHeight(vec2 uv) {
   vec2 wrapped = fract(uv);
   return texture2D(u_wave, vec2(wrapped.x, 1.0 - wrapped.y)).r * 2.0 - 1.0;
@@ -3151,9 +3161,9 @@ vec4 oceanSurface(vec2 point) {
 void main() {
   vec2 frameUv = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
   vec4 sourceFrame = texture2D(u_frame, frameUv);
-  vec2 screen = floor(v_texCoord * u_resolution);
+  vec2 screen = v_texCoord * u_resolution;
   vec2 center = u_resolution * 0.5;
-  vec2 delta = screen + vec2(0.5) - center;
+  vec2 delta = screen - center;
   float radius = min(u_resolution.x, u_resolution.y) * 0.5;
   if (dot(delta, delta) > radius * radius) {
     gl_FragColor = sourceFrame;
@@ -3179,22 +3189,33 @@ void main() {
   vec2 offset = (screenGradient * 560.0 + viewAxis * height * 7.0) * 0.5;
   vec2 refractedUv = clamp(frameUv + offset / u_resolution, vec2(0.0), vec2(1.0));
   vec4 refractedFrame = texture2D(u_frame, refractedUv);
-  vec4 frame = refractedFrame;
   float wave = height * 0.5 + 0.5;
   float fresnel = pow(1.0 - clamp(dot(normal, viewDir), 0.0, 1.0), 3.0);
-  float depthFade = smoothstep(radius * 0.98, radius * 0.18, length(delta));
   float lambert = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
   vec3 waterSurface = mix(u_backgroundColor, u_backgroundDarkColor, clamp(0.35 + wave * 0.35 + lambert * 0.30, 0.0, 1.0));
-  float surfaceAlpha = clamp((waterOpacity * 0.34 + fresnel * 0.16) * depthFade * 0.25, 0.0, 0.12);
-  frame.rgb = mix(frame.rgb, waterSurface, surfaceAlpha);
-  float normalShade = smoothstep(0.004, 0.105, normalDeviation) * depthFade;
+  float surfaceAlpha = clamp((waterOpacity * 0.34 + fresnel * 0.16) * 0.25, 0.0, 0.12);
+  float normalShade = smoothstep(0.004, 0.105, normalDeviation);
   float normalHighlight = normalShade * smoothstep(0.58, 0.90, lambert);
   float normalShadow = normalShade * (1.0 - smoothstep(0.30, 0.62, lambert));
-  float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 36.0) * depthFade;
+  float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 36.0);
+  float elevation = smoothstep(-0.65, 0.65, ocean.x);
+  vec3 lowElevationColor = u_backingColor;
+  vec3 highElevationColor = mix(u_backgroundColor, vec3(1.0), 0.22);
+  vec3 elevationColor = mix(lowElevationColor, highElevationColor, elevation);
+  float contourPhase = ocean.x * 3.0 + u_seed * 0.37;
+  float contourDistance = abs(fract(contourPhase + 0.5) - 0.5);
+  float contourPixel = 1.0 - smoothstep(0.012, 0.052, contourDistance);
+  vec3 contourColor = mix(u_backgroundColor, vec3(1.0), 0.52);
   vec3 shadowColor = mix(u_backgroundDarkColor, u_backingColor, 0.35);
-  frame.rgb = mix(frame.rgb, shadowColor, clamp(normalShadow * 0.26, 0.0, 0.20));
-  frame.rgb = mix(frame.rgb, vec3(1.0), clamp(normalHighlight * 0.34, 0.0, 0.28));
-  frame.rgb = mix(frame.rgb, vec3(1.0), clamp(specular * 0.18, 0.0, 0.16));
+  vec3 waterBase = waterSurface;
+  waterBase = mix(waterBase, waterSurface, surfaceAlpha);
+  waterBase = mix(waterBase, shadowColor, clamp(normalShadow * 0.26, 0.0, 0.20));
+  waterBase = mix(waterBase, vec3(1.0), clamp(normalHighlight * 0.34, 0.0, 0.28));
+  waterBase = mix(waterBase, elevationColor, clamp(0.42, 0.0, 0.38));
+  waterBase = mix(waterBase, contourColor, clamp(contourPixel * 0.075, 0.0, 0.075));
+  waterBase = mix(waterBase, vec3(1.0), clamp(specular * 0.18, 0.0, 0.16));
+  float sceneAlpha = sceneAlphaForFrame(refractedFrame);
+  vec4 frame = vec4(mix(waterBase, refractedFrame.rgb, sceneAlpha), max(refractedFrame.a, sourceFrame.a));
   gl_FragColor = vec4(frame.rgb, frame.a);
 }
 `;
@@ -11475,7 +11496,6 @@ function drawGroundGrassTuft(ctx, x, y, hash, timeSeconds) {
 }
 
 function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0) {
-  void visibility;
   if (typeof ctx.queueGpuCausticLayer !== "function") {
     return false;
   }
@@ -11484,6 +11504,8 @@ function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, 
     camera: { x: camera.x, y: camera.y },
     timeSeconds,
     seed: snapshot?.arenaId || snapshot?.seed || "subs",
+    sourcePadding: visibility?.sourcePadding || cameraCullPadding(camera),
+    visibilitySpans: visibility?.spans || null,
     palette: {
       background: colors.background || SUB_MODE_COLORS.background,
       backgroundDark: colors.backgroundDark || SUB_MODE_COLORS.backgroundDark,
