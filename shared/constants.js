@@ -85,11 +85,11 @@ export const ENGINE = Object.freeze({
     lateralFriction: 0.88
   },
   subs: {
-    tileSize: RENDER.tileSize,
+    tileSize: 20,
     thrustMultiplier: 0.2,
     thrustFalloffSpeed: 42,
     thrustMinScale: 0.16,
-    turnRate: 3.2,
+    turnRate: 4.2,
     turnThrottleMinScale: 0.14,
     reverseConeRadians: Math.PI / 4,
     reverseThrottleScale: 0.5,
@@ -97,8 +97,8 @@ export const ENGINE = Object.freeze({
     miningTimeScale: 1,
     friction: SUB_FRICTION,
     forwardFriction: Math.min(0.999, 1 - (1 - SUB_FRICTION) * 0.275),
-    sideFriction: Math.min(0.999, 1 - (1 - SUB_FRICTION) * 0.12),
-    sideToForwardConversion: 0.18
+    sideFriction: Math.min(0.999, 1 - (1 - SUB_FRICTION) * 0.2),
+    sideToForwardConversion: 0.34
   },
   player: {
     startingHealthBars: 3,
