@@ -48,8 +48,8 @@ const SUB_MODE_COLORS = Object.freeze({
   foreground: "#d8f6ff",
   background: "#226dce",
   backgroundDark: "#226dce",
-  shadow: "#000000",
-  shadowAlpha: 0.6,
+  shadow: "#1c1b1b",
+  shadowAlpha: 0.75,
   backing: "#1c1b1b",
   // trueBacking: "#000000",
   ore: "#d7b78f",
@@ -60,6 +60,7 @@ const SUB_MODE_COLORS = Object.freeze({
   health: "#48f06d"
 });
 const SUB_SHADOW_MASK_COLOR = "#010203";
+const SUB_NON_RENDER_OCEAN_SHADOW_ALPHA = 0.95;
 const CAR_BODY_COLORS = Object.freeze([
   "#ff3024",
   "#2f60ff",
@@ -214,6 +215,9 @@ const ASTEROID_VISIBILITY_FULL_CIRCLE = Math.PI * 2;
 const SUB_LIT_VISIBILITY_ANGLE = (Math.PI * 2) / 3;
 const SUB_LIT_VISIBILITY_HALF_COS = Math.cos(SUB_LIT_VISIBILITY_ANGLE / 2);
 const SUB_LIT_VISIBILITY_HALF_COS_SQ = SUB_LIT_VISIBILITY_HALF_COS * SUB_LIT_VISIBILITY_HALF_COS;
+const SUB_LIT_VISIBILITY_REAR_RADIUS_TILES = 5;
+const SUB_RENDER_ARC_ANGLE = Math.PI;
+const SUB_RENDER_FULL_RADIUS_TILES = 6;
 const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
   { x: -1, y: -1 },
   { x: 0, y: -1 },
@@ -576,6 +580,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   let gpuStormRenderer = null;
   let framePresenter = null;
   const visualShipAngles = new Map();
+  const subLightAngles = new Map();
   let syncedPageBacking = "";
 
   function sizeCanvasBox() {
@@ -863,9 +868,11 @@ export function createRenderer(canvas, minimapCanvas = null) {
         timeSeconds,
         dtSeconds,
         visualShipAngles,
+        subLightAngles,
         gpuStormRenderer,
         gpuFrameStormReady: framePresenter?.supportsStorm === true,
-        gpuFrameCheckerReady: framePresenter?.supportsChecker === true
+        gpuFrameCheckerReady: framePresenter?.supportsChecker === true,
+        gpuFrameCausticsReady: framePresenter?.supportsCaustics === true
       };
       const frameParticleState = {
         particles,
@@ -895,6 +902,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
           frameGpuReady: Boolean(framePresenter),
           frameStormReady: framePresenter?.supportsStorm === true,
           frameCheckerReady: framePresenter?.supportsChecker === true,
+          frameCausticsReady: framePresenter?.supportsCaustics === true,
           buckets: null
         }
         : null;
@@ -1086,10 +1094,16 @@ function createPixelSurface(canvasContext, width, height) {
   let currentColor = packColor(RENDER.foreground);
   let activeClip = null;
   let activeLens = null;
+  let persistentWorldMask = null;
+  let transientWorldMask = null;
   let activeWorldMask = null;
   let queuedGpuStormLayers = [];
   let queuedGpuCheckerLayer = null;
   let queuedGpuCausticLayer = null;
+
+  function refreshActiveWorldMask() {
+    activeWorldMask = intersectWorldMasks(persistentWorldMask, transientWorldMask);
+  }
 
   function circleSpansForInset(inset) {
     const key = Math.max(0, Math.floor(inset));
@@ -1108,6 +1122,7 @@ function createPixelSurface(canvasContext, width, height) {
 
     const sourcePadding = Math.max(0, Math.floor(lens.sourcePadding || 0));
     const key = [
+      activeClip === circleClip ? "circle" : "none",
       sourcePadding,
       lens.centerX,
       lens.centerY,
@@ -1318,24 +1333,50 @@ function createPixelSurface(canvasContext, width, height) {
       activeLens = null;
     },
     beginWorldMask(mask) {
-      activeWorldMask = mask || null;
+      transientWorldMask = mask || null;
+      refreshActiveWorldMask();
     },
     endWorldMask() {
-      activeWorldMask = null;
+      transientWorldMask = null;
+      refreshActiveWorldMask();
+    },
+    beginPersistentWorldMask(mask) {
+      persistentWorldMask = mask || null;
+      refreshActiveWorldMask();
+    },
+    endPersistentWorldMask() {
+      persistentWorldMask = null;
+      refreshActiveWorldMask();
     },
     withoutWorldMask(callback) {
-      const previous = activeWorldMask;
-      activeWorldMask = null;
+      const previous = transientWorldMask;
+      transientWorldMask = null;
+      refreshActiveWorldMask();
       try {
         return callback();
       } finally {
-        activeWorldMask = previous;
+        transientWorldMask = previous;
+        refreshActiveWorldMask();
+      }
+    },
+    withWorldMask(mask, callback) {
+      const previous = transientWorldMask;
+      transientWorldMask = mask || null;
+      refreshActiveWorldMask();
+      try {
+        return callback();
+      } finally {
+        transientWorldMask = previous;
+        refreshActiveWorldMask();
       }
     },
     endClip() {
       activeClip = null;
     },
     clear() {
+      persistentWorldMask = null;
+      transientWorldMask = null;
+      activeWorldMask = null;
       queuedGpuStormLayers = [];
       queuedGpuCheckerLayer = null;
       queuedGpuCausticLayer = null;
@@ -2005,6 +2046,11 @@ function createGpuFramePresenter(canvas, width, height) {
         shadowMaskColor: gl.getUniformLocation(causticProgram, "u_shadowMaskColor"),
         shadowColor: gl.getUniformLocation(causticProgram, "u_shadowColor"),
         shadowAlpha: gl.getUniformLocation(causticProgram, "u_shadowAlpha"),
+        nonRenderOceanAlpha: gl.getUniformLocation(causticProgram, "u_nonRenderOceanAlpha"),
+        renderMask: gl.getUniformLocation(causticProgram, "u_renderMask"),
+        renderMaskSize: gl.getUniformLocation(causticProgram, "u_renderMaskSize"),
+        renderMaskOffset: gl.getUniformLocation(causticProgram, "u_renderMaskOffset"),
+        renderMaskEnabled: gl.getUniformLocation(causticProgram, "u_renderMaskEnabled"),
         rockFillColor: gl.getUniformLocation(causticProgram, "u_rockFillColor"),
         wallFillColor: gl.getUniformLocation(causticProgram, "u_wallFillColor"),
         backingColor: gl.getUniformLocation(causticProgram, "u_backingColor"),
@@ -2455,14 +2501,24 @@ function createGpuFramePresenter(canvas, width, height) {
       const backgroundDark = rgbFloatsForHex(palette.backgroundDark || SUB_MODE_COLORS.backgroundDark);
       const shadowMask = rgbFloatsForHex(SUB_SHADOW_MASK_COLOR);
       const shadowPalette = shadowLayer?.palette || palette;
-      const shadow = rgbFloatsForHex(shadowPalette.shadow || SUB_MODE_COLORS.shadow || "#000000");
+      const shadowHex = String(shadowPalette.shadow || "").toLowerCase();
+      const shadow = rgbFloatsForHex(
+        shadowHex === "#000000" || shadowHex === "000000"
+          ? shadowPalette.backing || palette.backing || SUB_MODE_COLORS.backing
+          : shadowPalette.shadow || shadowPalette.backing || palette.backing || SUB_MODE_COLORS.backing
+      );
       const shadowAlphaSource = Number.isFinite(shadowLayer?.shadowAlpha)
         ? shadowLayer.shadowAlpha
         : Number.isFinite(palette.shadowAlpha) ? palette.shadowAlpha : SUB_MODE_COLORS.shadowAlpha;
       const shadowAlpha = Math.max(0, Math.min(1, shadowAlphaSource));
+      const nonRenderOceanAlphaSource = Number.isFinite(palette.nonRenderOceanAlpha)
+        ? palette.nonRenderOceanAlpha
+        : SUB_NON_RENDER_OCEAN_SHADOW_ALPHA;
+      const nonRenderOceanAlpha = Math.max(0, Math.min(1, nonRenderOceanAlphaSource));
       const rockFill = rgbFloatsForHex(palette.rockFill || SUB_MODE_COLORS.rockFill);
       const wallFill = rgbFloatsForHex(palette.wallFill || SUB_MODE_COLORS.wallFill);
       const backing = rgbFloatsForHex(palette.backing || "#000000");
+      const renderMaskInfo = uploadStormMask(layer.renderMaskSpans, 0);
       gl.useProgram(causticProgram);
       bindFullscreenAttributes(causticLocations);
       gl.activeTexture(gl.TEXTURE6);
@@ -2477,6 +2533,13 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.uniform3f(causticLocations.shadowMaskColor, shadowMask[0], shadowMask[1], shadowMask[2]);
       gl.uniform3f(causticLocations.shadowColor, shadow[0], shadow[1], shadow[2]);
       gl.uniform1f(causticLocations.shadowAlpha, shadowAlpha);
+      gl.uniform1f(causticLocations.nonRenderOceanAlpha, nonRenderOceanAlpha);
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, maskTexture);
+      gl.uniform1i(causticLocations.renderMask, 4);
+      gl.uniform2f(causticLocations.renderMaskSize, renderMaskInfo?.width || 1, renderMaskInfo?.height || 1);
+      gl.uniform2f(causticLocations.renderMaskOffset, renderMaskInfo?.offsetX || 0, renderMaskInfo?.offsetY || 0);
+      gl.uniform1f(causticLocations.renderMaskEnabled, renderMaskInfo ? 1 : 0);
       gl.uniform3f(causticLocations.rockFillColor, rockFill[0], rockFill[1], rockFill[2]);
       gl.uniform3f(causticLocations.wallFillColor, wallFill[0], wallFill[1], wallFill[2]);
       gl.uniform3f(causticLocations.backingColor, backing[0], backing[1], backing[2]);
@@ -2499,12 +2562,32 @@ function createGpuFramePresenter(canvas, width, height) {
 
         uploadFrame(imageData);
         const causticLayer = supportsCaustics ? options.causticLayer : null;
+        const causticBacking = causticLayer
+          ? rgbFloatsForHex(causticLayer.palette?.backing || RENDER.background)
+          : null;
         const baseFramebuffer = causticLayer ? causticSourceFramebuffer : null;
+        const drawSourceBase = (callback) => {
+          if (causticLayer) {
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          } else {
+            gl.disable(gl.BLEND);
+          }
+          const result = callback();
+          if (causticLayer) {
+            gl.disable(gl.BLEND);
+          }
+          return result;
+        };
         gl.viewport(0, 0, width, height);
         gl.disable(gl.DEPTH_TEST);
         gl.disable(gl.BLEND);
         gl.bindFramebuffer(gl.FRAMEBUFFER, baseFramebuffer);
-        gl.clearColor(0, 0, 0, 1);
+        if (causticBacking) {
+          gl.clearColor(causticBacking[0], causticBacking[1], causticBacking[2], 0);
+        } else {
+          gl.clearColor(0, 0, 0, 1);
+        }
         gl.clear(gl.COLOR_BUFFER_BIT);
         const checkerLayer = options.checkerLayer || null;
         const deferredShadowLayer = causticLayer && checkerLayer?.solidShadow === true ? checkerLayer : null;
@@ -2513,15 +2596,15 @@ function createGpuFramePresenter(canvas, width, height) {
           : options.stormLayer ? [options.stormLayer] : [];
         let drewFrame = false;
         if (deferredShadowLayer) {
-          drewFrame = drawFrameWithChecker({
+          drewFrame = drawSourceBase(() => drawFrameWithChecker({
             ...deferredShadowLayer,
             palette: {
               ...(deferredShadowLayer.palette || {}),
               checker: SUB_SHADOW_MASK_COLOR
             }
-          });
+          }));
         } else if (checkerLayer) {
-          drewFrame = drawFrameWithChecker(checkerLayer);
+          drewFrame = drawSourceBase(() => drawFrameWithChecker(checkerLayer));
         }
         for (const stormLayer of stormLayers) {
           if (!renderStormTexture(stormLayer)) {
@@ -2531,7 +2614,7 @@ function createGpuFramePresenter(canvas, width, height) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, baseFramebuffer);
           gl.viewport(0, 0, width, height);
           if (!drewFrame) {
-            drawFrameWithStorm(stormLayer);
+            drawSourceBase(() => drawFrameWithStorm(stormLayer));
             drewFrame = true;
           } else {
             gl.enable(gl.BLEND);
@@ -2542,7 +2625,7 @@ function createGpuFramePresenter(canvas, width, height) {
         }
 
         if (!drewFrame) {
-          drawFrameOnly();
+          drawSourceBase(drawFrameOnly);
         }
         const overlays = Array.isArray(options.overlays)
           ? options.overlays
@@ -3115,6 +3198,7 @@ precision highp float;
 
 uniform sampler2D u_frame;
 uniform sampler2D u_wave;
+uniform sampler2D u_renderMask;
 uniform vec2 u_resolution;
 uniform vec2 u_camera;
 uniform float u_time;
@@ -3125,6 +3209,10 @@ uniform vec3 u_backgroundDarkColor;
 uniform vec3 u_shadowMaskColor;
 uniform vec3 u_shadowColor;
 uniform float u_shadowAlpha;
+uniform float u_nonRenderOceanAlpha;
+uniform vec2 u_renderMaskSize;
+uniform vec2 u_renderMaskOffset;
+uniform float u_renderMaskEnabled;
 uniform vec3 u_rockFillColor;
 uniform vec3 u_wallFillColor;
 uniform vec3 u_backingColor;
@@ -3142,8 +3230,51 @@ bool frameIsShadowMaskColor(vec4 frame) {
   return all(equal(frameByte, shadowByte));
 }
 
+bool frameIsBackingColor(vec4 frame) {
+  vec3 frameByte = floor(clamp(frame.rgb, 0.0, 1.0) * 255.0 + 0.5);
+  vec3 backingByte = floor(clamp(u_backingColor, 0.0, 1.0) * 255.0 + 0.5);
+  return all(equal(frameByte, backingByte));
+}
+
 float sceneAlphaForFrame(vec4 frame) {
   return frame.a * ((frameIsBackgroundColor(frame) || frameIsShadowMaskColor(frame)) ? 0.0 : 1.0);
+}
+
+float decodeRenderMaskCoordinate(vec2 bytes) {
+  vec2 value = floor(bytes * 255.0 + 0.5);
+  return value.x * 256.0 + value.y;
+}
+
+bool renderMaskContains(vec2 screenPoint) {
+  if (u_renderMaskEnabled <= 0.5) {
+    return true;
+  }
+
+  vec2 maskPoint = floor(screenPoint) - u_renderMaskOffset;
+  if (maskPoint.x < 0.0 || maskPoint.y < 0.0 || maskPoint.y >= u_renderMaskSize.y) {
+    return false;
+  }
+
+  float row = maskPoint.y;
+  float x = maskPoint.x;
+  for (int spanIndex = 0; spanIndex < 64; spanIndex += 1) {
+    vec2 coord = (vec2(float(spanIndex) + 0.5, row + 0.5)) / u_renderMaskSize;
+    vec4 encoded = texture2D(u_renderMask, coord);
+    float start = decodeRenderMaskCoordinate(encoded.rg);
+    float end = decodeRenderMaskCoordinate(encoded.ba);
+    if (end <= start) {
+      continue;
+    }
+    if (x >= start && x < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+vec2 frameUvForScreen(vec2 screenPoint) {
+  vec2 uv = clamp(screenPoint / u_resolution, vec2(0.0), vec2(1.0));
+  return vec2(uv.x, 1.0 - uv.y);
 }
 
 float waveHeight(vec2 uv) {
@@ -3202,14 +3333,14 @@ vec4 oceanSurface(vec2 point) {
 }
 
 void main() {
-  vec2 frameUv = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
-  vec4 sourceFrame = texture2D(u_frame, frameUv);
   vec2 screen = v_texCoord * u_resolution;
+  vec2 frameUv = frameUvForScreen(screen);
+  vec4 sourceFrame = texture2D(u_frame, frameUv);
   vec2 center = u_resolution * 0.5;
-  vec2 delta = screen - center;
   float radius = min(u_resolution.x, u_resolution.y) * 0.5;
-  if (dot(delta, delta) > radius * radius) {
-    gl_FragColor = sourceFrame;
+  vec2 screenDelta = screen - center;
+  if (dot(screenDelta, screenDelta) > radius * radius) {
+    gl_FragColor = vec4(u_backingColor, 1.0);
     return;
   }
 
@@ -3230,27 +3361,43 @@ void main() {
   float normalDeviation = 1.0 - clamp(dot(normal, flatNormal), 0.0, 1.0);
   float waterOpacity = smoothstep(0.004, 0.105, normalDeviation);
   vec2 offset = (screenGradient * 560.0 + viewAxis * height * 7.0) * 0.5;
-  vec2 refractedUv = clamp(frameUv + offset / u_resolution, vec2(0.0), vec2(1.0));
+  vec2 rawRefractedScreen = screen + offset;
+  vec2 refractedDelta = rawRefractedScreen - center;
+  bool refractedInCircle = dot(refractedDelta, refractedDelta) <= radius * radius;
+  if (!refractedInCircle) {
+    gl_FragColor = vec4(u_backingColor, 1.0);
+    return;
+  }
+  vec2 refractedScreen = clamp(rawRefractedScreen, vec2(0.0), u_resolution - vec2(1.0));
+  vec2 refractedWorld = refractedScreen + u_camera;
+  vec2 refractedProjectedWorld = vec2(dot(refractedWorld, viewSide), dot(refractedWorld, viewAxis) * 0.62);
+  vec4 baseOcean = oceanSurface(refractedProjectedWorld);
+  vec2 refractedUv = frameUvForScreen(refractedScreen);
   vec4 refractedFrame = texture2D(u_frame, refractedUv);
   float wave = height * 0.5 + 0.5;
+  float baseWave = baseOcean.x * waveHeightScale * 0.5 + 0.5;
   float fresnel = pow(1.0 - clamp(dot(normal, viewDir), 0.0, 1.0), 3.0);
   float lambert = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
-  vec3 waterSurface = mix(u_backgroundColor, u_backgroundDarkColor, clamp(0.35 + wave * 0.35 + lambert * 0.30, 0.0, 1.0));
+  vec3 waterSurface = mix(u_backgroundColor, u_backgroundDarkColor, clamp(0.35 + baseWave * 0.35 + lambert * 0.30, 0.0, 1.0));
   float surfaceAlpha = clamp((waterOpacity * 0.34 + fresnel * 0.16) * 0.25, 0.0, 0.12);
   float normalShade = smoothstep(0.004, 0.105, normalDeviation);
   float normalHighlight = normalShade * smoothstep(0.58, 0.90, lambert);
   float normalShadow = normalShade * (1.0 - smoothstep(0.30, 0.62, lambert));
   float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 36.0);
-  float elevation = smoothstep(-0.65, 0.65, ocean.x);
+  float elevation = smoothstep(-0.65, 0.65, baseOcean.x);
   vec3 lowElevationColor = u_backingColor;
   vec3 highElevationColor = mix(u_backgroundColor, vec3(1.0), 0.22);
   vec3 elevationColor = mix(lowElevationColor, highElevationColor, elevation);
-  float contourPhase = ocean.x * 3.0 + u_seed * 0.37;
+  float contourPhase = baseOcean.x * 3.0 + u_seed * 0.37;
   float contourDistance = abs(fract(contourPhase + 0.5) - 0.5);
   float contourPixel = 1.0 - smoothstep(0.012, 0.052, contourDistance);
   vec3 contourColor = mix(u_backgroundColor, vec3(1.0), 0.52);
+  bool outputIsNonRenderOcean = !renderMaskContains(screen);
+  bool refractedIsNonRenderOcean = !renderMaskContains(refractedScreen);
+  bool sampleIsNonRenderOcean = outputIsNonRenderOcean || refractedIsNonRenderOcean;
+  bool sceneCanRender = !sampleIsNonRenderOcean;
   vec3 shadowColor = mix(u_backgroundDarkColor, u_backingColor, 0.35);
-  bool refractedIsShadow = frameIsShadowMaskColor(refractedFrame);
+  bool refractedIsShadow = sceneCanRender && frameIsShadowMaskColor(refractedFrame);
   vec3 waterBase = waterSurface;
   waterBase = mix(waterBase, waterSurface, surfaceAlpha);
   waterBase = mix(waterBase, shadowColor, clamp(normalShadow * 0.26, 0.0, 0.20));
@@ -3259,9 +3406,10 @@ void main() {
   waterBase = mix(waterBase, contourColor, clamp(contourPixel * 0.075, 0.0, 0.075));
   waterBase = mix(waterBase, vec3(1.0), clamp(specular * 0.18, 0.0, 0.16));
   waterBase = mix(waterBase, u_shadowColor, refractedIsShadow ? clamp(u_shadowAlpha, 0.0, 1.0) : 0.0);
-  float sceneAlpha = refractedIsShadow ? 0.0 : sceneAlphaForFrame(refractedFrame);
-  vec4 frame = vec4(mix(waterBase, refractedFrame.rgb, sceneAlpha), max(refractedFrame.a, sourceFrame.a));
-  gl_FragColor = vec4(frame.rgb, frame.a);
+  waterBase = mix(waterBase, u_shadowColor, sampleIsNonRenderOcean ? clamp(u_nonRenderOceanAlpha, 0.0, 1.0) : 0.0);
+  float sceneAlpha = (!sceneCanRender || refractedIsShadow) ? 0.0 : sceneAlphaForFrame(refractedFrame);
+  vec4 frame = vec4(mix(waterBase, refractedFrame.rgb, sceneAlpha), 1.0);
+  gl_FragColor = frame;
 }
 `;
 
@@ -4309,9 +4457,14 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   const mobileUpgradeModal = options.mobileActive === true && options.upgrades?.active === true;
   const roomState = options.room?.state || "";
   const gpuWorldEffectsAllowed = roomState === "active" || roomState === "ended";
+  const causticSourceScene = options.gameMode === GAME_MODES.subs &&
+    options.gpuFrameCausticsReady === true &&
+    shouldDrawWorld &&
+    !options.playerMapLarge;
+  const causticSourceTransparency = causticSourceScene && shouldDrawWorldBase;
 
   ctx.imageSmoothingEnabled = false;
-  if (options.transparentBacking && typeof ctx.clear === "function") {
+  if ((options.transparentBacking || causticSourceTransparency) && typeof ctx.clear === "function") {
     ctx.clear();
   } else {
     ctx.fillStyle = trueBackingColor(colors);
@@ -4339,10 +4492,12 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   let cameraPlayer = sharedState?.cameraPlayer;
   let visibility = sharedState?.visibility;
   let litVisibility = sharedState?.litVisibility;
+  let renderMask = sharedState?.renderMask;
   let worldRenderPlayers = sharedState?.worldRenderPlayers;
   let localShipDrawsAfterVisibility = sharedState?.localShipDrawsAfterVisibility || false;
   if (options.gameMode !== GAME_MODES.subs) {
     litVisibility = null;
+    renderMask = null;
   }
 
   if (!sharedState?.ready) {
@@ -4380,7 +4535,14 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         createAsteroidVisibilityMask(ctx, options, options.asteroid, cameraPlayer, camera)
       ))
       : null;
-    litVisibility = createLitVisibilityForGameMode(options.gameMode, visibility, cameraPlayer);
+    const subLightHeading = subLightHeadingForGameMode(
+      options.gameMode,
+      options.subLightAngles,
+      cameraPlayer,
+      options.dtSeconds
+    );
+    litVisibility = createLitVisibilityForGameMode(options.gameMode, visibility, cameraPlayer, subLightHeading);
+    renderMask = createRenderMaskForGameMode(options.gameMode, ctx, options.asteroid, cameraPlayer, camera, subLightHeading);
     const visualVisibility = litVisibility || visibility;
     worldRenderPlayers = visualVisibility
       ? renderPlayers.filter((player) => !player.hidden && playerTouchesAsteroidVisibility(visualVisibility, player))
@@ -4398,18 +4560,37 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         cameraPlayer,
         visibility,
         litVisibility,
+        renderMask,
         worldRenderPlayers,
         localShipDrawsAfterVisibility
       });
     }
   }
   const visualVisibility = litVisibility || visibility;
+  const renderWorldMask = renderMask?.spans ? createSpanWorldMask(renderMask.spans) : null;
 
   if (shouldDrawWorldBase) {
     if (options.playerMapLarge && options.playerMap?.cells && options.asteroid) {
       drawFullPlayerMapFrame(ctx, options, colors);
     } else {
-      beginWorldViewport(ctx, colors, !visualVisibility, true);
+      beginWorldViewport(
+        ctx,
+        colors,
+        causticSourceTransparency ? false : !visualVisibility,
+        !causticSourceTransparency,
+        !causticSourceScene
+      );
+      if (!causticSourceTransparency && options.gameMode === GAME_MODES.subs && renderMask?.spans) {
+        drawSubBaseOceanWithRenderMask(
+          ctx,
+          colors,
+          renderMask,
+          camera
+        );
+      }
+      if (!causticSourceScene && renderWorldMask && typeof ctx.beginPersistentWorldMask === "function") {
+        ctx.beginPersistentWorldMask(renderWorldMask);
+      }
       if (visualVisibility) {
         measureBucket("ghostMs", () => drawAsteroidVisibilityGhostMap(
           ctx,
@@ -4447,7 +4628,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           visualVisibility,
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
-          options.gameMode
+          options.gameMode,
+          renderMask
         ));
       } else {
         measureBucket("starsMs", () => drawWorldAmbient(
@@ -4457,7 +4639,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           null,
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
-          options.gameMode
+          options.gameMode,
+          renderMask
         ));
       }
       if (options.asteroid) {
@@ -4482,7 +4665,10 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   }
 
   if (shouldDrawWorldOverlay && !(options.playerMapLarge && options.playerMap?.cells && options.asteroid)) {
-    beginWorldViewport(ctx, colors, false);
+    beginWorldViewport(ctx, colors, false, false, !causticSourceScene);
+    if (!causticSourceScene && renderWorldMask && typeof ctx.beginPersistentWorldMask === "function") {
+      ctx.beginPersistentWorldMask(renderWorldMask);
+    }
     if (visualVisibility && typeof ctx.beginWorldMask === "function") {
       ctx.beginWorldMask(createAsteroidVisibilityWorldMask(visualVisibility));
     }
@@ -4760,8 +4946,10 @@ function drawFullPlayerMapFrame(ctx, options, colors) {
   ctx.endClip();
 }
 
-function beginWorldViewport(ctx, colors, fillBackground = true, fillBacking = false) {
-  ctx.beginCircleClip();
+function beginWorldViewport(ctx, colors, fillBackground = true, fillBacking = false, clipCircle = true) {
+  if (clipCircle) {
+    ctx.beginCircleClip();
+  }
   if (fillBacking) {
     ctx.fillStyle = colors.backing || "#000000";
     ctx.fillRect(0, 0, ctx.width, ctx.height);
@@ -4772,6 +4960,40 @@ function beginWorldViewport(ctx, colors, fillBackground = true, fillBacking = fa
   }
   ctx.beginLens(createWorldLens(ctx.width, ctx.height));
   ctx.fillStyle = colors.foreground;
+}
+
+function drawSubBaseOceanWithRenderMask(ctx, colors, renderMask, camera) {
+  const padding = Math.max(0, Math.ceil(cameraCullPadding(camera)));
+  const minX = -padding;
+  const minY = -padding;
+  const maxX = ctx.width + padding;
+  const maxY = ctx.height + padding;
+
+  ctx.fillStyle = colors.background || SUB_MODE_COLORS.background;
+  if (!renderMask?.spans?.rows) {
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+    return;
+  }
+
+  drawInsideSpanRows(ctx, renderMask.spans, minX, maxX, minY, maxY);
+}
+
+function drawInsideSpanRows(ctx, spans, minX, maxX, minY, maxY) {
+  const offsetY = Math.floor(Number(spans.offsetY || 0));
+  for (let y = minY; y < maxY; y += 1) {
+    const row = spans.rows?.[y - offsetY];
+    if (!Array.isArray(row) || row.length === 0) {
+      continue;
+    }
+
+    for (let spanIndex = 0; spanIndex + 1 < row.length; spanIndex += 2) {
+      const start = clamp(Math.floor(row[spanIndex]), minX, maxX);
+      const end = clamp(Math.ceil(row[spanIndex + 1]), minX, maxX);
+      if (start < end) {
+        ctx.fillRect(start, y, end - start, 1);
+      }
+    }
+  }
 }
 
 function drawVisibleBackground(ctx, asteroid, camera, visibility, colors) {
@@ -4815,6 +5037,9 @@ function endWorldViewport(ctx) {
   if (typeof ctx.endWorldMask === "function") {
     ctx.endWorldMask();
   }
+  if (typeof ctx.endPersistentWorldMask === "function") {
+    ctx.endPersistentWorldMask();
+  }
   ctx.endLens();
   ctx.endClip();
 }
@@ -4825,6 +5050,124 @@ function drawWithoutWorldMask(ctx, callback) {
   }
 
   return callback();
+}
+
+function createSpanWorldMask(spans) {
+  if (!spans?.rows) {
+    return null;
+  }
+
+  return {
+    spans,
+    allows(screenX, screenY) {
+      return spanMaskScreenPointVisible(spans, screenX, screenY);
+    }
+  };
+}
+
+function intersectWorldMasks(first, second) {
+  if (!first) {
+    return second || null;
+  }
+  if (!second) {
+    return first || null;
+  }
+  if (first === second) {
+    return first;
+  }
+
+  const spans = intersectSpanSets(first.spans, second.spans);
+  if (spans) {
+    return createSpanWorldMask(spans);
+  }
+
+  return {
+    allows(screenX, screenY) {
+      return worldMaskAllows(first, screenX, screenY) &&
+        worldMaskAllows(second, screenX, screenY);
+    }
+  };
+}
+
+function worldMaskAllows(mask, screenX, screenY) {
+  if (!mask) {
+    return true;
+  }
+  if (typeof mask.allows === "function") {
+    return mask.allows(screenX, screenY);
+  }
+  if (mask.spans?.rows) {
+    return spanMaskScreenPointVisible(mask.spans, screenX, screenY);
+  }
+  return true;
+}
+
+function spanMaskScreenPointVisible(spans, screenX, screenY) {
+  const rowIndex = Math.floor(screenY) - Math.floor(Number(spans.offsetY || 0));
+  const row = spans.rows?.[rowIndex];
+  if (!Array.isArray(row)) {
+    return false;
+  }
+
+  const x = Math.floor(screenX);
+  for (let index = 0; index + 1 < row.length; index += 2) {
+    if (x >= row[index] && x < row[index + 1]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function intersectSpanSets(first, second) {
+  if (!first?.rows || !second?.rows) {
+    return null;
+  }
+  if (first === second) {
+    return first;
+  }
+
+  const firstOffsetY = Math.floor(Number(first.offsetY || 0));
+  const secondOffsetY = Math.floor(Number(second.offsetY || 0));
+  const offsetY = Math.min(firstOffsetY, secondOffsetY);
+  const endY = Math.max(firstOffsetY + first.rows.length, secondOffsetY + second.rows.length);
+  const rows = Array.from({ length: Math.max(0, endY - offsetY) }, () => null);
+
+  for (let y = offsetY; y < endY; y += 1) {
+    const row = intersectSpanRows(
+      first.rows[y - firstOffsetY],
+      second.rows[y - secondOffsetY]
+    );
+    if (row?.length > 0) {
+      rows[y - offsetY] = row;
+    }
+  }
+
+  return { offsetY, rows };
+}
+
+function intersectSpanRows(first, second) {
+  if (!Array.isArray(first) || !Array.isArray(second)) {
+    return null;
+  }
+
+  const result = [];
+  let firstIndex = 0;
+  let secondIndex = 0;
+  while (firstIndex + 1 < first.length && secondIndex + 1 < second.length) {
+    const start = Math.max(first[firstIndex], second[secondIndex]);
+    const end = Math.min(first[firstIndex + 1], second[secondIndex + 1]);
+    if (start < end) {
+      result.push(start, end);
+    }
+
+    if (first[firstIndex + 1] < second[secondIndex + 1]) {
+      firstIndex += 2;
+    } else {
+      secondIndex += 2;
+    }
+  }
+
+  return result.length > 0 ? result : null;
 }
 
 function drawRoomOverlay(ctx, options, localPlayer, colors, textRenderer) {
@@ -7561,6 +7904,46 @@ function visualRetargetThresholdForMode(gameMode) {
   return gameMode === GAME_MODES.cars ? 0.03 : 0.001;
 }
 
+function subLightHeadingForGameMode(gameMode, lightAngles, player, dtSeconds) {
+  if (gameMode !== GAME_MODES.subs || !player) {
+    if (lightAngles instanceof Map) {
+      lightAngles.clear();
+    }
+    return shipVisualAngle(player);
+  }
+
+  const target = shipVisualAngle(player);
+  if (!(lightAngles instanceof Map) || !Number.isFinite(target)) {
+    return target;
+  }
+
+  const key = visualShipAngleKey(player);
+  if (!key) {
+    return target;
+  }
+
+  const lightKey = `${key}:sub-light`;
+  const stepSeconds = clamp(dtSeconds || 1 / 60, 0, 1 / 15);
+  let turn = visualShipTurnState(lightAngles.get(lightKey), target, SHIP_VISUAL_ROTATION_SPEED);
+  const currentAngle = visualTurnAngle(turn);
+  if (Math.abs(normalizeSignedAngle(target - turn.target)) > visualRetargetThresholdForMode(GAME_MODES.bitspace)) {
+    turn = createVisualTurn(currentAngle, target, SHIP_VISUAL_ROTATION_SPEED);
+  }
+
+  turn.elapsed = Math.min(turn.duration, turn.elapsed + stepSeconds);
+  turn.angle = visualTurnAngle(turn);
+  if (turn.elapsed >= turn.duration) {
+    turn.angle = normalizeAngle(turn.target);
+    turn.from = turn.angle;
+    turn.duration = 0;
+    turn.elapsed = 0;
+  }
+
+  lightAngles.clear();
+  lightAngles.set(lightKey, turn);
+  return turn.angle;
+}
+
 function visualTurnAngle(turn) {
   if (!turn || turn.duration <= 0) {
     return normalizeAngle(turn?.target ?? 0);
@@ -7788,6 +8171,41 @@ function drawAsteroidTiles(
         drawRockFill(ctx, screenX, screenY, tileSize, colors, tile);
       }
     }
+  } else if (gameMode === GAME_MODES.subs) {
+    const subsRockFillColors = {
+      ...colors,
+      rockFill: colors.backing || "#000000",
+      wallFill: colors.backing || "#000000"
+    };
+    drawWithoutWorldMask(ctx, () => {
+      for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+        for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+          const index = tileY * asteroid.widthTiles + tileX;
+          const tile = asteroid.tiles[index];
+          if (!isSolidTile(tile)) {
+            continue;
+          }
+
+          const screenX = Math.round(tileX * tileSize - camera.x);
+          const screenY = Math.round(tileY * tileSize - camera.y);
+          if (isRockTile(tile)) {
+            drawCarRockBodyFill(
+              ctx,
+              asteroid,
+              tileX,
+              tileY,
+              screenX,
+              screenY,
+              tileSize,
+              subsRockFillColors,
+              gameMode
+            );
+          } else {
+            drawRockFill(ctx, screenX, screenY, tileSize, subsRockFillColors, tile);
+          }
+        }
+      }
+    });
   }
 
   const rockLineWidth = gameMode === GAME_MODES.cars
@@ -7926,7 +8344,8 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
   const height = asteroid.heightTiles;
   const playerId = player.id || "camera";
   const sourcePadding = cameraCullPadding(camera);
-  const radius = Math.min(ctx.width, ctx.height) / 2 + sourcePadding;
+  const visibleRadius = Math.min(ctx.width, ctx.height) / 2;
+  const radius = visibleRadius + sourcePadding;
   const bounds = {
     minTileX: clamp(Math.floor((player.x - radius) / tileSize) - 1, 0, width - 1),
     maxTileX: clamp(Math.ceil((player.x + radius) / tileSize) + 1, 0, width - 1),
@@ -7972,17 +8391,18 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
     cameraY: camera.y,
     origin,
     radius,
+    visibleRadius,
     sourcePadding,
     spans
   };
 }
 
-function createLitVisibilityForGameMode(gameMode, visibility, player) {
+function createLitVisibilityForGameMode(gameMode, visibility, player, headingOverride = null) {
   if (gameMode !== GAME_MODES.subs || !visibility || !player) {
     return null;
   }
 
-  const heading = shipVisualAngle(player);
+  const heading = Number.isFinite(headingOverride) ? headingOverride : shipVisualAngle(player);
   return createSubLitVisibility(visibility, heading);
 }
 
@@ -7997,6 +8417,13 @@ function createSubLitVisibility(visibility, heading) {
   const offsetY = Math.floor(Number(spans.offsetY || 0));
   const dirX = Math.cos(heading);
   const dirY = Math.sin(heading);
+  const tileSize = visibility.tileSize || RENDER.tileSize;
+  const rearRadius = Math.max(1, tileSize * SUB_LIT_VISIBILITY_REAR_RADIUS_TILES);
+  const rearRadiusSq = rearRadius * rearRadius;
+  const outerRadius = Math.max(
+    rearRadius + 1,
+    Number(visibility.visibleRadius || visibility.radius || 0) * Math.max(1, WORLD_LENS_EDGE_SCALE)
+  );
   const rows = spans.rows.map((row, rowIndex) => {
     if (!Array.isArray(row) || row.length <= 0) {
       return null;
@@ -8011,7 +8438,7 @@ function createSubLitVisibility(visibility, heading) {
       let runStart = null;
       for (let x = start; x < end; x += 1) {
         const dx = x + 0.5 - originX;
-        if (subLitVisibilityPointInCone(dx, dy, dirX, dirY)) {
+        if (subRenderPointAllowed(dx, dy, dirX, dirY, rearRadius, rearRadiusSq, outerRadius, SUB_LIT_VISIBILITY_ANGLE)) {
           if (runStart === null) {
             runStart = x;
           }
@@ -8042,13 +8469,226 @@ function createSubLitVisibility(visibility, heading) {
   };
 }
 
-function subLitVisibilityPointInCone(dx, dy, dirX, dirY) {
+function createRenderMaskForGameMode(gameMode, ctx, asteroid, player, camera, headingOverride = null) {
+  if (gameMode !== GAME_MODES.subs || !ctx || !player || !camera) {
+    return null;
+  }
+
+  const heading = Number.isFinite(headingOverride) ? headingOverride : shipVisualAngle(player);
+  return createSubRenderMask(ctx, asteroid, player, camera, heading);
+}
+
+function createSubRenderMask(ctx, asteroid, player, camera, heading) {
+  if (!Number.isFinite(heading)) {
+    return null;
+  }
+
+  const tileSize = asteroid?.tileSize || RENDER.tileSize;
+  const originX = Number(player.x || 0) - Number(camera.x || 0);
+  const originY = Number(player.y || 0) - Number(camera.y || 0);
+  const dirX = Math.cos(heading);
+  const dirY = Math.sin(heading);
+  const fullRadius = Math.max(1, tileSize * SUB_RENDER_FULL_RADIUS_TILES);
+  const fullRadiusSq = fullRadius * fullRadius;
+  const width = Math.max(0, Math.floor(ctx.width || 0));
+  const height = Math.max(0, Math.floor(ctx.height || 0));
+  const padding = Math.max(0, Math.ceil(cameraCullPadding(camera)));
+  const outerRadius = Math.max(
+    fullRadius + 1,
+    (Math.min(width, height) / 2) * Math.max(1, WORLD_LENS_EDGE_SCALE)
+  );
+  const minX = -padding;
+  const maxX = width + padding;
+  const minY = -padding;
+  const maxY = height + padding;
+  const rows = Array.from({ length: Math.max(0, maxY - minY) }, () => null);
+
+  for (let y = minY; y < maxY; y += 1) {
+    const dy = y + 0.5 - originY;
+    const row = [];
+    let runStart = null;
+    for (let x = minX; x < maxX; x += 1) {
+      const dx = x + 0.5 - originX;
+      if (subRenderPointAllowed(dx, dy, dirX, dirY, fullRadius, fullRadiusSq, outerRadius, SUB_RENDER_ARC_ANGLE)) {
+        if (runStart === null) {
+          runStart = x;
+        }
+      } else if (runStart !== null) {
+        row.push(runStart, x);
+        runStart = null;
+      }
+    }
+
+    if (runStart !== null) {
+      row.push(runStart, maxX);
+    }
+    if (row.length > 0) {
+      rows[y - minY] = row;
+    }
+  }
+
+  const spans = { offsetY: minY, rows };
+  const screenSpans = projectSourceSpansToLensScreenSpans(spans, width, height);
+
+  return {
+    origin: { x: originX, y: originY },
+    tileSize,
+    spans,
+    screenSpans,
+    renderCone: {
+      heading,
+      angle: SUB_RENDER_ARC_ANGLE,
+      fullRadius
+    }
+  };
+}
+
+function projectSourceSpansToLensScreenSpans(spans, width, height) {
+  if (!spans?.rows || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const lens = createWorldLens(width, height);
+  const mask = new Uint8Array(width * height);
+  const offsetY = Math.floor(Number(spans.offsetY || 0));
+  for (let rowIndex = 0; rowIndex < spans.rows.length; rowIndex += 1) {
+    const row = spans.rows[rowIndex];
+    if (!Array.isArray(row) || row.length === 0) {
+      continue;
+    }
+
+    const sourceY = offsetY + rowIndex;
+    for (let spanIndex = 0; spanIndex + 1 < row.length; spanIndex += 2) {
+      const start = Math.floor(row[spanIndex]);
+      const end = Math.ceil(row[spanIndex + 1]);
+      let previous = null;
+      for (let sourceX = start; sourceX < end; sourceX += 1) {
+        const projected = projectLensPixel(sourceX, sourceY, lens);
+        if (!markProjectedMaskPixel(mask, width, height, projected)) {
+          previous = null;
+          continue;
+        }
+        if (previous) {
+          markProjectedMaskBridge(mask, width, height, previous, projected);
+        }
+        previous = projected;
+      }
+    }
+  }
+
+  return pixelMaskToSpanRows(mask, width, height);
+}
+
+function markProjectedMaskPixel(mask, width, height, projected) {
+  if (!projected) {
+    return false;
+  }
+
+  markProjectedMaskPoint(mask, width, height, projected.baseX, projected.baseY);
+  markProjectedMaskPoint(mask, width, height, projected.x, projected.y);
+  return true;
+}
+
+function markProjectedMaskPoint(mask, width, height, x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return;
+  }
+
+  const px = Math.floor(x);
+  const py = Math.floor(y);
+  if (px < 0 || py < 0 || px >= width || py >= height) {
+    return;
+  }
+
+  mask[py * width + px] = 1;
+}
+
+function markProjectedMaskBridge(mask, width, height, from, to) {
+  let x = Math.floor(from.x);
+  let y = Math.floor(from.y);
+  const targetX = Math.floor(to.x);
+  const targetY = Math.floor(to.y);
+  const dx = Math.abs(targetX - x);
+  const dy = -Math.abs(targetY - y);
+  const stepX = x < targetX ? 1 : -1;
+  const stepY = y < targetY ? 1 : -1;
+  let error = dx + dy;
+
+  while (true) {
+    markProjectedMaskPoint(mask, width, height, x, y);
+    if (x === targetX && y === targetY) {
+      break;
+    }
+
+    const doubled = error * 2;
+    if (doubled >= dy) {
+      error += dy;
+      x += stepX;
+    }
+    if (doubled <= dx) {
+      error += dx;
+      y += stepY;
+    }
+  }
+}
+
+function pixelMaskToSpanRows(mask, width, height) {
+  const rows = Array.from({ length: height }, () => null);
+  for (let y = 0; y < height; y += 1) {
+    const row = [];
+    const rowStart = y * width;
+    let runStart = null;
+    for (let x = 0; x < width; x += 1) {
+      if (mask[rowStart + x]) {
+        if (runStart === null) {
+          runStart = x;
+        }
+      } else if (runStart !== null) {
+        row.push(runStart, x);
+        runStart = null;
+      }
+    }
+
+    if (runStart !== null) {
+      row.push(runStart, width);
+    }
+    if (row.length > 0) {
+      rows[y] = row;
+    }
+  }
+
+  return { offsetY: 0, rows };
+}
+
+function subRenderPointAllowed(dx, dy, dirX, dirY, fullRadius, fullRadiusSq, outerRadius, arcAngle = SUB_RENDER_ARC_ANGLE) {
   const distanceSq = dx * dx + dy * dy;
-  if (distanceSq <= 1) {
+  if (distanceSq <= fullRadiusSq) {
     return true;
   }
 
   const dot = dx * dirX + dy * dirY;
+  if (subRenderPointInForwardCone(dot, distanceSq)) {
+    return true;
+  }
+
+  const lateral = Math.abs(dx * -dirY + dy * dirX);
+  const halfAngle = arcAngle / 2;
+  const cornerForward = Math.cos(halfAngle) * outerRadius;
+  const cornerLateral = Math.sin(halfAngle) * outerRadius;
+  if (lateral > cornerLateral) {
+    return false;
+  }
+
+  const t = lateral / Math.max(1, cornerLateral);
+  const rearBoundary = -fullRadius + (cornerForward + fullRadius) * t * t;
+  return dot >= rearBoundary;
+}
+
+function subRenderPointInForwardCone(dot, distanceSq) {
+  if (distanceSq <= 1) {
+    return true;
+  }
+
   return dot > 0 && dot * dot >= SUB_LIT_VISIBILITY_HALF_COS_SQ * distanceSq;
 }
 
@@ -10081,6 +10721,46 @@ function drawCarRockRuns(ctx, screenX, screenY, runs) {
   }
 }
 
+function drawCarRockBodyFill(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, gameMode = GAME_MODES.cars) {
+  const fillColor = colors.rockFill || colors.background;
+  ctx.fillStyle = fillColor;
+  const runs = carRockFillTileRuns(
+    tileSize,
+    rockOuterBevelRadiusForGameMode(gameMode),
+    carRockNeighborMask(asteroid, null, tileX, tileY)
+  );
+  drawCarRockRuns(ctx, screenX, screenY, runs);
+}
+
+function carRockFillTileRuns(tileSize, bevelRadius, neighborMask) {
+  const size = Math.max(1, Math.floor(tileSize));
+  const radius = Math.max(1, Math.floor(bevelRadius));
+  const key = `${size}:${radius}:${neighborMask}`;
+  if (!carRockFillTileRuns.cache) {
+    carRockFillTileRuns.cache = new Map();
+  }
+
+  const cached = carRockFillTileRuns.cache.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const rows = new Uint32Array(size);
+  for (let y = 0; y < size; y += 1) {
+    let row = 0;
+    for (let x = 0; x < size; x += 1) {
+      if (carRockMaskPointBlocks(neighborMask, x + 0.5, y + 0.5, size, radius)) {
+        row |= 1 << x;
+      }
+    }
+    rows[y] = row;
+  }
+
+  const runs = carRockRowsToRuns(rows, size);
+  carRockFillTileRuns.cache.set(key, runs);
+  return runs;
+}
+
 function carRockNeighborMask(asteroid, visibility, tileX, tileY) {
   let mask = 0;
   let bit = 1;
@@ -11625,14 +12305,23 @@ function drawStars(ctx, snapshot, camera, visibility = null) {
   }, visibility, camera);
 }
 
-function drawWorldAmbient(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0, gameMode = GAME_MODES.bitspace) {
+function drawWorldAmbient(
+  ctx,
+  snapshot,
+  camera,
+  visibility = null,
+  colors = {},
+  timeSeconds = 0,
+  gameMode = GAME_MODES.bitspace,
+  renderMask = null
+) {
   if (gameMode === GAME_MODES.cars) {
     drawGroundDebris(ctx, snapshot, camera, visibility, colors, timeSeconds);
     return;
   }
 
   if (gameMode === GAME_MODES.subs) {
-    drawWaterDebris(ctx, snapshot, camera, visibility, colors, timeSeconds);
+    drawWaterDebris(ctx, snapshot, camera, visibility, colors, timeSeconds, renderMask);
     return;
   }
 
@@ -11712,7 +12401,7 @@ function drawGroundGrassTuft(ctx, x, y, hash, timeSeconds) {
   ctx.fillRect(x - 1, y, 3, 1);
 }
 
-function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0) {
+function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0, renderMask = null) {
   if (typeof ctx.queueGpuCausticLayer !== "function") {
     return false;
   }
@@ -11723,11 +12412,13 @@ function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, 
     seed: snapshot?.arenaId || snapshot?.seed || "subs",
     sourcePadding: visibility?.sourcePadding || cameraCullPadding(camera),
     visibilitySpans: visibility?.spans || null,
+    renderMaskSpans: renderMask?.screenSpans || null,
     palette: {
       background: colors.background || SUB_MODE_COLORS.background,
       backgroundDark: colors.backgroundDark || SUB_MODE_COLORS.backgroundDark,
       shadow: colors.shadow || SUB_MODE_COLORS.shadow,
       shadowAlpha: Number.isFinite(colors.shadowAlpha) ? colors.shadowAlpha : SUB_MODE_COLORS.shadowAlpha,
+      nonRenderOceanAlpha: SUB_NON_RENDER_OCEAN_SHADOW_ALPHA,
       rockFill: colors.rockFill || SUB_MODE_COLORS.rockFill,
       wallFill: colors.wallFill || SUB_MODE_COLORS.wallFill,
       backing: colors.backing || SUB_MODE_COLORS.backing
@@ -15188,16 +15879,26 @@ function miningRayRenderColors(colors, gameMode, timeSeconds) {
 }
 
 function miningRayEmitterRenderColors(colors, gameMode) {
-  if (gameMode !== GAME_MODES.cars) {
-    return colors;
+  if (gameMode === GAME_MODES.cars) {
+    return {
+      ...colors,
+      foreground: CAR_TIRE_COLOR,
+      background: CAR_TIRE_COLOR,
+      solidEmitter: true
+    };
   }
 
-  return {
-    ...colors,
-    foreground: CAR_TIRE_COLOR,
-    background: CAR_TIRE_COLOR,
-    solidEmitter: true
-  };
+  if (gameMode === GAME_MODES.subs) {
+    const bodyColor = colors.bodyFill || colors.foreground;
+    return {
+      ...colors,
+      foreground: bodyColor,
+      background: bodyColor,
+      solidEmitter: true
+    };
+  }
+
+  return colors;
 }
 
 function miningRayGradientColor(palette, signedCross, radius) {
