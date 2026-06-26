@@ -3079,6 +3079,8 @@ function rebuildMenuArena(options = {}) {
     player.vy = previousPlayer.vy || 0;
     player.angle = previousPlayer.angle || player.angle;
     player.aimAngle = previousPlayer.aimAngle || player.aimAngle;
+    player.subReverseActive = Boolean(previousPlayer.subReverseActive);
+    player.subReverseConeAngle = previousPlayer.subReverseConeAngle ?? player.angle + Math.PI;
     player.facingMoveX = previousPlayer.facingMoveX || 0;
     player.facingMoveY = previousPlayer.facingMoveY || 0;
     player.talk = previousPlayer.talk || "";
@@ -3260,9 +3262,9 @@ function updateMenuSimulation(timeSeconds) {
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(player, move, effects, dtSeconds);
   } else {
-    updateShipFacing(player, move, dtSeconds);
+    updateShipModeFacing(player, move, dtSeconds, gameMode);
     if (canThrust) {
-      applyThrusterAcceleration(player, move, effects, dtSeconds, shipThrustForGameMode(gameMode));
+      applyThrusterAcceleration(player, thrustMoveForGameMode(player, move, gameMode), effects, dtSeconds, shipThrustForGameMode(gameMode), gameMode);
     }
   }
 
@@ -4789,6 +4791,8 @@ function serializeLocalBotPlayer(player) {
     pendingFacingSignX: player.pendingFacingSignX,
     pendingFacingSignY: player.pendingFacingSignY,
     pendingFacingSeconds: player.pendingFacingSeconds,
+    subReverseActive: Boolean(player.subReverseActive),
+    subReverseConeAngle: player.subReverseConeAngle ?? player.angle + Math.PI,
     aimAngle: player.aimAngle,
     mining: player.mining,
     miningRayCount: player.miningRayCount,
@@ -5029,6 +5033,7 @@ function restoreLocalBotPlayer(player, savedPlayer) {
     "pendingFacingSignX",
     "pendingFacingSignY",
     "pendingFacingSeconds",
+    "subReverseConeAngle",
     "aimAngle",
     "miningRayCount",
     "miningHoldSeconds",
@@ -5066,6 +5071,7 @@ function restoreLocalBotPlayer(player, savedPlayer) {
   player.buttonTargetActivated = savedPlayer.buttonTargetActivated === true;
   player.miningPhase = savedPlayer.miningPhase ?? null;
   player.thrusting = savedPlayer.thrusting === true;
+  player.subReverseActive = savedPlayer.subReverseActive === true;
   player.upgrades = { ...player.upgrades, ...(savedPlayer.upgrades || {}) };
   player.killedById = savedPlayer.killedById ?? null;
   if (savedPlayer.lastHit?.targetId) {
@@ -9714,9 +9720,100 @@ function applyDirectionalShipFriction(
   player.vy = forwardY * dampedForwardSpeed + sideY * dampedSideSpeed;
 }
 
-function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = ENGINE.ship.thrust) {
-  player.vx += move.x * thrust * effects.thrustMultiplier * dtSeconds;
-  player.vy += move.y * thrust * effects.thrustMultiplier * dtSeconds;
+function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = ENGINE.ship.thrust, gameMode = GAME_MODES.bitspace) {
+  const magnitude = Math.hypot(move.x, move.y);
+  if (magnitude <= 0.000001) {
+    return;
+  }
+
+  const direction = { x: move.x / magnitude, y: move.y / magnitude };
+  const scale = thrustAccelerationScaleForGameMode(player, direction, gameMode);
+  const impulse = thrust * effects.thrustMultiplier * dtSeconds * scale * Math.min(1, magnitude);
+  player.vx += direction.x * impulse;
+  player.vy += direction.y * impulse;
+}
+
+function thrustAccelerationScaleForGameMode(player, move, gameMode) {
+  if (gameMode !== GAME_MODES.subs) {
+    return 1;
+  }
+
+  const sameDirectionSpeed = Math.max(0, player.vx * move.x + player.vy * move.y);
+  const falloffSpeed = Math.max(1, ENGINE.subs.thrustFalloffSpeed || 1);
+  const minScale = Math.max(0, Math.min(1, ENGINE.subs.thrustMinScale ?? 0));
+  return Math.max(minScale, 1 / (1 + sameDirectionSpeed / falloffSpeed));
+}
+
+function thrustMoveForGameMode(player, move, gameMode) {
+  if (gameMode !== GAME_MODES.subs) {
+    return move;
+  }
+
+  const heading = Number.isFinite(player.angle) ? player.angle : Math.atan2(move.y, move.x);
+  const headingX = Math.cos(heading);
+  const headingY = Math.sin(heading);
+  if (player.subReverseActive) {
+    const reverseThrottle = clamp(ENGINE.subs.reverseThrottleScale ?? 0.5, 0, 1);
+    return {
+      x: -headingX * reverseThrottle,
+      y: -headingY * reverseThrottle
+    };
+  }
+
+  const alignment = clamp(headingX * move.x + headingY * move.y, 0, 1);
+  const throttle = Math.max(clamp(ENGINE.subs.turnThrottleMinScale ?? 0, 0, 1), alignment);
+  return {
+    x: headingX * throttle,
+    y: headingY * throttle
+  };
+}
+
+function updateShipModeFacing(player, move, dtSeconds, gameMode) {
+  if (gameMode === GAME_MODES.subs) {
+    updateSubFacing(player, move, dtSeconds);
+    return;
+  }
+
+  updateShipFacing(player, move, dtSeconds);
+}
+
+function updateSubFacing(player, move, dtSeconds) {
+  const hasMoveIntent = move.x !== 0 || move.y !== 0;
+  if (!hasMoveIntent) {
+    player.facingMoveX = 0;
+    player.facingMoveY = 0;
+    player.subReverseActive = false;
+    clearPendingFacing(player);
+    return;
+  }
+
+  const target = Math.atan2(move.y, move.x);
+  const current = Number.isFinite(player.angle) ? player.angle : target;
+  const reverseHalfCone = Math.max(0, ENGINE.subs.reverseConeRadians || 0) / 2;
+  const reverseCenter = normalizeAngle(current + Math.PI);
+  if (!player.subReverseActive && Math.abs(normalizeSignedAngle(target - reverseCenter)) <= reverseHalfCone) {
+    player.subReverseActive = true;
+    player.subReverseConeAngle = reverseCenter;
+  }
+
+  if (player.subReverseActive) {
+    const coneCenter = Number.isFinite(player.subReverseConeAngle) ? player.subReverseConeAngle : reverseCenter;
+    if (Math.abs(normalizeSignedAngle(target - coneCenter)) <= reverseHalfCone) {
+      player.facingMoveX = move.x;
+      player.facingMoveY = move.y;
+      clearPendingFacing(player);
+      return;
+    }
+    player.subReverseActive = false;
+  }
+
+  const maxStep = Math.max(0, ENGINE.subs.turnRate || 0) * dtSeconds;
+  const delta = normalizeSignedAngle(target - current);
+  player.angle = normalizeAngle(current + clamp(delta, -maxStep, maxStep));
+  player.facingMoveX = move.x;
+  player.facingMoveY = move.y;
+  player.subReverseConeAngle = normalizeAngle(player.angle + Math.PI);
+  clearPendingFacing(player);
 }
 
 function updateShipFacing(player, move, dtSeconds) {
@@ -9887,6 +9984,8 @@ function reconcilePrediction(snapshot, timeSeconds) {
     pendingFacingSignX: predicted.pendingFacingSignX,
     pendingFacingSignY: predicted.pendingFacingSignY,
     pendingFacingSeconds: predicted.pendingFacingSeconds,
+    subReverseActive: Boolean(predicted.subReverseActive),
+    subReverseConeAngle: predicted.subReverseConeAngle ?? predicted.angle + Math.PI,
     aimAngle: isInputBlocked()
       ? predicted.aimAngle
       : inputAimAngleForPlayer(predicted),
@@ -9904,7 +10003,9 @@ function resetPredictedFacingState(player) {
     facingMoveY: 0,
     pendingFacingSignX: 0,
     pendingFacingSignY: 0,
-    pendingFacingSeconds: 0
+    pendingFacingSeconds: 0,
+    subReverseActive: Boolean(player.subReverseActive),
+    subReverseConeAngle: player.subReverseConeAngle ?? player.angle + Math.PI
   };
 }
 
@@ -9934,9 +10035,9 @@ function updatePrediction(timeSeconds) {
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(predicted, move, effects, dtSeconds);
   } else {
-    updateShipFacing(predicted, move, dtSeconds);
+    updateShipModeFacing(predicted, move, dtSeconds, gameMode);
     if (canThrust) {
-      applyThrusterAcceleration(predicted, move, effects, dtSeconds, shipThrustForGameMode(gameMode));
+      applyThrusterAcceleration(predicted, thrustMoveForGameMode(predicted, move, gameMode), effects, dtSeconds, shipThrustForGameMode(gameMode), gameMode);
     }
   }
 
