@@ -350,8 +350,9 @@ function clampBugPointToLegTarget(player, index, point) {
 
 function bugSafeLegPoint(player, index, point, terrain = null, direction = null) {
   const clamped = clampBugPointToLegTarget(player, index, point);
-  if (!bugLegPlacementBlocked(player, index, terrain, clamped)) {
-    return clamped;
+  const bodyRayPoint = bugBodyRaycastLegPoint(player, clamped, terrain);
+  if (bodyRayPoint) {
+    return bodyRayPoint;
   }
 
   const center = bugLegTargetCenter(player, index);
@@ -378,14 +379,50 @@ function bugSafeLegPoint(player, index, point, terrain = null, direction = null)
       x: center.x + forward.x * radius * candidate.f + side.x * radius * candidate.s,
       y: center.y + forward.y * radius * candidate.f + side.y * radius * candidate.s
     };
-    const safe = clampBugPointToLegTarget(player, index, next);
-    if (!bugLegPlacementBlocked(player, index, terrain, safe)) {
+    const safe = bugBodyRaycastLegPoint(player, clampBugPointToLegTarget(player, index, next), terrain);
+    if (safe) {
       return safe;
     }
   }
 
   const bodyPoint = { x: player.x, y: player.y };
   return bugLegPlacementBlocked(player, index, terrain, bodyPoint) ? null : bodyPoint;
+}
+
+function bugBodyRaycastLegPoint(player, point, terrain = null) {
+  if (!terrain || !point) {
+    return point;
+  }
+
+  const from = {
+    x: Number(player?.x) || 0,
+    y: Number(player?.y) || 0
+  };
+  const dx = point.x - from.x;
+  const dy = point.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance <= 0.0001) {
+    return bugFootBlocked(terrain, point) ? null : point;
+  }
+
+  const tileSize = Math.max(1, Number(terrain.tileSize) || ENGINE.bugs.tileSize || 1);
+  const stepSize = Math.max(0.5, Math.min(2, tileSize / 6));
+  const steps = Math.max(1, Math.ceil(distance / stepSize));
+  let lastSafe = bugFootBlocked(terrain, from) ? null : from;
+
+  for (let step = 1; step <= steps; step += 1) {
+    const t = step / steps;
+    const candidate = {
+      x: from.x + dx * t,
+      y: from.y + dy * t
+    };
+    if (bugFootBlocked(terrain, candidate)) {
+      return lastSafe;
+    }
+    lastSafe = candidate;
+  }
+
+  return point;
 }
 
 function bugNormalizedDirection(value) {
