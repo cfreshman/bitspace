@@ -66,6 +66,7 @@ const ROOM_ID_STORAGE_KEY = "bitspace.roomId";
 const ROOM_NAME_STORAGE_KEY = "bitspace.roomName";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
+const MENU_MODE_STORAGE_KEY = "bitspace.menuMode";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
 const PERF_DEBUG_STORAGE_KEY = "bitspace.debugPerf";
@@ -369,6 +370,7 @@ const state = {
   localGame: {
     active: false,
     arena: null,
+    mode: GAME_MODES.bitspace,
     bots: new Map(),
     botCount: LOCAL_BOT_DEFAULT_COUNT,
     lobbySeed: null,
@@ -2937,6 +2939,7 @@ function createMenuState() {
 
   return {
     room: MENU_ROOMS.ready,
+    mode: loadMenuMode(),
     tick: 0,
     lastTimeSeconds: 0,
     readySent: false,
@@ -2956,6 +2959,38 @@ function createMenuState() {
     themeBaseId: null,
     player: createMenuPlayer(asteroid)
   };
+}
+
+function normalizeMenuMode(mode) {
+  return mode === GAME_MODES.cars ? GAME_MODES.cars : GAME_MODES.bitspace;
+}
+
+function loadMenuMode() {
+  try {
+    return normalizeMenuMode(window.localStorage.getItem(MENU_MODE_STORAGE_KEY));
+  } catch (error) {
+    return GAME_MODES.bitspace;
+  }
+}
+
+function saveMenuMode(mode = selectedMenuMode()) {
+  try {
+    window.localStorage.setItem(MENU_MODE_STORAGE_KEY, normalizeMenuMode(mode));
+  } catch (error) {
+    // Ignore storage failures; mode can still work for this session.
+  }
+}
+
+function selectedMenuMode() {
+  return normalizeMenuMode(state.menu?.mode);
+}
+
+function toggleMenuMode() {
+  state.menu.mode = selectedMenuMode() === GAME_MODES.cars
+    ? GAME_MODES.bitspace
+    : GAME_MODES.cars;
+  saveMenuMode(state.menu.mode);
+  requestMechanicalBeep();
 }
 
 function createThemeMenuAsteroid() {
@@ -3103,7 +3138,8 @@ function updateMenuSimulation(timeSeconds) {
     return;
   }
 
-  applyShipFriction(player, dtSeconds);
+  const gameMode = selectedMenuMode();
+  applyShipFriction(player, dtSeconds, gameMode === GAME_MODES.cars ? ENGINE.car.friction : ENGINE.ship.friction);
 
   updateMenuAim(player);
   player.prototypeMiningRayCount = state.menu.rayCount;
@@ -3113,12 +3149,16 @@ function updateMenuSimulation(timeSeconds) {
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
 
-  updateShipFacing(player, move, dtSeconds);
   player.moveX = move.x;
   player.moveY = move.y;
 
-  if (canThrust) {
-    applyThrusterAcceleration(player, move, effects, dtSeconds);
+  if (gameMode === GAME_MODES.cars) {
+    simulateCarMovement(player, move, effects, dtSeconds);
+  } else {
+    updateShipFacing(player, move, dtSeconds);
+    if (canThrust) {
+      applyThrusterAcceleration(player, move, effects, dtSeconds);
+    }
   }
 
   player.thrusting = canThrust;
@@ -3885,8 +3925,8 @@ function activateMenuEntity(entity) {
     return;
   }
 
-  if (entity.action === "cars") {
-    activateReadyFromMenu(GAME_MODES.cars);
+  if (entity.action === "toggle-mode") {
+    toggleMenuMode();
     return;
   }
 
@@ -3908,7 +3948,7 @@ function activateMenuEntity(entity) {
   }
 
   if (entity.action === "bots") {
-    startLocalBotLobby();
+    startLocalBotLobby(selectedMenuMode());
     return;
   }
 
@@ -3948,7 +3988,7 @@ function activateMenuEntity(entity) {
   }
 }
 
-function activateReadyFromMenu(mode = GAME_MODES.bitspace) {
+function activateReadyFromMenu(mode = selectedMenuMode()) {
   if (state.menu.readySent || !socket.connected) {
     return;
   }
@@ -3988,20 +4028,22 @@ function joinNamedRoomFromMenu(value = state.menu.roomNameDraft) {
   state.menu.roomNameDraft = name;
   updateRoomPath(name);
   state.menu.readySent = true;
-  socket.emit(CLIENT_EVENTS.joinNamedRoom, { name, button: true });
+  socket.emit(CLIENT_EVENTS.joinNamedRoom, { name, button: true, mode: selectedMenuMode() });
   cancelMiningRay();
   releaseSpaceUntilKeyup();
 }
 
-function startLocalBotLobby() {
+function startLocalBotLobby(mode = selectedMenuMode()) {
   forgetRegisteredRoom();
   clearLocalBotSave();
+  mode = normalizeMenuMode(mode);
   const botCount = LOCAL_BOT_DEFAULT_COUNT;
   const seed = `local-bots-lobby:${Date.now().toString(36)}`;
-  const arena = createLocalBotLobbyArena(botCount, seed);
+  const arena = createLocalBotLobbyArena(botCount, seed, null, mode);
 
   state.localGame.active = true;
   state.localGame.arena = arena;
+  state.localGame.mode = mode;
   state.localGame.bots = new Map();
   state.localGame.botCount = botCount;
   state.localGame.lobbySeed = seed;
@@ -4026,15 +4068,21 @@ function startLocalBotLobby() {
   syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
 }
 
-function createLocalBotLobbyArena(botCount, seed, preservePlayer = null) {
+function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = state.localGame.mode) {
+  mode = normalizeMenuMode(mode);
+  const tileSize = mode === GAME_MODES.cars
+    ? RENDER.tileSize * ENGINE.car.tileScale
+    : RENDER.tileSize;
   const asteroid = createThemeAsteroid({
     seed: `${seed}:theme-lobby`,
+    tileSize,
     createLobbyPockets: true,
     playerCount: ENGINE.maxPlayers
   });
   const arena = createArena({
     id: `${LOCAL_BOT_ROOM_ID}:waiting`,
     seed,
+    mode,
     asteroid,
     playerDamage: false,
     storm: false
@@ -4095,13 +4143,15 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null) {
   return arena;
 }
 
-function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFAULT_COUNT) {
+function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFAULT_COUNT, mode = state.localGame.mode) {
   forgetRegisteredRoom();
   botCount = clampLocalBotCount(botCount);
+  mode = normalizeMenuMode(mode);
   const seed = `local-bots:${Date.now().toString(36)}`;
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed,
+    mode,
     playerCount: botCount + 1,
     playerDamage: true,
     storm: true
@@ -4109,34 +4159,41 @@ function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFA
   const spawnNumbers = shuffledSpawnNumbers(botCount + 1, seed);
   const playerName = getPlayerName();
   const localPlayerId = LOCAL_BOT_PLAYER_ID;
-  addPlayer(arena, {
+  const localAdd = addPlayer(arena, {
     id: localPlayerId,
     name: playerName || "Pilot",
     spawnNumber: spawnNumbers[0]
   });
+  if (!localAdd.ok || !localAdd.player) {
+    return;
+  }
 
   const bots = new Map();
   for (let index = 0; index < botCount; index += 1) {
     const id = `bot-${index + 1}`;
-    addPlayer(arena, {
+    const result = addPlayer(arena, {
       id,
       name: `Bot ${index + 1}`,
       spawnNumber: spawnNumbers[index + 1]
     });
+    if (!result.ok || !result.player) {
+      continue;
+    }
     bots.set(id, createPilotBotBrain(id, { seed: `${seed}:${id}` }));
   }
 
   state.localGame.active = true;
   state.localGame.arena = arena;
+  state.localGame.mode = mode;
   state.localGame.bots = bots;
-  state.localGame.botCount = botCount;
+  state.localGame.botCount = clampLocalBotCount(bots.size || botCount);
   state.localGame.lobbySeed = null;
   state.localGame.lastStepTimeSeconds = 0;
   state.localGame.accumulatorSeconds = 0;
   state.localGame.inputSeq = 0;
   state.localGame.lastSaveTimeSeconds = 0;
   state.playerId = localPlayerId;
-  state.room = localBotRoomFromArena(arena, { state: "active" });
+  state.room = localBotRoomFromArena(arena, { state: "active", botCount: bots.size });
   state.lastRoomId = LOCAL_BOT_ROOM_ID;
   state.lastActiveMatchKey = `${LOCAL_BOT_ROOM_ID}:${seed}`;
   beginMusicRoomStartTransition();
@@ -4190,9 +4247,11 @@ function adjustLocalBotLobbyCount(delta) {
 
   const currentPlayer = state.localGame.arena?.players.get(LOCAL_BOT_PLAYER_ID) || null;
   const seed = state.localGame.lobbySeed || `local-bots-lobby:${Date.now().toString(36)}`;
-  const arena = createLocalBotLobbyArena(nextCount, seed, currentPlayer);
+  const mode = normalizeMenuMode(state.localGame.mode);
+  const arena = createLocalBotLobbyArena(nextCount, seed, currentPlayer, mode);
   state.localGame.arena = arena;
   state.localGame.bots = new Map();
+  state.localGame.mode = mode;
   state.localGame.botCount = nextCount;
   state.localGame.lobbySeed = seed;
   state.room = localBotRoomFromArena(arena, { state: "waiting", botCount: nextCount });
@@ -4205,6 +4264,7 @@ function adjustLocalBotLobbyCount(delta) {
 function leaveLocalBotGame() {
   state.localGame.active = false;
   state.localGame.arena = null;
+  state.localGame.mode = GAME_MODES.bitspace;
   state.localGame.bots.clear();
   state.localGame.botCount = LOCAL_BOT_DEFAULT_COUNT;
   state.localGame.lobbySeed = null;
@@ -4296,6 +4356,7 @@ function stepLocalBotArena(stepSeconds, options = {}) {
 
   setPlayerInput(arena, LOCAL_BOT_PLAYER_ID, readLocalPlayerInput());
   if (options.updateBotInputs !== false) {
+    reconcileLocalBotBrains(arena);
     for (const [botId, brain] of state.localGame.bots.entries()) {
       const bot = arena.players.get(botId);
       if (!bot?.alive) {
@@ -4333,6 +4394,36 @@ function stepLocalBotArena(stepSeconds, options = {}) {
     applyClientAsteroidUpdates(updates);
   }
   updateLocalRoomEndState(arena);
+}
+
+function reconcileLocalBotBrains(arena) {
+  if (state.room?.state !== "active") {
+    return;
+  }
+
+  const bots = state.localGame.bots;
+  for (const botId of Array.from(bots.keys())) {
+    if (!arena.players.has(botId) || botId === LOCAL_BOT_PLAYER_ID) {
+      bots.delete(botId);
+    }
+  }
+
+  for (const player of arena.players.values()) {
+    if (player.id === LOCAL_BOT_PLAYER_ID || player.alive === false || bots.has(player.id)) {
+      continue;
+    }
+
+    const brain = createPilotBotBrain(player.id, {
+      seed: `${arena.seed}:${player.id}`
+    });
+    bots.set(player.id, brain);
+    player.inputSessionId = brain.sessionId;
+    player.lastInputSeq = 0;
+  }
+
+  state.localGame.botCount = clampLocalBotCount(
+    bots.size || state.localGame.botCount || LOCAL_BOT_DEFAULT_COUNT
+  );
 }
 
 function shouldUpdateLocalBotBrain(arena, botId, brain) {
@@ -4533,6 +4624,7 @@ function createLocalBotSave() {
     version: LOCAL_BOT_SAVE_VERSION,
     savedAt: Date.now(),
     seed: arena.seed,
+    mode: normalizeMenuMode(arena.mode),
     tick: arena.tick,
     inputSeq: state.localGame.inputSeq,
     roomState: state.room?.state === "ended" ? "ended" : "active",
@@ -4639,6 +4731,7 @@ function restoreLocalBotGame() {
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed: save.seed,
+    mode: normalizeMenuMode(save.mode),
     playerCount: Math.max(1, (save.players || []).length),
     playerDamage: true,
     storm: true,
@@ -4690,6 +4783,7 @@ function restoreLocalBotGame() {
   state.localGame.active = true;
   state.localGame.arena = arena;
   state.localGame.bots = bots;
+  state.localGame.mode = normalizeMenuMode(arena.mode);
   state.localGame.botCount = clampLocalBotCount(bots.size || LOCAL_BOT_DEFAULT_COUNT);
   state.localGame.lobbySeed = null;
   state.localGame.lastStepTimeSeconds = 0;
@@ -4963,6 +5057,8 @@ function localBotRoomFromArena(arena, options = {}) {
     roomId: LOCAL_BOT_ROOM_ID,
     local: true,
     localBots: true,
+    mode: normalizeMenuMode(arena.mode),
+    params: arena.params || {},
     roomName: roomState === "waiting" ? "BOTS" : "",
     maxPlayers: LOCAL_BOT_MAX_COUNT + 1,
     minPlayers: 1,
@@ -5064,6 +5160,7 @@ function menuSnapshot() {
     arenaId: settingsMenu ? `menu-${MENU_ROOMS.ready}` : `menu-${state.menu.room}`,
     tick: state.menu.tick,
     serverTime: Date.now(),
+    mode: selectedMenuMode(),
     render: RENDER,
     world,
     players: settingsMenu ? [{ ...state.menu.player, hidden: true }] : [{ ...state.menu.player }],
@@ -5098,6 +5195,7 @@ function menuEntities() {
   const readyY = center.y + 38;
   const controlsY = readyY + MENU_BUTTON_HEIGHT + 9;
   const carsY = controlsY + controlsRows.length * 11 + 8;
+  const modeButtonLabel = selectedMenuMode() === GAME_MODES.cars ? "SHIPS" : "CARS";
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
@@ -5106,7 +5204,7 @@ function menuEntities() {
     menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, titleY),
     menuButton("menu-ready", "ready", "READY", center.x - buttonWidth / 2, readyY, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
-    menuButton("menu-cars", "cars", "CARS", center.x - buttonWidth / 2, carsY, buttonWidth),
+    menuButton("menu-cars", "toggle-mode", modeButtonLabel, center.x - buttonWidth / 2, carsY, buttonWidth),
     menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
@@ -10758,7 +10856,7 @@ function handleRoomUiClick(buttonId) {
   if (buttonId === "ready") {
     socket.emit(CLIENT_EVENTS.ready, {
       button: true,
-      mode: GAME_MODES.bitspace
+      mode: selectedMenuMode()
     });
     return;
   }

@@ -209,7 +209,7 @@ export function createRoomManager(options = {}) {
     return { ok: true, room, joined: true };
   }
 
-  function joinNamedRoom(clientId, roomName) {
+  function joinNamedRoom(clientId, roomName, options = {}) {
     const client = clients.get(clientId);
     if (!client) {
       return { ok: false, reason: "unknown_client" };
@@ -246,7 +246,8 @@ export function createRoomManager(options = {}) {
       room = createWaitingRoom({
         kind: ROOM_KIND.named,
         name: normalizedName,
-        nameKey
+        nameKey,
+        mode: normalizeGameMode(options.mode)
       });
     }
 
@@ -528,7 +529,7 @@ export function createRoomManager(options = {}) {
     const seed = seedFactory(roomNumber);
     nextRoomNumber += 1;
     const kind = options.kind === ROOM_KIND.named ? ROOM_KIND.named : ROOM_KIND.public;
-    const mode = kind === ROOM_KIND.public ? normalizeGameMode(options.mode) : GAME_MODES.bitspace;
+    const mode = normalizeGameMode(options.mode);
     const name = kind === ROOM_KIND.named ? sanitizeNamedRoomName(options.name) : "";
     const nameKey = kind === ROOM_KIND.named ? namedRoomNameKey(options.nameKey || name) : "";
 

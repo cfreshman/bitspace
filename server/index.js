@@ -223,7 +223,9 @@ io.on("connection", (socket) => {
 
     const roomName = typeof payload === "string" ? payload : payload?.name;
     const roomBeforeJoin = roomManager.clientRoom(clientId);
-    const result = roomManager.joinNamedRoom(clientId, roomName);
+    const result = roomManager.joinNamedRoom(clientId, roomName, {
+      mode: typeof payload === "object" ? payload?.mode : undefined
+    });
     if (!result.ok) {
       socket.emit(SERVER_EVENTS.notice, {
         code: result.reason

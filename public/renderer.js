@@ -3708,6 +3708,19 @@ function mixHexColors(fromHex, toHex, amount) {
   return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
 }
 
+function desaturateHexColor(hex, amount) {
+  const normalized = String(hex || "#000000").replace("#", "").padEnd(6, "0");
+  const t = clamp(Number(amount), 0, 1);
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+  const gray = Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
+  const nextRed = Math.round(lerp(red, gray, t));
+  const nextGreen = Math.round(lerp(green, gray, t));
+  const nextBlue = Math.round(lerp(blue, gray, t));
+  return `#${nextRed.toString(16).padStart(2, "0")}${nextGreen.toString(16).padStart(2, "0")}${nextBlue.toString(16).padStart(2, "0")}`;
+}
+
 function getViewportSize() {
   const viewport = window.visualViewport;
   const padding = canvasEdgePaddingPx();
@@ -11708,7 +11721,8 @@ function colorsForCarTread(player) {
 
 function carBodyColor(player) {
   const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), CAR_BODY_COLORS.length);
-  return CAR_BODY_COLORS[index];
+  const color = CAR_BODY_COLORS[index];
+  return player?.alive === false ? desaturateHexColor(color, 0.5) : color;
 }
 
 function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
