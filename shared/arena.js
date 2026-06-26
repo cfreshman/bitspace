@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -55,9 +55,7 @@ export function createArena(options = {}) {
   const asteroid = options.asteroid ?? createAsteroid({
     seed: `${seed}:asteroid`,
     playerCount: options.playerCount,
-    tileSize: mode === GAME_MODES.cars
-      ? RENDER.tileSize * ENGINE.car.tileScale
-      : RENDER.tileSize
+    tileSize: mapTileSizeForGameMode(mode)
   });
   const playerDamage = options.playerDamage ?? true;
   const asteroidMining = options.asteroidMining ?? true;
@@ -409,7 +407,7 @@ function snapshotAsteroidMining(arena) {
 
   const mining = [];
   for (const [index, state] of arena.asteroidMining.entries()) {
-    const target = miningTargetForTile(arena.asteroid, index);
+    const target = miningTargetForTile(arena.asteroid, index, arena.mode);
     if (!target || target.phase !== state.phase) {
       continue;
     }
@@ -597,7 +595,7 @@ function processHuckRockInput(arena, player, dtSeconds) {
     ageSeconds: 0,
     bornTick: arena.tick
   });
-  applyHuckRockRecoil(player, direction);
+  applyHuckRockRecoil(player, direction, arena.mode);
   player.huckRockCooldownSeconds = config.fireIntervalSeconds;
   player.huckRockEngineCutoutSeconds = 0;
   trimHuckRocks(arena);
@@ -624,8 +622,8 @@ function huckRockLaunchAngle(player) {
   });
 }
 
-function applyHuckRockRecoil(player, direction) {
-  const impulse = huckRockRecoilImpulse(player);
+function applyHuckRockRecoil(player, direction, gameMode = GAME_MODES.bitspace) {
+  const impulse = huckRockRecoilImpulse(player, gameMode);
   player.vx -= direction.x * impulse;
   player.vy -= direction.y * impulse;
 }
@@ -715,11 +713,11 @@ function signAxis(value) {
   return 0;
 }
 
-function huckRockRecoilImpulse(player) {
+function huckRockRecoilImpulse(player, gameMode = GAME_MODES.bitspace) {
   const config = ENGINE.huckRock;
   const rockMass = config.radius * config.radius;
   const shipRadius = Math.max(0.1, player.radius || ENGINE.ship.radius);
-  const shipMass = shipRadius * shipRadius * (config.shipMassScale || 1);
+  const shipMass = shipRadius * shipRadius * (config.shipMassScale || 1) * playerMassScaleForGameMode(gameMode);
   const hitImpulse = ((1 + config.restitution) * config.speed) /
     ((1 / rockMass) + (1 / shipMass));
   return (hitImpulse / shipMass) * (config.recoilImpulseScale ?? 1);
@@ -1059,7 +1057,7 @@ function applyHuckRockPlayerImpulse(rock, player, hit) {
   }
 
   const rockMass = huckRockBodyMass(rock);
-  const playerMass = playerBodyMass(player);
+  const playerMass = playerBodyMass(player, arena.mode);
   const impulse = (-(1 + ENGINE.huckRock.restitution) * relativeNormalSpeed) /
     ((1 / rockMass) + (1 / playerMass));
 
@@ -1074,9 +1072,9 @@ function huckRockBodyMass(rock) {
   return radius * radius;
 }
 
-function playerBodyMass(player) {
+function playerBodyMass(player, gameMode = GAME_MODES.bitspace) {
   const radius = Math.max(0.1, player.radius || ENGINE.ship.radius);
-  return radius * radius * (ENGINE.huckRock.shipMassScale || 1);
+  return radius * radius * (ENGINE.huckRock.shipMassScale || 1) * playerMassScaleForGameMode(gameMode);
 }
 
 function huckRockFragmentTerrainHit(arena, rock, previousX = rock.x, previousY = rock.y) {
@@ -1418,7 +1416,7 @@ function processPlayerMining(arena, player, dtSeconds) {
       continue;
     }
 
-    const target = miningTargetForTile(arena.asteroid, hit.index);
+    const target = miningTargetForTile(arena.asteroid, hit.index, arena.mode);
     if (!target) {
       continue;
     }
@@ -1584,7 +1582,7 @@ function raycastMiningRay(arena, player, start, angle, maxDistance) {
   };
 }
 
-function miningTargetForTile(asteroid, index) {
+function miningTargetForTile(asteroid, index, gameMode = GAME_MODES.bitspace) {
   const tile = asteroid.tiles[index];
   const amount = asteroid.amounts[index] || 0;
 
@@ -1592,7 +1590,7 @@ function miningTargetForTile(asteroid, index) {
     return {
       phase: `${ASTEROID_TILE.ore}:${amount}`,
       resource: "ore",
-      seconds: ENGINE.mining.oreSeconds
+      seconds: miningSecondsForGameMode(ENGINE.mining.oreSeconds, gameMode)
     };
   }
 
@@ -1600,7 +1598,7 @@ function miningTargetForTile(asteroid, index) {
     return {
       phase: ASTEROID_TILE.diamond,
       resource: "diamond",
-      seconds: ENGINE.mining.diamondSeconds
+      seconds: miningSecondsForGameMode(ENGINE.mining.diamondSeconds, gameMode)
     };
   }
 
@@ -1608,7 +1606,7 @@ function miningTargetForTile(asteroid, index) {
     return {
       phase: ASTEROID_TILE.wall,
       resource: "rock",
-      seconds: ENGINE.mining.rockSeconds
+      seconds: miningSecondsForGameMode(ENGINE.mining.rockSeconds, gameMode)
     };
   }
 
@@ -1616,7 +1614,7 @@ function miningTargetForTile(asteroid, index) {
     return {
       phase: ASTEROID_TILE.rock,
       resource: "rock",
-      seconds: ENGINE.mining.rockSeconds
+      seconds: miningSecondsForGameMode(ENGINE.mining.rockSeconds, gameMode)
     };
   }
 

@@ -28,7 +28,7 @@ const SHIP_FRICTION = Math.max(
   Math.min(0.999, 1 - (SHIP_THRUST / ENGINE_TICK_RATE) / SHIP_BASE_TERMINAL_SPEED)
 );
 const SUB_BASE_FRICTION = Math.min(0.999, SHIP_FRICTION + 0.032);
-const SUB_FRICTION = Math.min(0.999, 1 - (1 - SUB_BASE_FRICTION) * 0.25);
+const SUB_FRICTION = Math.min(0.999, 1 - (1 - SUB_BASE_FRICTION) * 0.15);
 
 export const ENGINE = Object.freeze({
   tickRate: ENGINE_TICK_RATE,
@@ -85,7 +85,10 @@ export const ENGINE = Object.freeze({
     lateralFriction: 0.88
   },
   subs: {
-    thrustMultiplier: 0.18,
+    tileSize: 12,
+    thrustMultiplier: 0.12,
+    massScale: 6,
+    miningTimeScale: 0.5,
     friction: SUB_FRICTION
   },
   player: {
@@ -164,4 +167,29 @@ export function shipThrustForGameMode(gameMode) {
     return ENGINE.ship.thrust * ENGINE.subs.thrustMultiplier;
   }
   return ENGINE.ship.thrust;
+}
+
+export function mapTileSizeForGameMode(gameMode) {
+  if (gameMode === GAME_MODES.cars) {
+    return RENDER.tileSize * ENGINE.car.tileScale;
+  }
+  if (gameMode === GAME_MODES.subs) {
+    return ENGINE.subs.tileSize;
+  }
+  return RENDER.tileSize;
+}
+
+export function playerMassScaleForGameMode(gameMode) {
+  if (gameMode === GAME_MODES.subs) {
+    return ENGINE.subs.massScale;
+  }
+  return 1;
+}
+
+export function miningSecondsForGameMode(seconds, gameMode) {
+  const baseSeconds = Number(seconds) || 0;
+  if (gameMode === GAME_MODES.subs) {
+    return baseSeconds * ENGINE.subs.miningTimeScale;
+  }
+  return baseSeconds;
 }

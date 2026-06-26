@@ -1,4 +1,4 @@
-import { ENGINE, RENDER } from "./constants.js";
+import { ENGINE, RENDER, miningSecondsForGameMode } from "./constants.js";
 import {
   ASTEROID_TILE,
   STORM_STATE,
@@ -2140,7 +2140,8 @@ function buildVisibleOreDeposit(arena, bot, brain, resourceNeeds, startIndex) {
   const entry = bestEntry || oreDepositEntryForIndex(arena, bot, startIndex);
   const need = botResourceNeedAmount(resourceNeeds, "ore");
   const utility = botResourceUtility("ore", amount, resourceNeeds);
-  const depositSeconds = entry.acquisitionSeconds + Math.max(0, Math.sqrt(amount) - 1) * ENGINE.mining.oreSeconds * 0.2;
+  const oreSeconds = miningSecondsForGameMode(ENGINE.mining.oreSeconds, arena.mode);
+  const depositSeconds = entry.acquisitionSeconds + Math.max(0, Math.sqrt(amount) - 1) * oreSeconds * 0.2;
   return {
     index: entry.index,
     entryIndex: entry.index,
@@ -6736,7 +6737,7 @@ function botPathThreatTileVisible(arena, index, options = {}) {
 }
 
 function botMiningSecondsForTile(arena, index, options = {}) {
-  const target = botMiningTargetForTile(arena.asteroid, index);
+  const target = botMiningTargetForTile(arena.asteroid, index, arena.mode);
   if (!target) {
     return 0;
   }
@@ -6750,40 +6751,43 @@ function botMiningSecondsForTile(arena, index, options = {}) {
     : 0;
 }
 
-function botMiningTargetForTile(asteroid, index) {
+function botMiningTargetForTile(asteroid, index, gameMode = null) {
   const tile = asteroid.tiles[index];
   const amount = Number(asteroid.amounts[index] || 0);
+  const oreSeconds = miningSecondsForGameMode(ENGINE.mining.oreSeconds, gameMode);
+  const diamondSeconds = miningSecondsForGameMode(ENGINE.mining.diamondSeconds, gameMode);
+  const rockSeconds = miningSecondsForGameMode(ENGINE.mining.rockSeconds, gameMode);
 
   if (tile === ASTEROID_TILE.ore) {
     return {
       phase: `${ASTEROID_TILE.ore}:${amount}`,
       oreAmount: Math.max(1, amount),
-      seconds: Math.max(1, amount) * ENGINE.mining.oreSeconds + ENGINE.mining.rockSeconds,
-      currentStageSeconds: ENGINE.mining.oreSeconds
+      seconds: Math.max(1, amount) * oreSeconds + rockSeconds,
+      currentStageSeconds: oreSeconds
     };
   }
 
   if (tile === ASTEROID_TILE.diamond) {
     return {
       phase: ASTEROID_TILE.diamond,
-      seconds: ENGINE.mining.diamondSeconds + ENGINE.mining.rockSeconds,
-      currentStageSeconds: ENGINE.mining.diamondSeconds
+      seconds: diamondSeconds + rockSeconds,
+      currentStageSeconds: diamondSeconds
     };
   }
 
   if (tile === ASTEROID_TILE.wall) {
     return {
       phase: ASTEROID_TILE.wall,
-      seconds: ENGINE.mining.rockSeconds,
-      currentStageSeconds: ENGINE.mining.rockSeconds
+      seconds: rockSeconds,
+      currentStageSeconds: rockSeconds
     };
   }
 
   if (tile === ASTEROID_TILE.rock) {
     return {
       phase: ASTEROID_TILE.rock,
-      seconds: ENGINE.mining.rockSeconds,
-      currentStageSeconds: ENGINE.mining.rockSeconds
+      seconds: rockSeconds,
+      currentStageSeconds: rockSeconds
     };
   }
 

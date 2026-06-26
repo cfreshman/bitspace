@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -3629,7 +3629,7 @@ function spawnMenuHuckRock(player) {
     ageSeconds: 0,
     bornTick: state.menu.tick
   });
-  applyHuckRockRecoil(player, direction);
+  applyHuckRockRecoil(player, direction, selectedMenuMode());
   player.huckRockEngineCutoutSeconds = 0;
 
   while (state.menu.huckRocks.length > ENGINE.huckRock.maxLobbyRocks) {
@@ -3735,7 +3735,7 @@ function menuHuckRockBodyMass(rock) {
 
 function menuPlayerBodyMass(player) {
   const radius = Math.max(0.1, player.radius || ENGINE.ship.radius);
-  return radius * radius * (ENGINE.huckRock.shipMassScale || 1);
+  return radius * radius * (ENGINE.huckRock.shipMassScale || 1) * playerMassScaleForGameMode(selectedMenuMode());
 }
 
 function resolveMenuHuckRockAsteroidCollisions(rock, previousX = rock.x, previousY = rock.y, spawnedFragments = []) {
@@ -4077,9 +4077,7 @@ function startLocalBotLobby(mode = selectedMenuMode()) {
 
 function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = state.localGame.mode) {
   mode = normalizeMenuMode(mode);
-  const tileSize = mode === GAME_MODES.cars
-    ? RENDER.tileSize * ENGINE.car.tileScale
-    : RENDER.tileSize;
+  const tileSize = mapTileSizeForGameMode(mode);
   const asteroid = createThemeAsteroid({
     seed: `${seed}:theme-lobby`,
     tileSize,
@@ -9503,8 +9501,8 @@ function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
   });
 }
 
-function applyHuckRockRecoil(player, direction) {
-  const impulse = huckRockRecoilImpulse(player);
+function applyHuckRockRecoil(player, direction, gameMode = activeGameMode()) {
+  const impulse = huckRockRecoilImpulse(player, gameMode);
   player.vx -= direction.x * impulse;
   player.vy -= direction.y * impulse;
 }
@@ -9594,11 +9592,11 @@ function signAxis(value) {
   return 0;
 }
 
-function huckRockRecoilImpulse(player) {
+function huckRockRecoilImpulse(player, gameMode = activeGameMode()) {
   const config = ENGINE.huckRock;
   const rockMass = config.radius * config.radius;
   const shipRadius = Math.max(0.1, player.radius || ENGINE.ship.radius);
-  const shipMass = shipRadius * shipRadius * (config.shipMassScale || 1);
+  const shipMass = shipRadius * shipRadius * (config.shipMassScale || 1) * playerMassScaleForGameMode(gameMode);
   const hitImpulse = ((1 + config.restitution) * config.speed) /
     ((1 / rockMass) + (1 / shipMass));
   return (hitImpulse / shipMass) * (config.recoilImpulseScale ?? 1);

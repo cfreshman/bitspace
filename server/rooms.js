@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { ENGINE, GAME_MODES, RENDER } from "../shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode } from "../shared/constants.js";
 import { createThemeAsteroid } from "../shared/asteroid.js";
 import { createSeededRandom } from "../shared/math.js";
 import {
@@ -1030,9 +1030,7 @@ export function createRoomManager(options = {}) {
 
 function createLobbyArena(id, seed, mode = GAME_MODES.bitspace, params = {}) {
   const normalizedMode = normalizeGameMode(mode);
-  const tileSize = normalizedMode === GAME_MODES.cars
-    ? RENDER.tileSize * ENGINE.car.tileScale
-    : RENDER.tileSize;
+  const tileSize = mapTileSizeForGameMode(normalizedMode);
   const asteroid = createThemeAsteroid({
     seed: `${seed}:theme-lobby`,
     tileSize,

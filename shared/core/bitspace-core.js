@@ -1,5 +1,5 @@
 import { ASTEROID_TILE } from "../asteroid.js";
-import { ENGINE, RENDER } from "../constants.js";
+import { ENGINE, RENDER, miningSecondsForGameMode } from "../constants.js";
 import { createSeededRandom } from "../math.js";
 
 const BLOCKER_STRIDE = 6;
@@ -449,9 +449,9 @@ export function findPathNative(arena, startIndex, goalIndex, options = {}) {
     Number(options.pathMiningPower || 1),
     Number(options.pathMiningCostMultiplier || 1),
     Number(options.pathMiningExtraSeconds || 0),
-    ENGINE.mining.rockSeconds,
-    ENGINE.mining.oreSeconds,
-    ENGINE.mining.diamondSeconds,
+    miningSecondsForGameMode(ENGINE.mining.rockSeconds, arena.mode),
+    miningSecondsForGameMode(ENGINE.mining.oreSeconds, arena.mode),
+    miningSecondsForGameMode(ENGINE.mining.diamondSeconds, arena.mode),
     2,
     4,
     2.4,

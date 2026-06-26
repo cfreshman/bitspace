@@ -48,14 +48,18 @@ const SUB_MODE_COLORS = Object.freeze({
   foreground: "#d8f6ff",
   background: "#226dce",
   backgroundDark: "#226dce",
+  shadow: "#000000",
+  shadowAlpha: 0.6,
   backing: "#1c1b1b",
   // trueBacking: "#000000",
   ore: "#d7b78f",
   diamond: "#00f7ff",
   rockLine: "#364251",
-  bodyFill: "#222222",
+  // bodyFill: "#222222",
+  bodyFill: "#111111",
   health: "#48f06d"
 });
+const SUB_SHADOW_MASK_COLOR = "#010203";
 const CAR_BODY_COLORS = Object.freeze([
   "#ff3024",
   "#2f60ff",
@@ -1961,7 +1965,9 @@ function createGpuFramePresenter(canvas, width, height) {
         lensDefectDensity: gl.getUniformLocation(checkerProgram, "u_lensDefectDensity"),
         rockCornerRadius: gl.getUniformLocation(checkerProgram, "u_rockCornerRadius"),
         backgroundColor: gl.getUniformLocation(checkerProgram, "u_backgroundColor"),
-        backingColor: gl.getUniformLocation(checkerProgram, "u_backingColor")
+        checkerColor: gl.getUniformLocation(checkerProgram, "u_checkerColor"),
+        backingColor: gl.getUniformLocation(checkerProgram, "u_backingColor"),
+        solidShadow: gl.getUniformLocation(checkerProgram, "u_solidShadow")
       }
       : null;
     const compositeLocations = supportsStorm
@@ -1993,6 +1999,9 @@ function createGpuFramePresenter(canvas, width, height) {
         seed: gl.getUniformLocation(causticProgram, "u_seed"),
         backgroundColor: gl.getUniformLocation(causticProgram, "u_backgroundColor"),
         backgroundDarkColor: gl.getUniformLocation(causticProgram, "u_backgroundDarkColor"),
+        shadowMaskColor: gl.getUniformLocation(causticProgram, "u_shadowMaskColor"),
+        shadowColor: gl.getUniformLocation(causticProgram, "u_shadowColor"),
+        shadowAlpha: gl.getUniformLocation(causticProgram, "u_shadowAlpha"),
         rockFillColor: gl.getUniformLocation(causticProgram, "u_rockFillColor"),
         wallFillColor: gl.getUniformLocation(causticProgram, "u_wallFillColor"),
         backingColor: gl.getUniformLocation(causticProgram, "u_backingColor"),
@@ -2281,6 +2290,7 @@ function createGpuFramePresenter(canvas, width, height) {
 
       const palette = layer.palette || {};
       const background = rgbFloatsForHex(palette.background || RENDER.background);
+      const checker = rgbFloatsForHex(palette.checker || palette.shadow || palette.background || RENDER.background);
       const backing = rgbFloatsForHex(palette.backing || "#000000");
       const camera = layer.camera || {};
       gl.useProgram(checkerProgram);
@@ -2308,7 +2318,9 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.uniform1f(checkerLocations.lensDefectDensity, WORLD_LENS_DEFECT_DENSITY);
       gl.uniform1f(checkerLocations.rockCornerRadius, rockOuterBevelRadiusForGameMode(layer.gameMode));
       gl.uniform3f(checkerLocations.backgroundColor, background[0], background[1], background[2]);
+      gl.uniform3f(checkerLocations.checkerColor, checker[0], checker[1], checker[2]);
       gl.uniform3f(checkerLocations.backingColor, backing[0], backing[1], backing[2]);
+      gl.uniform1i(checkerLocations.solidShadow, layer.solidShadow === true ? 1 : 0);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       return true;
     }
@@ -2424,7 +2436,7 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
-    function drawCausticsOverCurrent(layer) {
+    function drawCausticsOverCurrent(layer, shadowLayer = null) {
       if (!supportsCaustics || !layer) {
         return false;
       }
@@ -2438,6 +2450,13 @@ function createGpuFramePresenter(canvas, width, height) {
       const palette = layer.palette || {};
       const background = rgbFloatsForHex(palette.background || SUB_MODE_COLORS.background);
       const backgroundDark = rgbFloatsForHex(palette.backgroundDark || SUB_MODE_COLORS.backgroundDark);
+      const shadowMask = rgbFloatsForHex(SUB_SHADOW_MASK_COLOR);
+      const shadowPalette = shadowLayer?.palette || palette;
+      const shadow = rgbFloatsForHex(shadowPalette.shadow || SUB_MODE_COLORS.shadow || "#000000");
+      const shadowAlphaSource = Number.isFinite(shadowLayer?.shadowAlpha)
+        ? shadowLayer.shadowAlpha
+        : Number.isFinite(palette.shadowAlpha) ? palette.shadowAlpha : SUB_MODE_COLORS.shadowAlpha;
+      const shadowAlpha = Math.max(0, Math.min(1, shadowAlphaSource));
       const rockFill = rgbFloatsForHex(palette.rockFill || SUB_MODE_COLORS.rockFill);
       const wallFill = rgbFloatsForHex(palette.wallFill || SUB_MODE_COLORS.wallFill);
       const backing = rgbFloatsForHex(palette.backing || "#000000");
@@ -2452,6 +2471,9 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.uniform1f(causticLocations.seed, seedToUnitFloat(layer.seed || "subs"));
       gl.uniform3f(causticLocations.backgroundColor, background[0], background[1], background[2]);
       gl.uniform3f(causticLocations.backgroundDarkColor, backgroundDark[0], backgroundDark[1], backgroundDark[2]);
+      gl.uniform3f(causticLocations.shadowMaskColor, shadowMask[0], shadowMask[1], shadowMask[2]);
+      gl.uniform3f(causticLocations.shadowColor, shadow[0], shadow[1], shadow[2]);
+      gl.uniform1f(causticLocations.shadowAlpha, shadowAlpha);
       gl.uniform3f(causticLocations.rockFillColor, rockFill[0], rockFill[1], rockFill[2]);
       gl.uniform3f(causticLocations.wallFillColor, wallFill[0], wallFill[1], wallFill[2]);
       gl.uniform3f(causticLocations.backingColor, backing[0], backing[1], backing[2]);
@@ -2482,11 +2504,20 @@ function createGpuFramePresenter(canvas, width, height) {
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
         const checkerLayer = options.checkerLayer || null;
+        const deferredShadowLayer = causticLayer && checkerLayer?.solidShadow === true ? checkerLayer : null;
         const stormLayers = Array.isArray(options.stormLayers)
           ? options.stormLayers
           : options.stormLayer ? [options.stormLayer] : [];
         let drewFrame = false;
-        if (checkerLayer) {
+        if (deferredShadowLayer) {
+          drewFrame = drawFrameWithChecker({
+            ...deferredShadowLayer,
+            palette: {
+              ...(deferredShadowLayer.palette || {}),
+              checker: SUB_SHADOW_MASK_COLOR
+            }
+          });
+        } else if (checkerLayer) {
           drewFrame = drawFrameWithChecker(checkerLayer);
         }
         for (const stormLayer of stormLayers) {
@@ -2524,7 +2555,7 @@ function createGpuFramePresenter(canvas, width, height) {
           overlayStartIndex = 1;
         }
         if (causticLayer) {
-          drawCausticsOverCurrent(causticLayer);
+          drawCausticsOverCurrent(causticLayer, deferredShadowLayer);
         }
         for (let overlayIndex = overlayStartIndex; overlayIndex < overlays.length; overlayIndex += 1) {
           const overlay = overlays[overlayIndex];
@@ -3088,6 +3119,9 @@ uniform float u_seed;
 uniform float u_waveSize;
 uniform vec3 u_backgroundColor;
 uniform vec3 u_backgroundDarkColor;
+uniform vec3 u_shadowMaskColor;
+uniform vec3 u_shadowColor;
+uniform float u_shadowAlpha;
 uniform vec3 u_rockFillColor;
 uniform vec3 u_wallFillColor;
 uniform vec3 u_backingColor;
@@ -3099,8 +3133,14 @@ bool frameIsBackgroundColor(vec4 frame) {
   return all(equal(frameByte, backgroundByte));
 }
 
+bool frameIsShadowMaskColor(vec4 frame) {
+  vec3 frameByte = floor(clamp(frame.rgb, 0.0, 1.0) * 255.0 + 0.5);
+  vec3 shadowByte = floor(clamp(u_shadowMaskColor, 0.0, 1.0) * 255.0 + 0.5);
+  return all(equal(frameByte, shadowByte));
+}
+
 float sceneAlphaForFrame(vec4 frame) {
-  return frame.a * (frameIsBackgroundColor(frame) ? 0.0 : 1.0);
+  return frame.a * ((frameIsBackgroundColor(frame) || frameIsShadowMaskColor(frame)) ? 0.0 : 1.0);
 }
 
 float waveHeight(vec2 uv) {
@@ -3207,6 +3247,7 @@ void main() {
   float contourPixel = 1.0 - smoothstep(0.012, 0.052, contourDistance);
   vec3 contourColor = mix(u_backgroundColor, vec3(1.0), 0.52);
   vec3 shadowColor = mix(u_backgroundDarkColor, u_backingColor, 0.35);
+  bool refractedIsShadow = frameIsShadowMaskColor(refractedFrame);
   vec3 waterBase = waterSurface;
   waterBase = mix(waterBase, waterSurface, surfaceAlpha);
   waterBase = mix(waterBase, shadowColor, clamp(normalShadow * 0.26, 0.0, 0.20));
@@ -3214,7 +3255,8 @@ void main() {
   waterBase = mix(waterBase, elevationColor, clamp(0.42, 0.0, 0.38));
   waterBase = mix(waterBase, contourColor, clamp(contourPixel * 0.075, 0.0, 0.075));
   waterBase = mix(waterBase, vec3(1.0), clamp(specular * 0.18, 0.0, 0.16));
-  float sceneAlpha = sceneAlphaForFrame(refractedFrame);
+  waterBase = mix(waterBase, u_shadowColor, refractedIsShadow ? clamp(u_shadowAlpha, 0.0, 1.0) : 0.0);
+  float sceneAlpha = refractedIsShadow ? 0.0 : sceneAlphaForFrame(refractedFrame);
   vec4 frame = vec4(mix(waterBase, refractedFrame.rgb, sceneAlpha), max(refractedFrame.a, sourceFrame.a));
   gl_FragColor = vec4(frame.rgb, frame.a);
 }
@@ -3238,7 +3280,9 @@ uniform float u_lensNoiseTangential;
 uniform float u_lensDefectDensity;
 uniform float u_rockCornerRadius;
 uniform vec3 u_backgroundColor;
+uniform vec3 u_checkerColor;
 uniform vec3 u_backingColor;
+uniform bool u_solidShadow;
 varying vec2 v_texCoord;
 
 float hash13(vec3 p) {
@@ -3398,12 +3442,15 @@ bool ghostCheckerShapeAllows(vec2 tile, vec2 local) {
   return false;
 }
 
-bool checkerPixelOn(vec2 source) {
+bool shadowPixelOn(vec2 source) {
   vec2 world = floor(source + u_cameraPixelOffset);
   vec2 tile = floor(world / u_tileSize);
   vec2 local = mod(mod(world, u_tileSize) + u_tileSize, u_tileSize);
   if (!ghostCheckerShapeAllows(tile, local)) {
     return false;
+  }
+  if (u_solidShadow) {
+    return true;
   }
 
   float cell = floor(local.x / u_checkerSize) + floor(local.y / u_checkerSize);
@@ -3422,8 +3469,8 @@ void main() {
   }
 
   vec2 source = inverseLensSource(screen);
-  if (checkerPixelOn(source)) {
-    gl_FragColor = vec4(u_backgroundColor, 1.0);
+  if (shadowPixelOn(source)) {
+    gl_FragColor = vec4(u_checkerColor, 1.0);
   } else {
     gl_FragColor = frame;
   }
@@ -7965,25 +8012,36 @@ function drawAsteroidVisibilityGhostMap(
     viewMaxTileY
   );
   let gpuCheckerQueued = false;
+  const solidShadow = gameMode === GAME_MODES.subs;
+  const checkerColor = solidShadow ? SUB_SHADOW_MASK_COLOR : visibilityCheckerColor(colors);
+  const shadowColors = solidShadow ? { ...colors, checker: SUB_SHADOW_MASK_COLOR, solidShadow: true } : colors;
+  const shadowLineColors = solidShadow
+    ? { ...colors, checker: colors.backing || "#000000", solidShadow: true }
+    : colors;
 
   measureGhostBucket("ghostCheckerMs", () => {
-    const queuedGpuChecker = gpuFrameCheckerReady &&
+    const queuedGpuChecker = !solidShadow &&
+      gpuFrameCheckerReady &&
       typeof ctx.queueGpuCheckerLayer === "function" &&
       ctx.queueGpuCheckerLayer({
         asteroid,
         camera: { x: camera.x, y: camera.y },
         palette: {
           background: colors.background,
+          shadow: colors.shadow || "#000000",
+          checker: checkerColor,
           backing: colors.backing || "#000000"
         },
-        gameMode
+        gameMode,
+        solidShadow,
+        shadowAlpha: Number.isFinite(colors.shadowAlpha) ? colors.shadowAlpha : 0.5
       });
     if (queuedGpuChecker) {
       gpuCheckerQueued = true;
       return;
     }
 
-    const nativeCheckerLayer = typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
+    const nativeCheckerLayer = !solidShadow && typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
       ? visibilityCheckerLayerNative(asteroid, camera, ctx.width, ctx.height, {
         sourcePadding: padding,
         lensEdgeScale: WORLD_LENS_EDGE_SCALE,
@@ -7995,7 +8053,7 @@ function drawAsteroidVisibilityGhostMap(
       : null;
     if (nativeCheckerLayer) {
       ctx.drawCodeLayer(nativeCheckerLayer, {
-        background: colors.background,
+        background: checkerColor,
         foreground: colors.foreground,
         backing: colors.backing || "#000000"
       });
@@ -8013,7 +8071,7 @@ function drawAsteroidVisibilityGhostMap(
             continue;
           }
 
-          drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors);
+          drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, shadowColors);
         }
       }
     }
@@ -8030,6 +8088,50 @@ function drawAsteroidVisibilityGhostMap(
       return;
     }
 
+    if (solidShadow) {
+      drawRockChunkOutlines(
+        ctx,
+        asteroid,
+        camera,
+        tileSize,
+        minTileX,
+        maxTileX,
+        minTileY,
+        maxTileY,
+        {
+          ...colors,
+          background: checkerColor,
+          foreground: colors.backing || "#000000",
+          rockLine: colors.backing || "#000000"
+        },
+        null,
+        SUB_ROCK_OUTLINE_WIDTH,
+        gameMode
+      );
+
+      for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+        for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+          const index = tileY * asteroid.widthTiles + tileX;
+          if (asteroid.tiles[index] !== ASTEROID_TILE.wall) {
+            continue;
+          }
+
+          drawAsteroidVisibilityGhostWallOutline(
+            ctx,
+            asteroid,
+            tileX,
+            tileY,
+            Math.round(tileX * tileSize - camera.x),
+            Math.round(tileY * tileSize - camera.y),
+            tileSize,
+            shadowLineColors,
+            camera
+          );
+        }
+      }
+      return;
+    }
+
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
         const index = tileY * asteroid.widthTiles + tileX;
@@ -8041,9 +8143,9 @@ function drawAsteroidVisibilityGhostMap(
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
         if (tile === ASTEROID_TILE.wall) {
-          drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera);
+          drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, shadowLineColors, camera);
         } else {
-          drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, camera, gameMode);
+          drawAsteroidVisibilityGhostRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, shadowLineColors, camera, gameMode);
         }
       }
     }
@@ -8057,7 +8159,7 @@ function drawAsteroidVisibilityGhostMap(
       maxTileX,
       minTileY,
       maxTileY,
-      colors
+      shadowLineColors
     );
   });
   measureGhostBucket("ghostStormMs", () => {
@@ -8085,11 +8187,24 @@ function drawAsteroidVisibilityGhostMap(
   });
 }
 
+function visibilityCheckerColor(colors) {
+  return colors.checker || colors.shadow || colors.background;
+}
+
+function visibilityCheckerSolid(colors) {
+  return colors.solidShadow === true;
+}
+
 function drawAsteroidVisibilityCheckerCell(ctx, tileX, tileY, tileSize, camera, colors) {
   const x = Math.round(tileX * tileSize - camera.x);
   const y = Math.round(tileY * tileSize - camera.y);
 
-  ctx.fillStyle = colors.background;
+  ctx.fillStyle = visibilityCheckerColor(colors);
+  if (visibilityCheckerSolid(colors)) {
+    ctx.fillRect(x, y, tileSize, tileSize);
+    return;
+  }
+
   for (let offsetY = 0; offsetY < tileSize; offsetY += 1) {
     for (let offsetX = 0; offsetX < tileSize; offsetX += 1) {
       if (!asteroidVisibilityCheckerPixelOn(x + offsetX, y + offsetY, camera)) {
@@ -8283,7 +8398,7 @@ function drawAsteroidVisibilityGhostWallOutline(ctx, asteroid, tileX, tileY, x, 
 
 function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, radius, signX, signY, colors, camera) {
   const radiusSq = radius * radius;
-  ctx.fillStyle = colors.background;
+  ctx.fillStyle = visibilityCheckerColor(colors);
   for (let offsetY = 0; offsetY <= radius; offsetY += 1) {
     for (let offsetX = 0; offsetX <= radius; offsetX += 1) {
       if (offsetX * offsetX + offsetY * offsetY <= radiusSq) {
@@ -8292,7 +8407,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, rad
 
       const pixelX = centerX + signX * offsetX;
       const pixelY = centerY + signY * offsetY;
-      if (!asteroidVisibilityCheckerPixelOn(pixelX, pixelY, camera)) {
+      if (!visibilityCheckerSolid(colors) && !asteroidVisibilityCheckerPixelOn(pixelX, pixelY, camera)) {
         continue;
       }
 
@@ -8302,7 +8417,7 @@ function drawAsteroidVisibilityCheckerOuterRockCorner(ctx, centerX, centerY, rad
 }
 
 function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom, corners, colors, camera, radius = ROCK_OUTER_CORNER_RADIUS) {
-  ctx.fillStyle = colors.background;
+  ctx.fillStyle = visibilityCheckerColor(colors);
   if (corners.outerTopLeft) {
     drawAsteroidVisibilityCheckerRockCornerArc(
       ctx,
@@ -8311,7 +8426,8 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       radius,
       -1,
       -1,
-      camera
+      camera,
+      colors
     );
   }
 
@@ -8323,7 +8439,8 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       radius,
       1,
       -1,
-      camera
+      camera,
+      colors
     );
   }
 
@@ -8335,7 +8452,8 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       radius,
       1,
       1,
-      camera
+      camera,
+      colors
     );
   }
 
@@ -8347,25 +8465,26 @@ function drawAsteroidVisibilityCheckerOuterRockCorners(ctx, x, y, right, bottom,
       radius,
       -1,
       1,
-      camera
+      camera,
+      colors
     );
   }
 }
 
-function drawAsteroidVisibilityCheckerRockCornerArc(ctx, centerX, centerY, radius, signX, signY, camera) {
+function drawAsteroidVisibilityCheckerRockCornerArc(ctx, centerX, centerY, radius, signX, signY, camera, colors) {
   const drawn = new Set();
   for (let step = 0; step <= radius; step += 1) {
     const other = Math.round(Math.sqrt(Math.max(0, radius * radius - step * step)));
-    drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, centerX + signX * step, centerY + signY * other, camera);
-    drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, centerX + signX * other, centerY + signY * step, camera);
+    drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, centerX + signX * step, centerY + signY * other, camera, colors);
+    drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, centerX + signX * other, centerY + signY * step, camera, colors);
   }
 }
 
-function drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, x, y, camera) {
+function drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, x, y, camera, colors) {
   const px = Math.round(x);
   const py = Math.round(y);
   const key = `${px}:${py}`;
-  if (drawn.has(key) || !asteroidVisibilityCheckerPixelOn(px, py, camera)) {
+  if (drawn.has(key) || (!visibilityCheckerSolid(colors) && !asteroidVisibilityCheckerPixelOn(px, py, camera))) {
     return;
   }
 
@@ -8443,9 +8562,10 @@ function drawAsteroidVisibilityCheckerLine(ctx, x0, y0, x1, y1, camera, colors) 
   const sy = y0 < y1 ? 1 : -1;
   let error = dx + dy;
 
-  ctx.fillStyle = colors.background;
+  ctx.fillStyle = visibilityCheckerColor(colors);
+  const solid = visibilityCheckerSolid(colors);
   while (true) {
-    if (asteroidVisibilityCheckerPixelOn(x, y, camera)) {
+    if (solid || asteroidVisibilityCheckerPixelOn(x, y, camera)) {
       ctx.fillRect(x, y, 1, 1);
     }
     if (x === x1 && y === y1) {
@@ -11509,6 +11629,8 @@ function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, 
     palette: {
       background: colors.background || SUB_MODE_COLORS.background,
       backgroundDark: colors.backgroundDark || SUB_MODE_COLORS.backgroundDark,
+      shadow: colors.shadow || SUB_MODE_COLORS.shadow,
+      shadowAlpha: Number.isFinite(colors.shadowAlpha) ? colors.shadowAlpha : SUB_MODE_COLORS.shadowAlpha,
       rockFill: colors.rockFill || SUB_MODE_COLORS.rockFill,
       wallFill: colors.wallFill || SUB_MODE_COLORS.wallFill,
       backing: colors.backing || SUB_MODE_COLORS.backing
