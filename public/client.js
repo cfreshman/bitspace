@@ -527,6 +527,7 @@ const state = {
 };
 
 state.menu.themeBaseId = themePresetIdForTheme(state.theme);
+updateDocumentTitleForMenuMode();
 
 setBotDebugEnabled(state.botDebugOverlay);
 installControlHandles();
@@ -3007,9 +3008,27 @@ function toggleMenuMode() {
 function setMenuMode(mode) {
   state.menu.mode = normalizeMenuMode(mode);
   saveMenuMode(state.menu.mode);
+  updateDocumentTitleForMenuMode();
   rebuildMenuAsteroidsForMode(state.menu.mode);
   rebuildMenuArena();
   requestMechanicalBeep();
+}
+
+function menuTitleLabelForMode(mode = selectedMenuMode()) {
+  const normalized = normalizeMenuMode(mode);
+  if (normalized === GAME_MODES.cars) {
+    return "BITSPACE: CARS";
+  }
+  if (normalized === GAME_MODES.subs) {
+    return "BITSPACE: SUBS";
+  }
+  return "BITSPACE";
+}
+
+function updateDocumentTitleForMenuMode(mode = selectedMenuMode()) {
+  if (typeof document !== "undefined") {
+    document.title = menuTitleLabelForMode(mode);
+  }
 }
 
 function rebuildMenuAsteroidsForMode(mode = selectedMenuMode()) {
@@ -5341,7 +5360,7 @@ function menuEntities() {
   const themeDisabled = currentMode !== GAME_MODES.bitspace;
 
   return [
-    menuTitle("menu-title", "BITSPACE", MENU_ESRB_SUBTITLE, center.x, titleY),
+    menuTitle("menu-title", menuTitleLabelForMode(currentMode), MENU_ESRB_SUBTITLE, center.x, titleY),
     menuButton("menu-ready", "ready", "READY", center.x - buttonWidth / 2, readyY, buttonWidth),
     menuHint("menu-controls", controlsRows, center.x, controlsY),
     menuButton(`menu-mode-${alternateModes[0]}`, "set-mode", menuModeLabel(alternateModes[0]), modeButtonX, carsY, buttonWidth, {
