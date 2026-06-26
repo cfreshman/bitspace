@@ -4,7 +4,8 @@ export const BRAND = Object.freeze({
 
 export const GAME_MODES = Object.freeze({
   bitspace: "bitspace",
-  cars: "cars"
+  cars: "cars",
+  subs: "subs"
 });
 
 export const RENDER = Object.freeze({
@@ -26,6 +27,8 @@ const SHIP_FRICTION = Math.max(
   0,
   Math.min(0.999, 1 - (SHIP_THRUST / ENGINE_TICK_RATE) / SHIP_BASE_TERMINAL_SPEED)
 );
+const SUB_BASE_FRICTION = Math.min(0.999, SHIP_FRICTION + 0.032);
+const SUB_FRICTION = Math.min(0.999, 1 - (1 - SUB_BASE_FRICTION) * 0.25);
 
 export const ENGINE = Object.freeze({
   tickRate: ENGINE_TICK_RATE,
@@ -80,6 +83,10 @@ export const ENGINE = Object.freeze({
     driveMultiplier: 1,
     turnRate: 6.5,
     lateralFriction: 0.88
+  },
+  subs: {
+    thrustMultiplier: 0.18,
+    friction: SUB_FRICTION
   },
   player: {
     startingHealthBars: 3,
@@ -141,3 +148,20 @@ export const ENGINE = Object.freeze({
     shakeDecay: 8
   }
 });
+
+export function shipFrictionForGameMode(gameMode) {
+  if (gameMode === GAME_MODES.cars) {
+    return ENGINE.car.friction;
+  }
+  if (gameMode === GAME_MODES.subs) {
+    return ENGINE.subs.friction;
+  }
+  return ENGINE.ship.friction;
+}
+
+export function shipThrustForGameMode(gameMode) {
+  if (gameMode === GAME_MODES.subs) {
+    return ENGINE.ship.thrust * ENGINE.subs.thrustMultiplier;
+  }
+  return ENGINE.ship.thrust;
+}

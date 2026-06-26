@@ -35,19 +35,26 @@ const CAR_MODE_COLORS = Object.freeze({
   grassground: "#5f7d37",
   grassgroundDark: "#4f6f32",
   backing: "#1f0d0a",
-  trueBacking: "#1f0d0a",
   ore: "#c1aa7d",
   diamond: "#3fb8ff",
-  diamondLight: "#b9f2ff",
   rockFill: "#9d512f",
   rockLine: "#6c2d1c",
   wallFill: "#783624",
   wallLine: "#d78a52",
-  rock: "#9d512f",
   rockDark: "#5d2a1d",
-  rockLight: "#dc8951",
-  wall: "#783624",
   health: "#28100c"
+});
+const SUB_MODE_COLORS = Object.freeze({
+  foreground: "#d8f6ff",
+  background: "#226dce",
+  backgroundDark: "#265189",
+  backing: "#0a1a2f",
+  // trueBacking: "#000000",
+  ore: "#d7b78f",
+  diamond: "#00f7ff",
+  rockLine: "#17345a",
+  bodyFill: "#222222",
+  health: "#48f06d"
 });
 const CAR_BODY_COLORS = Object.freeze([
   "#ff3024",
@@ -86,6 +93,9 @@ const TIRE_TRACK_LIFE_SECONDS = 8;
 const TIRE_TRACK_BACKGROUND_MIXES = Object.freeze([0.16, 0.22, 0.28]);
 const TIRE_TRACK_STAMP_SIZE = 3;
 const CAR_THRUSTER_PARTICLE_KIND = "car-thruster";
+const SUB_THRUSTER_PARTICLE_KIND = "sub-thruster";
+const SUB_WAVE_SIM_SIZE = 256;
+const SUB_WAVE_SIM_FPS = 30;
 const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
   "#ffffff",
   "#fff6c8",
@@ -104,6 +114,13 @@ function renderGameParams(snapshot, options = {}) {
 }
 
 function colorsForGameMode(colors, gameMode, params = {}) {
+  if (gameMode === GAME_MODES.subs) {
+    return {
+      ...colors,
+      ...SUB_MODE_COLORS
+    };
+  }
+
   if (gameMode !== GAME_MODES.cars) {
     return colors;
   }
@@ -126,15 +143,19 @@ function trueBackingColor(colors) {
 }
 
 function rockOuterBevelRadiusForGameMode(gameMode = GAME_MODES.bitspace) {
-  return gameMode === GAME_MODES.cars
+  return usesCarRockRenderer(gameMode)
     ? CAR_ROCK_OUTER_BEVEL_RADIUS
     : ROCK_OUTER_CORNER_RADIUS;
 }
 
 function asteroidVisibilityOuterBevelRadiusForGameMode(gameMode = GAME_MODES.bitspace) {
-  return gameMode === GAME_MODES.cars
+  return usesCarRockRenderer(gameMode)
     ? CAR_ROCK_OUTER_BEVEL_RADIUS
     : ASTEROID_VISIBILITY_OUTER_BEVEL_RADIUS;
+}
+
+function usesCarRockRenderer(gameMode = GAME_MODES.bitspace) {
+  return gameMode === GAME_MODES.cars || gameMode === GAME_MODES.subs;
 }
 
 const CANVAS_EDGE_PADDING_EM = 1;
@@ -199,6 +220,7 @@ const STORM_WARNING_BUFFER_OFFSETS = Object.freeze([
 const ROCK_OUTER_CORNER_RADIUS = Math.round(RENDER.tileSize / 3);
 const ROCK_INNER_CORNER_RADIUS = 1;
 const CAR_ROCK_OUTLINE_WIDTH = 8;
+const SUB_ROCK_OUTLINE_WIDTH = 2;
 const CAR_ROCK_OUTER_BEVEL_RADIUS = Math.max(1, ROCK_OUTER_CORNER_RADIUS - 1);
 const ROCK_BEVEL_INNER_EDGE_TOLERANCE = 0.25;
 const ROCK_INNER_BEVEL_ENDPOINT_TOLERANCE = 0.75;
@@ -231,6 +253,30 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   lifeMax: 1,
   nozzleMin: 0.33,
   nozzleMax: 0.5,
+});
+const SUB_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
+  rate: .5,
+  plumeSpeed: 0.5,
+  life: 0.5,
+  nozzle: 15,
+  spread: 4
+});
+const SUB_THRUSTER_ENGINE_RAMP_MAXES = Object.freeze({
+  rate: 1,
+  plumeSpeed: 2,
+  life: 0.5,
+  nozzle: 15,
+  spread: 6
+});
+const SUB_THRUSTER_ENGINE_RAMP_MAX_DEBUG = false;
+const SUB_THRUSTER_ENGINE_RAMP = Object.freeze({
+  ...Object.keys(SUB_THRUSTER_ENGINE_RAMP_MINS).reduce((acc, key) => {
+    const min = SUB_THRUSTER_ENGINE_RAMP_MAX_DEBUG ? SUB_THRUSTER_ENGINE_RAMP_MAXES[key] : SUB_THRUSTER_ENGINE_RAMP_MINS[key];
+    const max = SUB_THRUSTER_ENGINE_RAMP_MAXES[key];
+    acc[key + 'Min'] = min;
+    acc[key + 'Max'] = max;
+    return acc;
+  }, {})
 });
 const CAR_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
   rate: 2,
@@ -1036,6 +1082,7 @@ function createPixelSurface(canvasContext, width, height) {
   let activeWorldMask = null;
   let queuedGpuStormLayers = [];
   let queuedGpuCheckerLayer = null;
+  let queuedGpuCausticLayer = null;
 
   function circleSpansForInset(inset) {
     const key = Math.max(0, Math.floor(inset));
@@ -1284,6 +1331,7 @@ function createPixelSurface(canvasContext, width, height) {
     clear() {
       queuedGpuStormLayers = [];
       queuedGpuCheckerLayer = null;
+      queuedGpuCausticLayer = null;
       pixels.fill(0);
     },
     getImageData() {
@@ -1310,6 +1358,13 @@ function createPixelSurface(canvasContext, width, height) {
         return false;
       }
       queuedGpuCheckerLayer = layer;
+      return true;
+    },
+    queueGpuCausticLayer(layer) {
+      if (!layer) {
+        return false;
+      }
+      queuedGpuCausticLayer = layer;
       return true;
     },
     drawCircleBorder(color, thickness = 1, inset = 0) {
@@ -1739,15 +1794,17 @@ function createPixelSurface(canvasContext, width, height) {
     present(presenter = null, overlaySurfaces = null) {
       const stormLayers = queuedGpuStormLayers;
       const checkerLayer = queuedGpuCheckerLayer;
+      const causticLayer = queuedGpuCausticLayer;
       queuedGpuStormLayers = [];
       queuedGpuCheckerLayer = null;
+      queuedGpuCausticLayer = null;
       const overlayList = Array.isArray(overlaySurfaces)
         ? overlaySurfaces
         : overlaySurfaces ? [overlaySurfaces] : [];
       const overlayImageDatas = overlayList
         .map((overlaySurface) => overlaySurface?.getImageData?.() || null)
         .filter(Boolean);
-      if (presenter?.present?.(imageData, { checkerLayer, stormLayers, overlays: overlayImageDatas })) {
+      if (presenter?.present?.(imageData, { checkerLayer, stormLayers, causticLayer, overlays: overlayImageDatas })) {
         return;
       }
 
@@ -1790,11 +1847,14 @@ function createGpuFramePresenter(canvas, width, height) {
     const stormProgram = createGpuProgram(gl, GPU_STORM_VERTEX_SHADER, GPU_STORM_FRAGMENT_SHADER, "GPU frame storm");
     const compositeProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_FRAME_STORM_FRAGMENT_SHADER, "GPU frame storm composite");
     const stormOverlayProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_STORM_OVER_FRAGMENT_SHADER, "GPU frame storm overlay");
+    const causticProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_FRAME_CAUSTIC_FRAGMENT_SHADER, "GPU frame caustics");
+    const waveProgram = createGpuProgram(gl, GPU_FRAME_VERTEX_SHADER, GPU_WAVE_SIM_FRAGMENT_SHADER, "GPU wave sim");
     if (!program || !overlayProgram) {
       return null;
     }
     const supportsChecker = Boolean(checkerProgram);
     const supportsStorm = Boolean(stormProgram && compositeProgram && stormOverlayProgram);
+    const supportsCaustics = Boolean(causticProgram && waveProgram);
 
     const positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -1830,6 +1890,27 @@ function createGpuFramePresenter(canvas, width, height) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, stormFramebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, stormTexture, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const causticSourceTexture = createNearestTexture(gl);
+    const causticSourceFramebuffer = gl.createFramebuffer();
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, causticSourceTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, causticSourceFramebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, causticSourceTexture, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const waveTextures = [createWaveSimTexture(gl), createWaveSimTexture(gl)];
+    const waveFramebuffers = [gl.createFramebuffer(), gl.createFramebuffer()];
+    for (let index = 0; index < waveTextures.length; index += 1) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, waveFramebuffers[index]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, waveTextures[index], 0);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let waveReadIndex = 0;
+    let waveWriteIndex = 1;
+    let waveSeedKey = "";
+    let waveLastFrame = -1;
 
     const gridTexture = createNearestTexture(gl);
     const permTexture = createNearestTexture(gl);
@@ -1900,6 +1981,32 @@ function createGpuFramePresenter(canvas, width, height) {
         backgroundColor: gl.getUniformLocation(stormOverlayProgram, "u_backgroundColor"),
         foregroundColor: gl.getUniformLocation(stormOverlayProgram, "u_foregroundColor"),
         backingColor: gl.getUniformLocation(stormOverlayProgram, "u_backingColor")
+      }
+      : null;
+    const causticLocations = supportsCaustics
+      ? {
+        position: gl.getAttribLocation(causticProgram, "a_position"),
+        frame: gl.getUniformLocation(causticProgram, "u_frame"),
+        resolution: gl.getUniformLocation(causticProgram, "u_resolution"),
+        camera: gl.getUniformLocation(causticProgram, "u_camera"),
+        time: gl.getUniformLocation(causticProgram, "u_time"),
+        seed: gl.getUniformLocation(causticProgram, "u_seed"),
+        backgroundColor: gl.getUniformLocation(causticProgram, "u_backgroundColor"),
+        backgroundDarkColor: gl.getUniformLocation(causticProgram, "u_backgroundDarkColor"),
+        rockFillColor: gl.getUniformLocation(causticProgram, "u_rockFillColor"),
+        wallFillColor: gl.getUniformLocation(causticProgram, "u_wallFillColor"),
+        backingColor: gl.getUniformLocation(causticProgram, "u_backingColor"),
+        wave: gl.getUniformLocation(causticProgram, "u_wave"),
+        waveSize: gl.getUniformLocation(causticProgram, "u_waveSize")
+      }
+      : null;
+    const waveLocations = supportsCaustics
+      ? {
+        position: gl.getAttribLocation(waveProgram, "a_position"),
+        previous: gl.getUniformLocation(waveProgram, "u_previous"),
+        texel: gl.getUniformLocation(waveProgram, "u_texel"),
+        time: gl.getUniformLocation(waveProgram, "u_time"),
+        seed: gl.getUniformLocation(waveProgram, "u_seed")
       }
       : null;
     const stormLocations = supportsStorm
@@ -2243,6 +2350,71 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    function initializeWaveSimulation(seed) {
+      const data = waveSimulationInitialData(seed, SUB_WAVE_SIM_SIZE);
+      for (const texture of waveTextures) {
+        gl.activeTexture(gl.TEXTURE7);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          0,
+          SUB_WAVE_SIM_SIZE,
+          SUB_WAVE_SIM_SIZE,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          data
+        );
+      }
+    }
+
+    function stepWaveSimulation(layer) {
+      if (!supportsCaustics || !layer) {
+        return false;
+      }
+
+      const seed = String(layer.seed || "subs");
+      const frame = Math.floor(Number(layer.timeSeconds || 0) * SUB_WAVE_SIM_FPS);
+      if (waveSeedKey !== seed) {
+        initializeWaveSimulation(seed);
+        waveSeedKey = seed;
+        waveLastFrame = frame - 1;
+        waveReadIndex = 0;
+        waveWriteIndex = 1;
+      }
+
+      const stepCount = clamp(frame - waveLastFrame, 0, 2) | 0;
+      if (stepCount <= 0) {
+        return true;
+      }
+
+      gl.useProgram(waveProgram);
+      bindFullscreenAttributes(waveLocations);
+      gl.viewport(0, 0, SUB_WAVE_SIM_SIZE, SUB_WAVE_SIM_SIZE);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+      gl.uniform2f(waveLocations.texel, 1 / SUB_WAVE_SIM_SIZE, 1 / SUB_WAVE_SIM_SIZE);
+      gl.uniform1f(waveLocations.seed, seedToUnitFloat(seed));
+
+      for (let step = 0; step < stepCount; step += 1) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, waveFramebuffers[waveWriteIndex]);
+        gl.activeTexture(gl.TEXTURE7);
+        gl.bindTexture(gl.TEXTURE_2D, waveTextures[waveReadIndex]);
+        gl.uniform1i(waveLocations.previous, 7);
+        gl.uniform1f(waveLocations.time, (waveLastFrame + step + 1) / SUB_WAVE_SIM_FPS);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        const previousRead = waveReadIndex;
+        waveReadIndex = waveWriteIndex;
+        waveWriteIndex = previousRead;
+      }
+
+      waveLastFrame = frame;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+      return true;
+    }
+
     function drawOverlayOverCurrent() {
       gl.useProgram(overlayProgram);
       bindFullscreenAttributes(overlayLocations);
@@ -2252,19 +2424,61 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    function drawCausticsOverCurrent(layer) {
+      if (!supportsCaustics || !layer) {
+        return false;
+      }
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+      stepWaveSimulation(layer);
+
+      const palette = layer.palette || {};
+      const background = rgbFloatsForHex(palette.background || SUB_MODE_COLORS.background);
+      const backgroundDark = rgbFloatsForHex(palette.backgroundDark || SUB_MODE_COLORS.backgroundDark);
+      const rockFill = rgbFloatsForHex(palette.rockFill || SUB_MODE_COLORS.rockFill);
+      const wallFill = rgbFloatsForHex(palette.wallFill || SUB_MODE_COLORS.wallFill);
+      const backing = rgbFloatsForHex(palette.backing || "#000000");
+      gl.useProgram(causticProgram);
+      bindFullscreenAttributes(causticLocations);
+      gl.activeTexture(gl.TEXTURE6);
+      gl.bindTexture(gl.TEXTURE_2D, causticSourceTexture);
+      gl.uniform1i(causticLocations.frame, 6);
+      gl.uniform2f(causticLocations.resolution, width, height);
+      gl.uniform2f(causticLocations.camera, Number(layer.camera?.x || 0), Number(layer.camera?.y || 0));
+      gl.uniform1f(causticLocations.time, Number(layer.timeSeconds || 0));
+      gl.uniform1f(causticLocations.seed, seedToUnitFloat(layer.seed || "subs"));
+      gl.uniform3f(causticLocations.backgroundColor, background[0], background[1], background[2]);
+      gl.uniform3f(causticLocations.backgroundDarkColor, backgroundDark[0], backgroundDark[1], backgroundDark[2]);
+      gl.uniform3f(causticLocations.rockFillColor, rockFill[0], rockFill[1], rockFill[2]);
+      gl.uniform3f(causticLocations.wallFillColor, wallFill[0], wallFill[1], wallFill[2]);
+      gl.uniform3f(causticLocations.backingColor, backing[0], backing[1], backing[2]);
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D, waveTextures[waveReadIndex]);
+      gl.uniform1i(causticLocations.wave, 7);
+      gl.uniform1f(causticLocations.waveSize, SUB_WAVE_SIM_SIZE);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      return true;
+    }
+
     return {
       supportsChecker,
       supportsStorm,
+      supportsCaustics,
       present(imageData, options = {}) {
         if (!imageData || imageData.width !== width || imageData.height !== height) {
           return false;
         }
 
         uploadFrame(imageData);
+        const causticLayer = supportsCaustics ? options.causticLayer : null;
+        const baseFramebuffer = causticLayer ? causticSourceFramebuffer : null;
         gl.viewport(0, 0, width, height);
         gl.disable(gl.DEPTH_TEST);
         gl.disable(gl.BLEND);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, baseFramebuffer);
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
         const checkerLayer = options.checkerLayer || null;
@@ -2280,6 +2494,8 @@ function createGpuFramePresenter(canvas, width, height) {
             continue;
           }
 
+          gl.bindFramebuffer(gl.FRAMEBUFFER, baseFramebuffer);
+          gl.viewport(0, 0, width, height);
           if (!drewFrame) {
             drawFrameWithStorm(stormLayer);
             drewFrame = true;
@@ -2297,7 +2513,21 @@ function createGpuFramePresenter(canvas, width, height) {
         const overlays = Array.isArray(options.overlays)
           ? options.overlays
           : options.overlay ? [options.overlay] : [];
-        for (const overlay of overlays) {
+        let overlayStartIndex = 0;
+        if (causticLayer && overlays.length > 0 && uploadOverlay(overlays[0])) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, baseFramebuffer);
+          gl.viewport(0, 0, width, height);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          drawOverlayOverCurrent();
+          gl.disable(gl.BLEND);
+          overlayStartIndex = 1;
+        }
+        if (causticLayer) {
+          drawCausticsOverCurrent(causticLayer);
+        }
+        for (let overlayIndex = overlayStartIndex; overlayIndex < overlays.length; overlayIndex += 1) {
+          const overlay = overlays[overlayIndex];
           if (uploadOverlay(overlay)) {
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -2322,6 +2552,53 @@ function createNearestTexture(gl) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   return texture;
+}
+
+function createWaveSimTexture(gl) {
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    gl.RGBA,
+    SUB_WAVE_SIM_SIZE,
+    SUB_WAVE_SIM_SIZE,
+    0,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    null
+  );
+  return texture;
+}
+
+function waveSimulationInitialData(seed, size) {
+  const data = new Uint8Array(size * size * 4);
+  const phaseSeed = seed || "subs";
+  const phaseA = randomUnit(hashCell(phaseSeed, 11, 17), 1);
+  const phaseB = randomUnit(hashCell(phaseSeed, 23, 31), 2);
+  const phaseC = randomUnit(hashCell(phaseSeed, 37, 43), 3);
+  const phaseD = randomUnit(hashCell(phaseSeed, 53, 61), 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const offset = (y * size + x) * 4;
+      const u = x / size;
+      const v = y / size;
+      const wave =
+        Math.sin((u * 2.2 + v * 0.7 + phaseA) * Math.PI * 2) * 0.40 +
+        Math.sin((u * -0.8 + v * 1.9 + phaseB) * Math.PI * 2) * 0.28 +
+        Math.sin((u * 4.1 + v * -2.7 + phaseC) * Math.PI * 2) * 0.10 +
+        Math.sin((u * -5.3 + v * -4.6 + phaseD) * Math.PI * 2) * 0.06;
+      data[offset] = clamp(Math.round(128 + wave * 24), 0, 255);
+      data[offset + 1] = 128;
+      data[offset + 2] = 128;
+      data[offset + 3] = 255;
+    }
+  }
+  return data;
 }
 
 function createGpuStormRenderer(width, height) {
@@ -2749,6 +3026,176 @@ varying vec2 v_texCoord;
 
 void main() {
   gl_FragColor = texture2D(u_frame, v_texCoord);
+}
+`;
+
+const GPU_WAVE_SIM_FRAGMENT_SHADER = `
+precision highp float;
+
+uniform sampler2D u_previous;
+uniform vec2 u_texel;
+uniform float u_time;
+uniform float u_seed;
+varying vec2 v_texCoord;
+
+float sampleHeight(vec2 uv) {
+  return texture2D(u_previous, fract(uv)).r * 2.0 - 1.0;
+}
+
+float sampleVelocity(vec2 uv) {
+  return texture2D(u_previous, fract(uv)).g * 2.0 - 1.0;
+}
+
+float windForce(vec2 uv) {
+  float phase = u_seed * 6.28318;
+  float a = sin(dot(uv, vec2(17.0, 6.0)) + u_time * 1.10 + phase);
+  float b = sin(dot(uv, vec2(-8.0, 19.0)) - u_time * 0.82 + phase * 1.37);
+  float c = sin(dot(uv, vec2(29.0, -13.0)) + u_time * 1.64 + phase * 2.11);
+  float d = sin(dot(uv, vec2(-23.0, -31.0)) - u_time * 1.43 + phase * 0.73);
+  return (a * 0.46 + b * 0.30 + c * 0.16 + d * 0.08) * 0.0085;
+}
+
+void main() {
+  vec2 uv = fract(v_texCoord);
+  float center = sampleHeight(uv);
+  float left = sampleHeight(uv - vec2(u_texel.x, 0.0));
+  float right = sampleHeight(uv + vec2(u_texel.x, 0.0));
+  float up = sampleHeight(uv - vec2(0.0, u_texel.y));
+  float down = sampleHeight(uv + vec2(0.0, u_texel.y));
+  float upLeft = sampleHeight(uv - u_texel);
+  float upRight = sampleHeight(uv + vec2(u_texel.x, -u_texel.y));
+  float downLeft = sampleHeight(uv + vec2(-u_texel.x, u_texel.y));
+  float downRight = sampleHeight(uv + u_texel);
+  float velocity = sampleVelocity(uv);
+  float neighborAverage = (left + right + up + down) * 0.20 +
+    (upLeft + upRight + downLeft + downRight) * 0.05;
+  float laplacian = neighborAverage - center;
+  velocity = (velocity + laplacian * 0.82 + windForce(uv)) * 0.991;
+  center = clamp(center + velocity * 0.66, -0.94, 0.94) * 0.9985;
+  gl_FragColor = vec4(center * 0.5 + 0.5, velocity * 0.5 + 0.5, 0.5, 1.0);
+}
+`;
+
+const GPU_FRAME_CAUSTIC_FRAGMENT_SHADER = `
+precision highp float;
+
+uniform sampler2D u_frame;
+uniform sampler2D u_wave;
+uniform vec2 u_resolution;
+uniform vec2 u_camera;
+uniform float u_time;
+uniform float u_seed;
+uniform float u_waveSize;
+uniform vec3 u_backgroundColor;
+uniform vec3 u_backgroundDarkColor;
+uniform vec3 u_rockFillColor;
+uniform vec3 u_wallFillColor;
+uniform vec3 u_backingColor;
+varying vec2 v_texCoord;
+
+float waveHeight(vec2 uv) {
+  vec2 wrapped = fract(uv);
+  return texture2D(u_wave, vec2(wrapped.x, 1.0 - wrapped.y)).r * 2.0 - 1.0;
+}
+
+vec2 waveGradient(vec2 uv) {
+  float texel = 1.0 / u_waveSize;
+  float left = waveHeight(uv - vec2(texel, 0.0));
+  float right = waveHeight(uv + vec2(texel, 0.0));
+  float up = waveHeight(uv - vec2(0.0, texel));
+  float down = waveHeight(uv + vec2(0.0, texel));
+  return vec2(right - left, down - up) * 0.5;
+}
+
+float waveCurvature(vec2 uv) {
+  float texel = 1.0 / u_waveSize;
+  float center = waveHeight(uv);
+  float left = waveHeight(uv - vec2(texel, 0.0));
+  float right = waveHeight(uv + vec2(texel, 0.0));
+  float up = waveHeight(uv - vec2(0.0, texel));
+  float down = waveHeight(uv + vec2(0.0, texel));
+  return left + right + up + down - center * 4.0;
+}
+
+vec4 oceanWaveTerm(vec2 point, vec2 direction, float wavelength, float speed, float amplitude, float phaseOffset) {
+  vec2 dir = normalize(direction);
+  float k = 6.2831853 / wavelength;
+  float phase = dot(point, dir) * k + u_time * speed + u_seed * phaseOffset;
+  float s = sin(phase);
+  float c = cos(phase);
+  return vec4(
+    s * amplitude,
+    dir.x * k * amplitude * c,
+    dir.y * k * amplitude * c,
+    -k * k * amplitude * s
+  );
+}
+
+vec4 oceanSurface(vec2 point) {
+  vec4 wave = vec4(0.0);
+  wave += oceanWaveTerm(point, vec2(0.92, 0.38), 112.0, 0.62, 0.62, 5.17);
+  wave += oceanWaveTerm(point, vec2(0.48, 0.88), 71.0, 0.92, 0.34, 9.41);
+  wave += oceanWaveTerm(point, vec2(-0.76, 0.65), 43.0, 1.28, 0.18, 15.83);
+  wave += oceanWaveTerm(point, vec2(0.17, 0.99), 29.0, 1.75, 0.09, 23.29);
+
+  vec2 simUv = point * 0.0045 + vec2(u_seed * 3.17, u_seed * 5.83);
+  float simHeight = waveHeight(simUv);
+  vec2 simGradient = waveGradient(simUv) * 0.12;
+  float simCurvature = waveCurvature(simUv) * 0.08;
+  wave.x += simHeight * 0.22;
+  wave.yz += simGradient;
+  wave.w += simCurvature;
+  return wave;
+}
+
+void main() {
+  vec2 frameUv = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
+  vec4 sourceFrame = texture2D(u_frame, frameUv);
+  vec2 screen = floor(v_texCoord * u_resolution);
+  vec2 center = u_resolution * 0.5;
+  vec2 delta = screen + vec2(0.5) - center;
+  float radius = min(u_resolution.x, u_resolution.y) * 0.5;
+  if (dot(delta, delta) > radius * radius) {
+    gl_FragColor = sourceFrame;
+    return;
+  }
+
+  float waveHeightScale = 0.1;
+  vec2 world = screen + u_camera;
+  vec2 viewAxis = normalize(vec2(0.34, -0.94));
+  vec2 viewSide = vec2(-viewAxis.y, viewAxis.x);
+  vec2 projectedWorld = vec2(dot(world, viewSide), dot(world, viewAxis) * 0.62);
+  vec4 ocean = oceanSurface(projectedWorld);
+  float height = ocean.x * waveHeightScale;
+  vec2 gradient = ocean.yz * waveHeightScale;
+  vec2 screenGradient = viewSide * gradient.x + viewAxis * gradient.y * 0.62;
+  vec2 simNormal = screenGradient * 32.0;
+  vec3 normal = normalize(vec3(-simNormal.x, -simNormal.y, 1.0));
+  vec3 flatNormal = vec3(0.0, 0.0, 1.0);
+  vec3 viewDir = normalize(vec3(viewAxis.x * 0.5, viewAxis.y * 0.5, 0.8660254));
+  vec3 lightDir = normalize(vec3(-0.22, -0.36, 0.91));
+  float normalDeviation = 1.0 - clamp(dot(normal, flatNormal), 0.0, 1.0);
+  float waterOpacity = smoothstep(0.004, 0.105, normalDeviation);
+  vec2 offset = (screenGradient * 560.0 + viewAxis * height * 7.0) * 0.5;
+  vec2 refractedUv = clamp(frameUv + offset / u_resolution, vec2(0.0), vec2(1.0));
+  vec4 refractedFrame = texture2D(u_frame, refractedUv);
+  vec4 frame = refractedFrame;
+  float wave = height * 0.5 + 0.5;
+  float fresnel = pow(1.0 - clamp(dot(normal, viewDir), 0.0, 1.0), 3.0);
+  float depthFade = smoothstep(radius * 0.98, radius * 0.18, length(delta));
+  float lambert = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
+  vec3 waterSurface = mix(u_backgroundColor, u_backgroundDarkColor, clamp(0.35 + wave * 0.35 + lambert * 0.30, 0.0, 1.0));
+  float surfaceAlpha = clamp((waterOpacity * 0.34 + fresnel * 0.16) * depthFade * 0.25, 0.0, 0.12);
+  frame.rgb = mix(frame.rgb, waterSurface, surfaceAlpha);
+  float normalShade = smoothstep(0.004, 0.105, normalDeviation) * depthFade;
+  float normalHighlight = normalShade * smoothstep(0.58, 0.90, lambert);
+  float normalShadow = normalShade * (1.0 - smoothstep(0.30, 0.62, lambert));
+  float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 36.0) * depthFade;
+  vec3 shadowColor = mix(u_backgroundDarkColor, u_backingColor, 0.35);
+  frame.rgb = mix(frame.rgb, shadowColor, clamp(normalShadow * 0.26, 0.0, 0.20));
+  frame.rgb = mix(frame.rgb, vec3(1.0), clamp(normalHighlight * 0.34, 0.0, 0.28));
+  frame.rgb = mix(frame.rgb, vec3(1.0), clamp(specular * 0.18, 0.0, 0.16));
+  gl_FragColor = vec4(frame.rgb, frame.a);
 }
 `;
 
@@ -3903,21 +4350,25 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         }
         measureBucket("backgroundMs", () => drawVisibleBackground(ctx, options.asteroid, camera, visibility, colors));
         ctx.fillStyle = colors.foreground;
-        measureBucket("starsMs", () => {
-          if (options.gameMode === GAME_MODES.cars) {
-            drawGroundDebris(ctx, snapshot, camera, visibility, colors, options.timeSeconds ?? snapshot.tick / 60);
-          } else {
-            drawStars(ctx, snapshot, camera, visibility);
-          }
-        });
+        measureBucket("starsMs", () => drawWorldAmbient(
+          ctx,
+          snapshot,
+          camera,
+          visibility,
+          colors,
+          options.timeSeconds ?? snapshot.tick / 60,
+          options.gameMode
+        ));
       } else {
-        measureBucket("starsMs", () => {
-          if (options.gameMode === GAME_MODES.cars) {
-            drawGroundDebris(ctx, snapshot, camera, null, colors, options.timeSeconds ?? snapshot.tick / 60);
-          } else {
-            drawStars(ctx, snapshot, camera);
-          }
-        });
+        measureBucket("starsMs", () => drawWorldAmbient(
+          ctx,
+          snapshot,
+          camera,
+          null,
+          colors,
+          options.timeSeconds ?? snapshot.tick / 60,
+          options.gameMode
+        ));
       }
       if (options.asteroid) {
         measureBucket("asteroidMs", () => drawAsteroid(
@@ -3983,7 +4434,11 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
     measureBucket("raysMs", () => {
       for (const renderPlayer of worldRenderPlayers) {
-        if (options.gameMode !== GAME_MODES.cars && renderPlayer.mining) {
+        if (
+          options.gameMode !== GAME_MODES.cars &&
+          options.gameMode !== GAME_MODES.subs &&
+          renderPlayer.mining
+        ) {
           drawWithoutWorldMask(ctx, () => {
             drawMiningRay(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors, options.gameMode);
           });
@@ -7245,27 +7700,33 @@ function drawAsteroidTiles(
     }
   }
 
-  const rockLineWidth = gameMode === GAME_MODES.cars ? CAR_ROCK_OUTLINE_WIDTH : 1;
-  for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
-    for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
-      const index = tileY * asteroid.widthTiles + tileX;
-      const tile = asteroid.tiles[index];
-      if (!isSolidTile(tile)) {
-        continue;
-      }
-      if (visibility && !asteroidVisibilityRendersShell(visibility, tileX, tileY)) {
-        continue;
-      }
+  const rockLineWidth = gameMode === GAME_MODES.cars
+    ? CAR_ROCK_OUTLINE_WIDTH
+    : gameMode === GAME_MODES.subs
+      ? SUB_ROCK_OUTLINE_WIDTH
+      : 1;
+  if (!usesCarRockRenderer(gameMode)) {
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        const index = tileY * asteroid.widthTiles + tileX;
+        const tile = asteroid.tiles[index];
+        if (!isSolidTile(tile)) {
+          continue;
+        }
+        if (visibility && !asteroidVisibilityRendersShell(visibility, tileX, tileY)) {
+          continue;
+        }
 
-      const screenX = Math.round(tileX * tileSize - camera.x);
-      const screenY = Math.round(tileY * tileSize - camera.y);
-      if (tile === ASTEROID_TILE.wall) {
-        drawWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
+        const screenX = Math.round(tileX * tileSize - camera.x);
+        const screenY = Math.round(tileY * tileSize - camera.y);
+        if (tile === ASTEROID_TILE.wall) {
+          drawWallOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
+        }
       }
     }
   }
 
-  if (gameMode === GAME_MODES.cars) {
+  if (usesCarRockRenderer(gameMode)) {
     drawRockChunkOutlines(
       ctx,
       asteroid,
@@ -7301,7 +7762,7 @@ function drawAsteroidTiles(
   }
 
   const drawResources = () => {
-    const carResources = gameMode === GAME_MODES.cars;
+    const coloredResources = gameMode === GAME_MODES.cars || gameMode === GAME_MODES.subs;
     ctx.fillStyle = colors.foreground;
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
@@ -7314,7 +7775,7 @@ function drawAsteroidTiles(
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
         if (tile === ASTEROID_TILE.ore) {
-          ctx.fillStyle = carResources ? colors.ore || colors.foreground : colors.foreground;
+          ctx.fillStyle = coloredResources ? colors.ore || colors.foreground : colors.foreground;
           const amount = amountAt(asteroid, index);
           drawOreRings(
             ctx,
@@ -7324,7 +7785,7 @@ function drawAsteroidTiles(
             amount,
             hashCell(asteroid.seed, tileX, tileY),
             oreMiningProgressFor(asteroidMiningTargets, index, amount),
-            carResources
+            coloredResources
               ? {
                   fillColor: colors.ore || colors.foreground,
                   strokeColor: colors.backing || colors.foreground
@@ -7332,7 +7793,7 @@ function drawAsteroidTiles(
               : null
           );
         } else if (tile === ASTEROID_TILE.diamond) {
-          ctx.fillStyle = carResources ? colors.diamond || colors.foreground : colors.foreground;
+          ctx.fillStyle = coloredResources ? colors.diamond || colors.foreground : colors.foreground;
           drawDiamondWireframe(
             ctx,
             screenX,
@@ -7340,7 +7801,7 @@ function drawAsteroidTiles(
             tileSize,
             hashCell(asteroid.seed, tileX, tileY),
             diamondMiningProgressFor(asteroidMiningTargets, index),
-            carResources
+            coloredResources
               ? {
                   fillColor: colors.diamond || colors.foreground,
                   edgeColor: colors.backing || colors.foreground,
@@ -9241,7 +9702,7 @@ function drawRockChunkOutlines(
   lineWidth = 1,
   gameMode = GAME_MODES.bitspace
 ) {
-  if (gameMode === GAME_MODES.cars) {
+  if (usesCarRockRenderer(gameMode)) {
     drawCarRockChunkOutlines(
       ctx,
       asteroid,
@@ -9359,6 +9820,21 @@ function drawCarRockChunkOutlines(
       drawCarRockRuns(ctx, screenX, screenY, tileMask.outlineRuns);
     }
   }
+
+  const innerJoinSegments = [];
+  pushRockInnerHoleContourSegments(
+    innerJoinSegments,
+    asteroid,
+    camera,
+    tileSize,
+    minTileX,
+    maxTileX,
+    minTileY,
+    maxTileY,
+    visibility,
+    width > 1
+  );
+  strokeRockContourSegments(ctx, innerJoinSegments, colors.rockLine || colors.foreground, width);
 }
 
 function drawCarRockRuns(ctx, screenX, screenY, runs) {
@@ -9399,6 +9875,12 @@ function carRockOutlineTileMask(tileSize, width, bevelRadius, neighborMask) {
   }
 
   const offsets = carRockOutlineOffsets(outlineWidth);
+  const bevelBridgeOffsets = outlineWidth < radius
+    ? carRockOutlineOffsets(Math.min(radius, outlineWidth + 1))
+    : null;
+  const bottomRightBevelBridgeOffsets = outlineWidth < radius
+    ? carRockOutlineOffsets(radius)
+    : null;
   const clearRows = new Uint32Array(size);
   const outlineRows = new Uint32Array(size);
 
@@ -9415,7 +9897,34 @@ function carRockOutlineTileMask(tileSize, width, bevelRadius, neighborMask) {
       if (!carRockMaskPointBlocks(neighborMask, sampleX, sampleY, size, radius)) {
         continue;
       }
-      if (carRockMaskPointTouchesOpenSpace(neighborMask, sampleX, sampleY, size, radius, offsets)) {
+      const touchesOpenSpace = carRockMaskPointTouchesOpenSpace(
+        neighborMask,
+        sampleX,
+        sampleY,
+        size,
+        radius,
+        offsets
+      );
+      const touchesBevelCutout = bevelBridgeOffsets &&
+        carRockMaskPointTouchesCenterBevelCutout(
+          neighborMask,
+          sampleX,
+          sampleY,
+          size,
+          radius,
+          bevelBridgeOffsets
+        );
+      const touchesBottomRightBevelCutout = bottomRightBevelBridgeOffsets &&
+        !touchesBevelCutout &&
+        carRockMaskPointTouchesCenterBottomRightBevelCutout(
+          neighborMask,
+          sampleX,
+          sampleY,
+          size,
+          radius,
+          bottomRightBevelBridgeOffsets
+        );
+      if (touchesOpenSpace || touchesBevelCutout || touchesBottomRightBevelCutout) {
         outlineRow |= 1 << x;
       }
     }
@@ -9439,6 +9948,48 @@ function carRockMaskPointTouchesOpenSpace(mask, x, y, tileSize, bevelRadius, off
   }
 
   return false;
+}
+
+function carRockMaskPointTouchesCenterBevelCutout(mask, x, y, tileSize, bevelRadius, offsets) {
+  for (const offset of offsets) {
+    const sampleX = x + offset.x;
+    const sampleY = y + offset.y;
+    if (sampleX < 0 || sampleY < 0 || sampleX >= tileSize || sampleY >= tileSize) {
+      continue;
+    }
+    if (carRockMaskPointInCenterBevelCutout(mask, sampleX, sampleY, tileSize, bevelRadius)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function carRockMaskPointTouchesCenterBottomRightBevelCutout(mask, x, y, tileSize, bevelRadius, offsets) {
+  for (const offset of offsets) {
+    const sampleX = x + offset.x;
+    const sampleY = y + offset.y;
+    if (sampleX < 0 || sampleY < 0 || sampleX >= tileSize || sampleY >= tileSize) {
+      continue;
+    }
+    if (carRockMaskPointInCenterBottomRightBevelCutout(mask, sampleX, sampleY, tileSize, bevelRadius)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function carRockMaskPointInCenterBottomRightBevelCutout(mask, x, y, tileSize, bevelRadius) {
+  if (
+    (mask & carRockNeighborBit(1, 0)) !== 0 ||
+    (mask & carRockNeighborBit(0, 1)) !== 0
+  ) {
+    return false;
+  }
+
+  const radius = Math.max(1, Math.floor(bevelRadius));
+  return (tileSize - x) + (tileSize - y) < radius;
 }
 
 function carRockMaskPointBlocks(mask, x, y, tileSize, bevelRadius) {
@@ -10836,6 +11387,20 @@ function drawStars(ctx, snapshot, camera, visibility = null) {
   }, visibility, camera);
 }
 
+function drawWorldAmbient(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0, gameMode = GAME_MODES.bitspace) {
+  if (gameMode === GAME_MODES.cars) {
+    drawGroundDebris(ctx, snapshot, camera, visibility, colors, timeSeconds);
+    return;
+  }
+
+  if (gameMode === GAME_MODES.subs) {
+    drawWaterDebris(ctx, snapshot, camera, visibility, colors, timeSeconds);
+    return;
+  }
+
+  drawStars(ctx, snapshot, camera, visibility);
+}
+
 function drawGroundDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0) {
   const padding = cameraCullPadding(camera);
   const minCellX = Math.floor((camera.x - padding) / GROUND_DEBRIS_CELL_SIZE) - 1;
@@ -10907,6 +11472,26 @@ function drawGroundGrassTuft(ctx, x, y, hash, timeSeconds) {
   drawPixelLine(ctx, x - 1, y, x - 2 + sway, y - 2 - ((hash >>> 2) & 1));
   drawPixelLine(ctx, x + 1, y, x + 2 + sway, y - 2 - ((hash >>> 3) & 1));
   ctx.fillRect(x - 1, y, 3, 1);
+}
+
+function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0) {
+  void visibility;
+  if (typeof ctx.queueGpuCausticLayer !== "function") {
+    return false;
+  }
+
+  return ctx.queueGpuCausticLayer({
+    camera: { x: camera.x, y: camera.y },
+    timeSeconds,
+    seed: snapshot?.arenaId || snapshot?.seed || "subs",
+    palette: {
+      background: colors.background || SUB_MODE_COLORS.background,
+      backgroundDark: colors.backgroundDark || SUB_MODE_COLORS.backgroundDark,
+      rockFill: colors.rockFill || SUB_MODE_COLORS.rockFill,
+      wallFill: colors.wallFill || SUB_MODE_COLORS.wallFill,
+      backing: colors.backing || SUB_MODE_COLORS.backing
+    }
+  });
 }
 
 function drawMenuStars(ctx, timeSeconds) {
@@ -11011,7 +11596,9 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     if (options.gameMode === GAME_MODES.cars) {
       drawCarModeHuckRockEntity(ctx, entity, camera, colors);
     } else {
-      drawHuckRockEntity(ctx, entity, camera, colors);
+      drawHuckRockEntity(ctx, entity, camera, colors, {
+        filled: options.gameMode === GAME_MODES.subs
+      });
     }
     return;
   }
@@ -11072,7 +11659,7 @@ function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {
   });
 }
 
-function drawHuckRockEntity(ctx, entity, camera, colors) {
+function drawHuckRockEntity(ctx, entity, camera, colors, options = {}) {
   const screen = worldToScreen(entity, camera);
   const radius = Number(entity.radius || ENGINE.huckRock.radius);
   const seed = entity.shapeSeed || entity.id || "huck-rock";
@@ -11088,7 +11675,13 @@ function drawHuckRockEntity(ctx, entity, camera, colors) {
     return;
   }
 
-  ctx.fillStyle = colors.foreground;
+  if (options.filled) {
+    fillConvexPolygon(ctx, hull, colors.rockFill || colors.rockLine || colors.foreground);
+  }
+
+  ctx.fillStyle = options.filled
+    ? colors.rockLine || colors.foreground
+    : colors.foreground;
   for (let index = 0; index < hull.length; index += 1) {
     const from = hull[index];
     const to = hull[(index + 1) % hull.length];
@@ -11469,6 +12062,20 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
     return;
   }
 
+  if (gameMode === GAME_MODES.subs) {
+    drawSubmarineBody(ctx, x, y, player, mainRadius, bodyAngle, colors, () => {
+      if (player.mining) {
+        drawWithoutWorldMask(ctx, () => {
+          drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameMode);
+        });
+      }
+      drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
+    });
+    drawShipHealthIndicator(ctx, x, y, player, colors);
+    drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+    return;
+  }
+
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
     const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
     const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
@@ -11487,6 +12094,194 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
 
   drawShipHealthIndicator(ctx, x, y, player, colors);
   drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+}
+
+function drawSubmarineBody(ctx, x, y, player, radius, angle, colors, drawMiddleLayer = null) {
+  const forward = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const side = {
+    x: -forward.y,
+    y: forward.x
+  };
+  const rear = {
+    x: -forward.x,
+    y: -forward.y
+  };
+
+  const bodyColors = {
+    ...colors,
+    foreground: colors.bodyFill || "#000000",
+    background: colors.bodyFill || "#000000"
+  };
+
+  drawSubmarinePropellerBodyConnector(ctx, x, y, radius, rear, side, bodyColors);
+  drawSubmarinePropellerBracket(ctx, x, y, radius, rear, side, bodyColors);
+  if (typeof drawMiddleLayer === "function") {
+    drawMiddleLayer();
+  }
+  drawSphere(ctx, x, y, radius, angle, bodyColors);
+}
+
+function drawSubmarinePropellerBodyConnector(ctx, x, y, radius, rear, side, colors) {
+  const startRear = 0;
+  const endRear = submarineBracketBaselineOffset(radius);
+  const startHalfWidth = radius;
+  const endHalfWidth = radius * (5 / 7);
+  fillConvexPolygon(ctx, [
+    {
+      x: x + rear.x * startRear - side.x * startHalfWidth,
+      y: y + rear.y * startRear - side.y * startHalfWidth
+    },
+    {
+      x: x + rear.x * startRear + side.x * startHalfWidth,
+      y: y + rear.y * startRear + side.y * startHalfWidth
+    },
+    {
+      x: x + rear.x * endRear + side.x * endHalfWidth,
+      y: y + rear.y * endRear + side.y * endHalfWidth
+    },
+    {
+      x: x + rear.x * endRear - side.x * endHalfWidth,
+      y: y + rear.y * endRear - side.y * endHalfWidth
+    }
+  ], colors.foreground);
+}
+
+function drawSubmarinePropellerBracket(ctx, x, y, radius, rear, side, colors) {
+  const center = {
+    x: x + rear.x * submarineBracketBaselineOffset(radius),
+    y: y + rear.y * submarineBracketBaselineOffset(radius)
+  };
+  const halfWidth = Math.max(2, Math.round(radius * 0.8));
+  const armLength = 2;
+  const thickness = 2;
+  ctx.fillStyle = colors.foreground;
+  drawSubmarineBracketPixelLine(ctx, center, rear, side, -halfWidth, 0, halfWidth, 0, thickness);
+  drawSubmarineBracketEndLine(ctx, center, rear, side, -halfWidth, armLength, thickness);
+  drawSubmarineBracketEndLine(ctx, center, rear, side, halfWidth, armLength, thickness);
+}
+
+function submarineBracketBaselineOffset(radius) {
+  return radius + 3;
+}
+
+function submarinePlumeBaselineOffset(radius) {
+  return submarineBracketBaselineOffset(radius) + 4;
+}
+
+function drawSubmarineBracketPixelLine(ctx, center, rear, side, sideA, rearA, sideB, rearB, thickness = 1) {
+  const sideDelta = sideB - sideA;
+  const rearDelta = rearB - rearA;
+  const normalSide = Math.abs(rearDelta) > Math.abs(sideDelta) ? Math.sign(sideA || sideB || 1) : 0;
+  const normalRear = Math.abs(sideDelta) >= Math.abs(rearDelta) ? 1 : 0;
+  const from = {
+    x: Math.round(center.x + side.x * sideA + rear.x * rearA),
+    y: Math.round(center.y + side.y * sideA + rear.y * rearA)
+  };
+  const to = snapSubmarineBracketDiagonalEndpoint(from, {
+    x: Math.round(center.x + side.x * sideB + rear.x * rearB),
+    y: Math.round(center.y + side.y * sideB + rear.y * rearB)
+  });
+  const normal = {
+    x: side.x * normalSide + rear.x * normalRear,
+    y: side.y * normalSide + rear.y * normalRear
+  };
+  drawSubmarineThickPixelLine(ctx, from.x, from.y, to.x, to.y, normal, thickness);
+}
+
+function drawSubmarineBracketEndLine(ctx, center, rear, side, sideOffset, length, thickness = 1) {
+  const from = {
+    x: Math.round(center.x + side.x * sideOffset),
+    y: Math.round(center.y + side.y * sideOffset)
+  };
+  const rearStep = quantizedPixelStep(rear);
+  const to = {
+    x: from.x + rearStep.x * length,
+    y: from.y + rearStep.y * length
+  };
+  const normal = {
+    x: side.x * Math.sign(sideOffset || 1),
+    y: side.y * Math.sign(sideOffset || 1)
+  };
+  drawSubmarineThickPixelLine(ctx, from.x, from.y, to.x, to.y, normal, thickness);
+}
+
+function quantizedPixelStep(vector) {
+  const x = Math.abs(vector.x) >= 0.35 ? Math.sign(vector.x) : 0;
+  const y = Math.abs(vector.y) >= 0.35 ? Math.sign(vector.y) : 0;
+  if (x || y) {
+    return { x, y };
+  }
+  return Math.abs(vector.x) >= Math.abs(vector.y)
+    ? { x: Math.sign(vector.x || 1), y: 0 }
+    : { x: 0, y: Math.sign(vector.y || 1) };
+}
+
+function drawSubmarineThickPixelLine(ctx, x0, y0, x1, y1, normal, thickness = 1) {
+  let x = x0;
+  let y = y0;
+  const dx = Math.abs(x1 - x0);
+  const sx = x0 < x1 ? 1 : -1;
+  const dy = -Math.abs(y1 - y0);
+  const sy = y0 < y1 ? 1 : -1;
+  let error = dx + dy;
+
+  while (true) {
+    drawSubmarineThickPixelStamp(ctx, x, y, normal, thickness);
+    if (x === x1 && y === y1) {
+      break;
+    }
+
+    const e2 = 2 * error;
+    if (e2 >= dy) {
+      error += dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      error += dx;
+      y += sy;
+    }
+  }
+}
+
+function drawSubmarineThickPixelStamp(ctx, x, y, normal, thickness = 1) {
+  ctx.fillRect(x, y, 1, 1);
+  if (thickness <= 1) {
+    return;
+  }
+
+  const stepX = Math.abs(normal.x) >= 0.35 ? Math.sign(normal.x) : 0;
+  const stepY = Math.abs(normal.y) >= 0.35 ? Math.sign(normal.y) : 0;
+  for (let offset = 1; offset < thickness; offset += 1) {
+    const px = x + stepX * offset;
+    const py = y + stepY * offset;
+    const minX = Math.min(x, px);
+    const maxX = Math.max(x, px);
+    const minY = Math.min(y, py);
+    const maxY = Math.max(y, py);
+    for (let fillY = minY; fillY <= maxY; fillY += 1) {
+      for (let fillX = minX; fillX <= maxX; fillX += 1) {
+        ctx.fillRect(fillX, fillY, 1, 1);
+      }
+    }
+  }
+}
+
+function snapSubmarineBracketDiagonalEndpoint(from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  if (absDx > 0 && absDy > 0 && Math.abs(absDx - absDy) <= 1) {
+    const length = Math.max(absDx, absDy);
+    return {
+      x: from.x + Math.sign(dx) * length,
+      y: from.y + Math.sign(dy) * length
+    };
+  }
+  return to;
 }
 
 function drawCarBody(ctx, x, y, player, radius, angle, colors, timeSeconds, drawMiddleLayer = null) {
@@ -13159,6 +13954,11 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
         (0.05 + centerHeat * 0.68 + randomUnit(seed, 5) * (0.1 + centerHeat * 0.3)) *
         engineRamp.life;
       const particleHeat = clamp(0.18 + centerHeat * 0.88 + randomUnit(seed, 10) * 0.08, 0, 1);
+      const thrusterKind = gameMode === GAME_MODES.cars
+        ? CAR_THRUSTER_PARTICLE_KIND
+        : gameMode === GAME_MODES.subs
+          ? SUB_THRUSTER_PARTICLE_KIND
+          : null;
 
       state.particles.push({
         x: origin.x + side.x * sideJitter + rear.x * (rearOffset + rearJitter),
@@ -13168,8 +13968,8 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
         age: randomUnit(seed, 6) * 0.025,
         life,
         seed,
-        heat: gameMode === GAME_MODES.cars ? particleHeat : null,
-        kind: gameMode === GAME_MODES.cars ? CAR_THRUSTER_PARTICLE_KIND : null
+        heat: thrusterKind ? particleHeat : null,
+        kind: thrusterKind
       });
     }
   }
@@ -13190,7 +13990,9 @@ function thrusterEngineRamp(player, gameMode = GAME_MODES.bitspace) {
   const t = THRUSTER_ENGINE_MAX_LEVEL > 0 ? level / THRUSTER_ENGINE_MAX_LEVEL : 0;
   const ramp = gameMode === GAME_MODES.cars
     ? CAR_THRUSTER_ENGINE_RAMP
-    : THRUSTER_ENGINE_RAMP;
+    : gameMode === GAME_MODES.subs
+      ? SUB_THRUSTER_ENGINE_RAMP
+      : THRUSTER_ENGINE_RAMP;
 
   return {
     rate: lerp(ramp.rateMin, ramp.rateMax, t),
@@ -13327,6 +14129,9 @@ function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspa
   if (gameMode === GAME_MODES.cars) {
     return carRearEnginePlumeOrigins(player, rear, side, engineRamp, camera);
   }
+  if (gameMode === GAME_MODES.subs) {
+    return subRearEnginePlumeOrigins(player, rear, engineRamp);
+  }
 
   const mainRadius = shipMainRadius(player);
   const geometryScale = shipGeometryScaleForRadius(mainRadius);
@@ -13343,6 +14148,22 @@ function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspa
     medialOffset: orb.side * geometryScale,
     medialRadius
   }));
+}
+
+function subRearEnginePlumeOrigins(player, rear, engineRamp = {}) {
+  const mainRadius = shipMainRadius(player);
+  const nozzleWidth = Math.max(0.01, Number(engineRamp.nozzle) || 1);
+  const plumeOffset = submarinePlumeBaselineOffset(mainRadius);
+  return [{
+    x: player.x + rear.x * plumeOffset,
+    y: player.y + rear.y * plumeOffset,
+    nozzleWidth,
+    useRampNozzleWidth: true,
+    medialOffset: 0,
+    medialRadius: Math.max(1, nozzleWidth * 0.5),
+    fixedRearOffset: 0,
+    roundedNozzleCap: true
+  }];
 }
 
 function carRearEnginePlumeOrigins(player, rear, side, engineRamp = {}, camera = null) {
@@ -13453,6 +14274,11 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
       currentColor = color;
     }
 
+    if (particle.kind === SUB_THRUSTER_PARTICLE_KIND) {
+      drawSubThrusterBubbleParticle(ctx, screen, particle);
+      continue;
+    }
+
     const heat = particleHeatFromLife(particle);
     if (heat > 0.05) {
       drawHotParticle(ctx, screen, particle);
@@ -13467,6 +14293,10 @@ function drawParticles(ctx, particles, camera, colors, timeSeconds) {
 function particleColor(particle, colors) {
   if (particle?.kind === CAR_THRUSTER_PARTICLE_KIND) {
     return carThrusterParticleColor(particle);
+  }
+
+  if (particle?.kind === SUB_THRUSTER_PARTICLE_KIND) {
+    return subThrusterParticleColor(particle, colors);
   }
 
   return colors.foreground;
@@ -13487,6 +14317,37 @@ function carThrusterParticleColor(particle) {
     CAR_THRUSTER_HEAT_COLORS[index + 1],
     scaled - index
   );
+}
+
+function subThrusterParticleColor(particle, colors) {
+  const life = Math.max(0.001, Number(particle.life || 0));
+  const progress = clamp(Number(particle.age || 0) / life, 0, 1);
+  const initialHeat = clamp(Number(particle.heat || 0), 0, 1);
+  const waterColor = colors.water || colors.background || SUB_MODE_COLORS.water;
+  const warmProgress = clamp(progress * (1.1 - initialHeat * 0.2), 0, 1);
+  return mixHexColors("#ffffff", waterColor, warmProgress);
+}
+
+function drawSubThrusterBubbleParticle(ctx, screen, particle) {
+  const life = Math.max(0.001, Number(particle.life || 0));
+  const progress = clamp(Number(particle.age || 0) / life, 0, 1);
+  const cx = Math.round(screen.x);
+  const cy = Math.round(screen.y);
+
+  // if (progress < 0.28 && particle.seed % 3 === 0) {
+  //   drawCircle(ctx, cx, cy, 2);
+  //   return;
+  // }
+
+  if (progress < 0.78) {
+    ctx.fillRect(cx - 1, cy, 1, 1);
+    ctx.fillRect(cx + 1, cy, 1, 1);
+    ctx.fillRect(cx, cy - 1, 1, 1);
+    ctx.fillRect(cx, cy + 1, 1, 1);
+    return;
+  }
+
+  ctx.fillRect(cx, cy, 1, 1);
 }
 
 function drawHotParticle(ctx, screen, particle) {
@@ -14020,6 +14881,15 @@ function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colo
 }
 
 function miningRayRenderColors(colors, gameMode, timeSeconds) {
+  if (gameMode === GAME_MODES.subs) {
+    return {
+      ...colors,
+      foreground: "#c8ffff",
+      // miningRayGradient: ["#7df7ff", "#c8ffff", "#ffffff", "#7df7ff"]
+      miningRayGradient: ["#eeffff"]
+    };
+  }
+
   if (gameMode !== GAME_MODES.cars) {
     return colors;
   }

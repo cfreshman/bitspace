@@ -1050,7 +1050,13 @@ function createLobbyArena(id, seed, mode = GAME_MODES.bitspace, params = {}) {
 }
 
 function normalizeGameMode(mode) {
-  return mode === GAME_MODES.cars ? GAME_MODES.cars : GAME_MODES.bitspace;
+  if (mode === GAME_MODES.cars) {
+    return GAME_MODES.cars;
+  }
+  if (mode === GAME_MODES.subs) {
+    return GAME_MODES.subs;
+  }
+  return GAME_MODES.bitspace;
 }
 
 function syncLobbyHosts(room) {

@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -466,7 +466,7 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   syncPlayerDerivedStats(player);
   const effects = aggregateUpgradeEffects(player.upgrades);
   const gameMode = normalizeGameMode(arena.mode);
-  applyShipFriction(player, dtSeconds, gameMode === GAME_MODES.cars ? ENGINE.car.friction : ENGINE.ship.friction);
+  applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
 
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
@@ -478,7 +478,7 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   } else {
     updateShipFacing(player, move, dtSeconds);
     if (canThrust) {
-      applyThrusterAcceleration(player, move, effects, dtSeconds);
+      applyThrusterAcceleration(player, move, effects, dtSeconds, shipThrustForGameMode(gameMode));
     }
   }
 
@@ -637,9 +637,9 @@ function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.fric
   player.vy *= friction;
 }
 
-function applyThrusterAcceleration(player, move, effects, dtSeconds) {
-  player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
-  player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = ENGINE.ship.thrust) {
+  player.vx += move.x * thrust * effects.thrustMultiplier * dtSeconds;
+  player.vy += move.y * thrust * effects.thrustMultiplier * dtSeconds;
 }
 
 function updateShipFacing(player, move, dtSeconds) {
@@ -2776,5 +2776,11 @@ function normalizeVector(x, y, fallback = { x: 1, y: 0 }) {
 }
 
 function normalizeGameMode(mode) {
-  return mode === GAME_MODES.cars ? GAME_MODES.cars : GAME_MODES.bitspace;
+  if (mode === GAME_MODES.cars) {
+    return GAME_MODES.cars;
+  }
+  if (mode === GAME_MODES.subs) {
+    return GAME_MODES.subs;
+  }
+  return GAME_MODES.bitspace;
 }

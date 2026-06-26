@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -2962,7 +2962,13 @@ function createMenuState() {
 }
 
 function normalizeMenuMode(mode) {
-  return mode === GAME_MODES.cars ? GAME_MODES.cars : GAME_MODES.bitspace;
+  if (mode === GAME_MODES.cars) {
+    return GAME_MODES.cars;
+  }
+  if (mode === GAME_MODES.subs) {
+    return GAME_MODES.subs;
+  }
+  return GAME_MODES.bitspace;
 }
 
 function loadMenuMode() {
@@ -2986,9 +2992,10 @@ function selectedMenuMode() {
 }
 
 function toggleMenuMode() {
-  state.menu.mode = selectedMenuMode() === GAME_MODES.cars
-    ? GAME_MODES.bitspace
-    : GAME_MODES.cars;
+  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs];
+  const current = selectedMenuMode();
+  const index = modes.indexOf(current);
+  state.menu.mode = modes[(index + 1) % modes.length];
   saveMenuMode(state.menu.mode);
   requestMechanicalBeep();
 }
@@ -3139,7 +3146,7 @@ function updateMenuSimulation(timeSeconds) {
   }
 
   const gameMode = selectedMenuMode();
-  applyShipFriction(player, dtSeconds, gameMode === GAME_MODES.cars ? ENGINE.car.friction : ENGINE.ship.friction);
+  applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
 
   updateMenuAim(player);
   player.prototypeMiningRayCount = state.menu.rayCount;
@@ -3157,7 +3164,7 @@ function updateMenuSimulation(timeSeconds) {
   } else {
     updateShipFacing(player, move, dtSeconds);
     if (canThrust) {
-      applyThrusterAcceleration(player, move, effects, dtSeconds);
+      applyThrusterAcceleration(player, move, effects, dtSeconds, shipThrustForGameMode(gameMode));
     }
   }
 
@@ -5195,7 +5202,11 @@ function menuEntities() {
   const readyY = center.y + 38;
   const controlsY = readyY + MENU_BUTTON_HEIGHT + 9;
   const carsY = controlsY + controlsRows.length * 11 + 8;
-  const modeButtonLabel = selectedMenuMode() === GAME_MODES.cars ? "SHIPS" : "CARS";
+  const modeButtonLabel = selectedMenuMode() === GAME_MODES.bitspace
+    ? "CARS"
+    : selectedMenuMode() === GAME_MODES.cars
+      ? "SUBS"
+      : "SHIPS";
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
@@ -9505,9 +9516,9 @@ function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.fric
   player.vy *= friction;
 }
 
-function applyThrusterAcceleration(player, move, effects, dtSeconds) {
-  player.vx += move.x * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
-  player.vy += move.y * ENGINE.ship.thrust * effects.thrustMultiplier * dtSeconds;
+function applyThrusterAcceleration(player, move, effects, dtSeconds, thrust = ENGINE.ship.thrust) {
+  player.vx += move.x * thrust * effects.thrustMultiplier * dtSeconds;
+  player.vy += move.y * thrust * effects.thrustMultiplier * dtSeconds;
 }
 
 function updateShipFacing(player, move, dtSeconds) {
@@ -9718,7 +9729,7 @@ function updatePrediction(timeSeconds) {
   const effects = aggregateUpgradeEffects(predicted.upgrades);
   predicted.huckRockEngineCutoutSeconds = 0;
   const gameMode = activeGameMode();
-  applyShipFriction(predicted, dtSeconds, gameMode === GAME_MODES.cars ? ENGINE.car.friction : ENGINE.ship.friction);
+  applyShipFriction(predicted, dtSeconds, shipFrictionForGameMode(gameMode));
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
 
@@ -9727,7 +9738,7 @@ function updatePrediction(timeSeconds) {
   } else {
     updateShipFacing(predicted, move, dtSeconds);
     if (canThrust) {
-      applyThrusterAcceleration(predicted, move, effects, dtSeconds);
+      applyThrusterAcceleration(predicted, move, effects, dtSeconds, shipThrustForGameMode(gameMode));
     }
   }
 
