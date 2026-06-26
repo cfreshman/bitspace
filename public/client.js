@@ -74,6 +74,7 @@ const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
 const MENU_MODE_STORAGE_KEY = "bitspace.menuMode";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
+const LOCAL_BOT_COUNT_STORAGE_KEY = "bitspace.localBotCount";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
 const PERF_DEBUG_STORAGE_KEY = "bitspace.debugPerf";
 const PLAYER_MAP_STORAGE_KEY = "bitspace.playerMap";
@@ -379,7 +380,7 @@ const state = {
     arena: null,
     mode: GAME_MODES.bitspace,
     bots: new Map(),
-    botCount: LOCAL_BOT_DEFAULT_COUNT,
+    botCount: loadLocalBotCount(),
     lobbySeed: null,
     lastStepTimeSeconds: 0,
     accumulatorSeconds: 0,
@@ -4235,7 +4236,7 @@ function startLocalBotLobby(mode = selectedMenuMode()) {
   forgetRegisteredRoom();
   clearLocalBotSave();
   mode = normalizeMenuMode(mode);
-  const botCount = LOCAL_BOT_DEFAULT_COUNT;
+  const botCount = loadLocalBotCount();
   const seed = `local-bots-lobby:${Date.now().toString(36)}`;
   const arena = createLocalBotLobbyArena(botCount, seed, null, mode);
 
@@ -4342,6 +4343,7 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = 
 function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFAULT_COUNT, mode = state.localGame.mode) {
   forgetRegisteredRoom();
   botCount = clampLocalBotCount(botCount);
+  saveLocalBotCount(botCount);
   mode = normalizeMenuMode(mode);
   const seed = `local-bots:${Date.now().toString(36)}`;
   const arena = createArena({
@@ -4430,6 +4432,26 @@ function clampLocalBotCount(value) {
   return clamp(Number.isFinite(count) ? count : LOCAL_BOT_DEFAULT_COUNT, LOCAL_BOT_MIN_COUNT, LOCAL_BOT_MAX_COUNT);
 }
 
+function loadLocalBotCount() {
+  try {
+    const stored = window.localStorage.getItem(LOCAL_BOT_COUNT_STORAGE_KEY);
+    if (stored == null || stored === "") {
+      return LOCAL_BOT_DEFAULT_COUNT;
+    }
+    return clampLocalBotCount(stored);
+  } catch (error) {
+    return LOCAL_BOT_DEFAULT_COUNT;
+  }
+}
+
+function saveLocalBotCount(count) {
+  try {
+    window.localStorage.setItem(LOCAL_BOT_COUNT_STORAGE_KEY, String(clampLocalBotCount(count)));
+  } catch (error) {
+    // Ignore storage failures; the in-memory lobby state still updates.
+  }
+}
+
 function adjustLocalBotLobbyCount(delta) {
   if (!isLocalBotLobby()) {
     return false;
@@ -4449,6 +4471,7 @@ function adjustLocalBotLobbyCount(delta) {
   state.localGame.bots = new Map();
   state.localGame.mode = mode;
   state.localGame.botCount = nextCount;
+  saveLocalBotCount(nextCount);
   state.localGame.lobbySeed = seed;
   state.room = localBotRoomFromArena(arena, { state: "waiting", botCount: nextCount });
   setClientAsteroid(snapshotAsteroid(arena));
@@ -10910,7 +10933,7 @@ function resolvePredictionPlayerCollisions(player, gameMode = activeGameMode()) 
 }
 
 function boundaryRestitutionForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.boundaryRestitution;
+  return gameMode === GAME_MODES.subs || gameMode === GAME_MODES.bugs ? 0 : ENGINE.collision.boundaryRestitution;
 }
 
 function shipRestitutionForGameMode(gameMode) {

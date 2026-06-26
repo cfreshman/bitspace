@@ -62,14 +62,14 @@ const SUB_MODE_COLORS = Object.freeze({
 });
 const BUG_BACKING_COLOR = "#070b06";
 const BUG_MODE_COLORS = Object.freeze({
-  foreground: "#9ab870",
-  background: "#24341f",
-  backgroundDark: "#172314",
+  foreground: "#52a13a",
+  background: "#395530",
+  backgroundDark: "#395530",
   backing: BUG_BACKING_COLOR,
   ore: "#d2b27a",
   diamond: "#84ffe8",
   rockFill: BUG_BACKING_COLOR,
-  rockLine: BUG_BACKING_COLOR,
+  rockLine: '#1c3517',
   wallFill: BUG_BACKING_COLOR,
   wallLine: BUG_BACKING_COLOR,
   rockDark: BUG_BACKING_COLOR,
@@ -78,6 +78,8 @@ const BUG_MODE_COLORS = Object.freeze({
   bugRay: "#ff4cff",
   health: "#ff2f2f"
 });
+const BUG_HUCK_ROCK_WEB_LIGHT = "#ffffff";
+const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
 const SUB_SHADOW_MASK_COLOR = "#010203";
 const SUB_NON_RENDER_OCEAN_SHADOW_ALPHA = 0.95;
 const CAR_BODY_COLORS = Object.freeze([
@@ -136,7 +138,6 @@ const BUG_LEG_MAX_SUBSTEP_SECONDS = 1 / 60;
 const BUG_LEG_MAX_SUBSTEPS = 1;
 const BUG_LEG_HIP_HEIGHT_SCALE = 0.05;
 const BUG_LEG_SEGMENT_LENGTH_SCALE = 2;
-const BUG_LEG_STEP_HEIGHT_SCALE = 0.18;
 const BUG_LEG_TARGET_RADIAL_JITTER = 0.1;
 const BUG_LEG_TARGET_TANGENTIAL_JITTER = 0.12;
 const BUG_LEG_VELOCITY_LEAD_SECONDS = 0.055;
@@ -148,8 +149,7 @@ const BUG_LEG_TEARDROP_REAR_REACH = 0.5;
 const BUG_LEG_TEARDROP_FRONT_SIDE_SCALE = 1;
 const BUG_LEG_TEARDROP_REAR_SIDE_SCALE = 0;
 const BUG_LEG_LINE_WIDTH = 2;
-const BUG_LEG_PROJECT_X = 0;
-const BUG_LEG_PROJECT_Y = -0.45;
+const BUG_LEG_CAMERA_HEIGHT_SCALE = 12;
 const SUB_WAVE_SIM_SIZE = 256;
 const SUB_WAVE_SIM_FPS = 30;
 const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
@@ -12662,9 +12662,13 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
   if (entity.type === "huckRock") {
     if (options.gameMode === GAME_MODES.cars) {
       drawCarModeHuckRockEntity(ctx, entity, camera, colors);
+    } else if (options.gameMode === GAME_MODES.bugs) {
+      drawHuckRockEntity(ctx, entity, camera, colors, {
+        webFill: true
+      });
     } else {
       drawHuckRockEntity(ctx, entity, camera, colors, {
-        filled: options.gameMode === GAME_MODES.subs || options.gameMode === GAME_MODES.bugs
+        filled: options.gameMode === GAME_MODES.subs
       });
     }
     return;
@@ -12742,11 +12746,15 @@ function drawHuckRockEntity(ctx, entity, camera, colors, options = {}) {
     return;
   }
 
-  if (options.filled) {
+  if (options.webFill) {
+    fillBugHuckRockWeb(ctx, hull);
+  } else if (options.filled) {
     fillConvexPolygon(ctx, hull, colors.rockFill || colors.rockLine || colors.foreground);
   }
 
-  ctx.fillStyle = options.filled
+  ctx.fillStyle = options.webFill
+    ? BUG_HUCK_ROCK_WEB_LIGHT
+    : options.filled
     ? colors.rockLine || colors.foreground
     : colors.foreground;
   for (let index = 0; index < hull.length; index += 1) {
@@ -12754,6 +12762,13 @@ function drawHuckRockEntity(ctx, entity, camera, colors, options = {}) {
     const to = hull[(index + 1) % hull.length];
     drawPixelLine(ctx, Math.round(from.x), Math.round(from.y), Math.round(to.x), Math.round(to.y));
   }
+}
+
+function fillBugHuckRockWeb(ctx, hull) {
+  ctx.fillStyle = BUG_HUCK_ROCK_WEB_DARK;
+  fillConvexPolygonDither(ctx, hull, (x, y) => ((x + y) & 1) === 0);
+  ctx.fillStyle = BUG_HUCK_ROCK_WEB_LIGHT;
+  fillConvexPolygonDither(ctx, hull, (x, y) => ((x + y) & 1) !== 0);
 }
 
 function drawCarModeHuckRockEntity(ctx, entity, camera, colors) {
@@ -13400,23 +13415,27 @@ function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSecon
 
 function drawBugLeg(ctx, player, camera, radius, angle, leg) {
   const radial = bugLegRadial(angle, leg.config);
-  const shoulderWorld = bugLegWorldPoint(player, radial, radius * BUG_LEG_SHOULDER_SCALE);
+  const projectionCenter = bugLegVisualCenter(player);
+  const legScale = bugVisualLegSizeScale(player);
+  const legRadius = radius * legScale;
+  const shoulderDistance = Math.max(0, radius * BUG_LEG_SHOULDER_SCALE - BUG_LEG_LINE_WIDTH * 0.5);
+  const shoulderWorld = bugLegWorldPoint(player, radial, shoulderDistance);
   const hip = {
     x: shoulderWorld.x,
     y: shoulderWorld.y,
-    z: radius * BUG_LEG_HIP_HEIGHT_SCALE
+    z: legRadius * BUG_LEG_HIP_HEIGHT_SCALE
   };
   const step = bugLegRenderStep(leg.step);
   const pose = step
-    ? bugLegInterpolatedStepPose(hip, radial, radius, step, leg.lift)
-    : bugLegIkPose(hip, radial, radius, {
+    ? bugLegInterpolatedStepPose(hip, radial, legRadius, step, leg.lift)
+    : bugLegIkPose(hip, radial, legRadius, {
         x: leg.foot.x,
         y: leg.foot.y,
         z: leg.lift
       });
-  const hipScreen = bugProjectWorldPoint(pose.hip, camera);
-  const kneeScreen = bugProjectWorldPoint(pose.knee, camera);
-  const footScreen = bugProjectWorldPoint(pose.foot, camera);
+  const hipScreen = bugProjectWorldPoint(pose.hip, camera, projectionCenter, radius);
+  const kneeScreen = bugProjectWorldPoint(pose.knee, camera, projectionCenter, radius);
+  const footScreen = bugProjectWorldPoint(pose.foot, camera, projectionCenter, radius);
   drawBugLegLine(ctx, hipScreen, kneeScreen);
   drawBugLegLine(ctx, kneeScreen, footScreen);
   drawBugLegStamp(ctx, footScreen.x, footScreen.y);
@@ -13439,7 +13458,6 @@ function bugLegIkPose(hip, radial, radius, foot) {
 function bugLegInterpolatedStepPose(hip, radial, radius, step, lift) {
   const progress = clamp(Number(step.progress) || 0, 0, 1);
   const eased = smoothstep01(progress);
-  const stepLift = Number.isFinite(lift) ? lift : 0;
   const fromPose = bugLegIkPose(hip, radial, radius, {
     x: step.fromX,
     y: step.fromY,
@@ -13455,14 +13473,15 @@ function bugLegInterpolatedStepPose(hip, radial, radius, step, lift) {
     knee: {
       x: lerp(fromPose.knee.x, targetPose.knee.x, eased),
       y: lerp(fromPose.knee.y, targetPose.knee.y, eased),
-      z: lerp(fromPose.knee.z || 0, targetPose.knee.z || 0, eased) + stepLift * 0.7
+      z: lerp(fromPose.knee.z || 0, targetPose.knee.z || 0, eased)
     },
     foot: {
       x: lerp(fromPose.foot.x, targetPose.foot.x, eased),
       y: lerp(fromPose.foot.y, targetPose.foot.y, eased),
-      z: stepLift
+      z: 0
     }
   };
+  void lift;
 }
 
 function bugLegRenderStep(step) {
@@ -13724,7 +13743,6 @@ function bugLegGaitFoot(state, center, radius, angle, index) {
   const phase = positiveModulo((Number(state.gaitDistance) || 0) / stride + leg.phaseOffset, 1);
   const duty = 0.68;
   let travel;
-  let lift = 0;
 
   if (phase < duty) {
     travel = lerp(stride * 0.5, -stride * 0.5, phase / duty);
@@ -13732,7 +13750,6 @@ function bugLegGaitFoot(state, center, radius, angle, index) {
     const swingProgress = (phase - duty) / (1 - duty);
     const eased = smoothstep01(swingProgress);
     travel = lerp(-stride * 0.5, stride * 0.5, eased);
-    lift = Math.sin(Math.PI * swingProgress) * radius * BUG_LEG_STEP_HEIGHT_SCALE;
   }
 
   return {
@@ -13740,7 +13757,7 @@ function bugLegGaitFoot(state, center, radius, angle, index) {
       x: target.x + forward.x * travel,
       y: target.y + forward.y * travel
     },
-    lift
+    lift: 0
   };
 }
 
@@ -13797,10 +13814,22 @@ function bugLegMaxHorizontalExtension(totalLength, hipHeight) {
   return Math.sqrt(Math.max(0.0001, totalLength * totalLength - hipHeight * hipHeight));
 }
 
+function bugVisualLegSizeScale(player) {
+  const direct = Number(player?.bugLegSizeScale);
+  if (Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+
+  const effects = aggregateUpgradeEffects(player?.upgrades);
+  const speedScale = Math.max(1, Number(effects?.thrustMultiplier) || 1);
+  return Math.max(0.1, ENGINE.bugs.legBaseSizeScale ?? 1) +
+    (speedScale - 1) * (ENGINE.bugs.legSizeRampScale ?? 0.5);
+}
+
 function bugLegVisualCenter(player) {
   return {
     x: Number.isFinite(player?.x) ? player.x : 0,
-    y: Number.isFinite(player?.y) ? player.y : 0
+    y: (Number.isFinite(player?.y) ? player.y : 0) + Math.max(0, (Number(player?.radius) || ENGINE.ship.radius)*BUG_LEG_CAMERA_HEIGHT_SCALE/BUG_LEG_CAMERA_HEIGHT_SCALE || 0)
   };
 }
 
@@ -13926,12 +13955,16 @@ function bugVec3Length(value) {
   return Math.hypot(value.x, value.y, value.z || 0);
 }
 
-function bugProjectWorldPoint(point, camera, z = null) {
+function bugProjectWorldPoint(point, camera, projectionCenter = null, radius = 1, z = null) {
   const screen = camera ? worldToScreen(point, camera) : point;
+  const centerWorld = projectionCenter || point;
+  const center = camera ? worldToScreen(centerWorld, camera) : centerWorld;
   const pointZ = Number.isFinite(z) ? z : Number(point?.z) || 0;
+  const cameraHeight = Math.max(1, radius * BUG_LEG_CAMERA_HEIGHT_SCALE);
+  const scale = cameraHeight / Math.max(0.001, cameraHeight - pointZ);
   return {
-    x: Math.round(screen.x + pointZ * BUG_LEG_PROJECT_X),
-    y: Math.round(screen.y + pointZ * BUG_LEG_PROJECT_Y)
+    x: Math.round(center.x + (screen.x - center.x) * scale),
+    y: Math.round(center.y + (screen.y - center.y) * scale)
   };
 }
 

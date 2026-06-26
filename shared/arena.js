@@ -2821,7 +2821,7 @@ function addShake(player, impact) {
 }
 
 function boundaryRestitutionForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.boundaryRestitution;
+  return gameMode === GAME_MODES.subs || gameMode === GAME_MODES.bugs ? 0 : ENGINE.collision.boundaryRestitution;
 }
 
 function shipRestitutionForGameMode(gameMode) {

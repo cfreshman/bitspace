@@ -114,6 +114,8 @@ export const ENGINE = Object.freeze({
     legSwingSpeed: 430,
     legMaxStepSeconds: 0.09,
     legLift: 8,
+    legBaseSizeScale: 1,
+    legSizeRampScale: 0.5,
     legAttachmentScale: 0.66,
     legRestScale: 1.95,
     legTargetRadiusScale: 2.32,

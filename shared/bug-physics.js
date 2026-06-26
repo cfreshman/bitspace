@@ -1,5 +1,10 @@
 import { ENGINE } from "./constants.js";
-import { ASTEROID_TILE, isAsteroidRockTile } from "./asteroid.js";
+import {
+  ASTEROID_TILE,
+  blockingTilesNearCircle,
+  circleBlockerOverlap,
+  isAsteroidRockTile
+} from "./asteroid.js";
 import { clamp, roundForSnapshot } from "./math.js";
 
 const BUG_LEG_COUNT = 8;
@@ -9,7 +14,8 @@ const BUG_LEG_ACTIVE_NONE = -1;
 export function simulateBugMovement(player, move, effects, dtSeconds, terrain = null) {
   const speedScale = Math.max(1, Number(effects?.thrustMultiplier) || 1);
   player.bugSpeedScale = speedScale;
-  player.bugLegSizeScale = 1 + (speedScale - 1) * 0.5;
+  player.bugLegSizeScale = Math.max(0.1, ENGINE.bugs.legBaseSizeScale ?? 1) +
+    (speedScale - 1) * (ENGINE.bugs.legSizeRampScale ?? 0.5);
   ensureBugLegState(player);
   clampBugLegStateToCore(player, terrain);
 
@@ -18,6 +24,13 @@ export function simulateBugMovement(player, move, effects, dtSeconds, terrain = 
   const direction = moving
     ? { x: move.x / magnitude, y: move.y / magnitude }
     : bugLastMoveDirection(player);
+  const contactNormals = bugTerrainContactNormals(player, terrain);
+  const contactMove = moving ? bugProjectVectorOutOfContacts(direction, contactNormals) : direction;
+  const contactMoveMagnitude = Math.hypot(contactMove.x, contactMove.y);
+  const driveDirection = moving && contactMoveMagnitude > 0.0001
+    ? { x: contactMove.x / contactMoveMagnitude, y: contactMove.y / contactMoveMagnitude }
+    : direction;
+  const canDrive = moving && contactMoveMagnitude > 0.0001;
 
   if (moving) {
     player.bugMoveX = direction.x;
@@ -26,16 +39,21 @@ export function simulateBugMovement(player, move, effects, dtSeconds, terrain = 
 
   const hadActiveLegAtTickStart = bugHasActiveLeg(player);
   advanceBugActiveLeg(player, dtSeconds);
-  if (moving && !hadActiveLegAtTickStart && !bugHasActiveLeg(player)) {
-    const legIndex = bugMaxConstrainingLeg(player, direction);
-    if (legIndex >= 0) {
-      startBugLegStep(player, legIndex, direction, terrain);
-      advanceBugActiveLeg(player, dtSeconds);
+  if (canDrive && !hadActiveLegAtTickStart && !bugHasActiveLeg(player)) {
+    for (const legIndex of bugConstrainingLegCandidates(player, driveDirection)) {
+      if (startBugLegStep(player, legIndex, driveDirection, terrain)) {
+        advanceBugActiveLeg(player, dtSeconds);
+        break;
+      }
     }
   }
 
-  const targetVelocity = bugLegDrivenVelocity(player, direction, moving);
-  const correction = bugLegConstraintCorrection(player);
+  const currentVelocity = bugProjectVectorOutOfContacts({ x: player.vx, y: player.vy }, contactNormals);
+  player.vx = currentVelocity.x;
+  player.vy = currentVelocity.y;
+
+  const targetVelocity = bugLegDrivenVelocity(player, driveDirection, canDrive);
+  const correction = bugProjectVectorOutOfContacts(bugLegConstraintCorrection(player), contactNormals);
   const damping = Math.max(0, ENGINE.bugs.legDamping ?? ENGINE.bugs.coreDamping ?? 0);
   const pull = Math.max(0, ENGINE.bugs.corePull || 0) * bugLegSizeScale(player);
 
@@ -43,6 +61,9 @@ export function simulateBugMovement(player, move, effects, dtSeconds, terrain = 
   player.vy += correction.y * pull * dtSeconds;
   player.vx += (targetVelocity.x - player.vx) * clamp(damping * dtSeconds, 0, 1);
   player.vy += (targetVelocity.y - player.vy) * clamp(damping * dtSeconds, 0, 1);
+  const nextVelocity = bugProjectVectorOutOfContacts({ x: player.vx, y: player.vy }, contactNormals);
+  player.vx = nextVelocity.x;
+  player.vy = nextVelocity.y;
   updateBugLegCenter(player);
 }
 
@@ -230,11 +251,11 @@ function bugLastMoveDirection(player) {
     : { x: 1, y: 0 };
 }
 
-function bugMaxConstrainingLeg(player, direction) {
-  let bestIndex = BUG_LEG_ACTIVE_NONE;
-  let bestScore = Number.NEGATIVE_INFINITY;
+function bugConstrainingLegCandidates(player, direction) {
+  const candidates = [];
   const targetRadius = bugLegTargetRadius(player);
   const side = { x: -direction.y, y: direction.x };
+  const frontScale = ENGINE.bugs.legFrontScale ?? 0.95;
 
   for (let index = 0; index < BUG_LEG_COUNT; index += 1) {
     const leg = player.bugLegs[index];
@@ -245,16 +266,20 @@ function bugMaxConstrainingLeg(player, direction) {
     const dx = leg.x - targetCenter.x;
     const dy = leg.y - targetCenter.y;
     const progress = (dx * direction.x + dy * direction.y) / targetRadius;
+    const forwardGain = frontScale - progress;
+    if (forwardGain <= 0.05) {
+      continue;
+    }
     const extension = Math.hypot(dx, dy) / targetRadius;
     const sideLoad = Math.abs(dx * side.x + dy * side.y) / targetRadius;
-    const score = -progress + Math.max(0, extension - 1) * 1.5 - sideLoad * 0.12;
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = index;
+    const score = forwardGain + Math.max(0, extension - 1) * 1.5 - sideLoad * 0.12;
+    if (score > 0.18) {
+      candidates.push({ index, score });
     }
   }
 
-  return bestScore > 0.18 ? bestIndex : BUG_LEG_ACTIVE_NONE;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.map((candidate) => candidate.index);
 }
 
 function startBugLegStep(player, index, direction, terrain = null) {
@@ -272,6 +297,11 @@ function startBugLegStep(player, index, direction, terrain = null) {
   };
   const clampedTarget = bugSafeLegPoint(player, index, target, terrain, direction);
   if (!clampedTarget) {
+    return false;
+  }
+  const currentProgress = ((leg.x - targetCenter.x) * direction.x + (leg.y - targetCenter.y) * direction.y) / targetRadius;
+  const targetProgress = ((clampedTarget.x - targetCenter.x) * direction.x + (clampedTarget.y - targetCenter.y) * direction.y) / targetRadius;
+  if (targetProgress <= currentProgress + 0.05) {
     return false;
   }
   const distance = Math.hypot(clampedTarget.x - leg.x, clampedTarget.y - leg.y);
@@ -394,6 +424,11 @@ function bugBodyRaycastLegPoint(player, point, terrain = null) {
     return point;
   }
 
+  const hit = bugBodyRaycast(player, point, terrain);
+  return hit.hit ? hit.lastSafe : point;
+}
+
+function bugBodyRaycast(player, point, terrain = null) {
   const from = {
     x: Number(player?.x) || 0,
     y: Number(player?.y) || 0
@@ -402,13 +437,19 @@ function bugBodyRaycastLegPoint(player, point, terrain = null) {
   const dy = point.y - from.y;
   const distance = Math.hypot(dx, dy);
   if (distance <= 0.0001) {
-    return bugFootBlocked(terrain, point) ? null : point;
+    return {
+      hit: bugFootBlocked(terrain, point),
+      lastSafe: bugFootBlocked(terrain, point) ? null : point,
+      hitPoint: bugFootBlocked(terrain, point) ? point : null
+    };
   }
 
   const tileSize = Math.max(1, Number(terrain.tileSize) || ENGINE.bugs.tileSize || 1);
   const stepSize = Math.max(0.5, Math.min(2, tileSize / 6));
   const steps = Math.max(1, Math.ceil(distance / stepSize));
+  const initialBlockedTolerance = Math.max(stepSize, (Number(ENGINE.bugs.footClearance) || 1) + 1);
   let lastSafe = bugFootBlocked(terrain, from) ? null : from;
+  let startedBlocked = lastSafe === null;
 
   for (let step = 1; step <= steps; step += 1) {
     const t = step / steps;
@@ -417,12 +458,76 @@ function bugBodyRaycastLegPoint(player, point, terrain = null) {
       y: from.y + dy * t
     };
     if (bugFootBlocked(terrain, candidate)) {
-      return lastSafe;
+      if (startedBlocked && !lastSafe && distance * t <= initialBlockedTolerance) {
+        continue;
+      }
+      return {
+        hit: true,
+        lastSafe,
+        hitPoint: candidate
+      };
     }
+    startedBlocked = false;
     lastSafe = candidate;
   }
 
-  return point;
+  return {
+    hit: false,
+    lastSafe: point,
+    hitPoint: null
+  };
+}
+
+function bugTerrainContactNormals(player, terrain = null) {
+  if (!terrain || !player) {
+    return [];
+  }
+
+  const radius = Math.max(1, Number(player.radius) || ENGINE.ship.radius || 1);
+  const skin = Math.max(0.5, Number(ENGINE.bugs.wallContactSkin) || 1.25);
+  const circle = {
+    x: Number(player.x) || 0,
+    y: Number(player.y) || 0,
+    radius: radius + skin
+  };
+  const normals = [];
+
+  for (const blocker of blockingTilesNearCircle(terrain, circle.x, circle.y, circle.radius)) {
+    const hit = circleBlockerOverlap(circle, blocker);
+    if (!hit) {
+      continue;
+    }
+    const length = Math.hypot(hit.normalX, hit.normalY);
+    if (length <= 0.0001) {
+      continue;
+    }
+    normals.push({
+      x: hit.normalX / length,
+      y: hit.normalY / length
+    });
+  }
+
+  return normals;
+}
+
+function bugProjectVectorOutOfContacts(vector, normals) {
+  let x = Number(vector?.x) || 0;
+  let y = Number(vector?.y) || 0;
+  if (!Array.isArray(normals) || normals.length <= 0 || (x === 0 && y === 0)) {
+    return { x, y };
+  }
+
+  for (const normal of normals) {
+    const dot = x * normal.x + y * normal.y;
+    if (dot < 0) {
+      x -= dot * normal.x;
+      y -= dot * normal.y;
+    }
+  }
+
+  return Math.hypot(x, y) > 0.000001
+    ? { x, y }
+    : { x: 0, y: 0 };
 }
 
 function bugNormalizedDirection(value) {
@@ -511,7 +616,7 @@ function advanceBugActiveLeg(player, dtSeconds) {
   const eased = progress * progress * (3 - 2 * progress);
   leg.x = step.fromX + (step.targetX - step.fromX) * eased;
   leg.y = step.fromY + (step.targetY - step.fromY) * eased;
-  leg.lift = Math.sin(Math.PI * progress) * (ENGINE.bugs.legLift ?? 3);
+  leg.lift = 0;
 
   if (progress >= 1) {
     leg.x = step.targetX;
