@@ -1057,6 +1057,9 @@ function normalizeGameMode(mode) {
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
   }
+  if (mode === GAME_MODES.clouds) {
+    return GAME_MODES.clouds;
+  }
   return GAME_MODES.bitspace;
 }
 

@@ -6,7 +6,8 @@ export const GAME_MODES = Object.freeze({
   bitspace: "bitspace",
   cars: "cars",
   subs: "subs",
-  bugs: "bugs"
+  bugs: "bugs",
+  clouds: "clouds"
 });
 
 export const RENDER = Object.freeze({
@@ -124,6 +125,15 @@ export const ENGINE = Object.freeze({
     legRandomSideScale: 0.72,
     legDriveBias: 0.48
   },
+  clouds: {
+    speedMultiplier: 2,
+    friction: 1,
+    pitchResponseRate: 2,
+    pitchReturnRate: 2,
+    maxPitchRadians: Math.PI / 6,
+    rotorAcceleration: 750,
+    airFriction: .9,
+  },
   player: {
     startingHealthBars: 3,
     maxHealthBars: 8,
@@ -191,6 +201,9 @@ export function shipFrictionForGameMode(gameMode) {
   }
   if (gameMode === GAME_MODES.subs) {
     return ENGINE.subs.friction;
+  }
+  if (gameMode === GAME_MODES.clouds) {
+    return ENGINE.clouds.friction;
   }
   return ENGINE.ship.friction;
 }

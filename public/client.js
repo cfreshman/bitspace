@@ -15,6 +15,7 @@ import {
 import { CLIENT_EVENTS, SERVER_EVENTS } from "/shared/protocol.js";
 import { normalizeInput } from "/shared/input.js";
 import { simulateCarMovement } from "/shared/car-physics.js";
+import { simulateCloudMovement } from "/shared/cloud-physics.js";
 import {
   cloneBugLegs,
   clampBugLegStateToCore,
@@ -3009,6 +3010,9 @@ function normalizeMenuMode(mode) {
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
   }
+  if (mode === GAME_MODES.clouds) {
+    return GAME_MODES.clouds;
+  }
   return GAME_MODES.bitspace;
 }
 
@@ -3103,7 +3107,7 @@ function selectedMenuMode() {
 }
 
 function toggleMenuMode() {
-  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs];
+  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs, GAME_MODES.clouds];
   const current = selectedMenuMode();
   const index = modes.indexOf(current);
   setMenuMode(modes[(index + 1) % modes.length]);
@@ -3129,6 +3133,9 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   }
   if (normalized === GAME_MODES.bugs) {
     return "BITSPACE: BUGS";
+  }
+  if (normalized === GAME_MODES.clouds) {
+    return "BITSPACE: SKY";
   }
   return "BITSPACE";
 }
@@ -3208,6 +3215,8 @@ function rebuildMenuArena(options = {}) {
     player.aimAngle = previousPlayer.aimAngle || player.aimAngle;
     player.subReverseActive = Boolean(previousPlayer.subReverseActive);
     player.subReverseConeAngle = previousPlayer.subReverseConeAngle ?? player.angle + Math.PI;
+    player.cloudPitchX = Number.isFinite(previousPlayer.cloudPitchX) ? previousPlayer.cloudPitchX : 0;
+    player.cloudPitchY = Number.isFinite(previousPlayer.cloudPitchY) ? previousPlayer.cloudPitchY : 0;
     player.bugLegCenterX = Number.isFinite(previousPlayer.bugLegCenterX)
       ? previousPlayer.bugLegCenterX
       : previousPlayer.x;
@@ -3267,6 +3276,8 @@ function resetMenuPlayer(player, asteroid) {
   player.carHeading = Math.PI / 4;
   player.carSteerAngle = 0;
   player.carAngularVelocity = 0;
+  player.cloudPitchX = 0;
+  player.cloudPitchY = 0;
   player.bugLegCenterX = center.x;
   player.bugLegCenterY = center.y;
   player.bugLegs = null;
@@ -3371,6 +3382,8 @@ function enterMenuRoom(room, options = {}) {
     nextPlayer.y = center.y;
     nextPlayer.bugLegCenterX = center.x;
     nextPlayer.bugLegCenterY = center.y;
+    nextPlayer.cloudPitchX = 0;
+    nextPlayer.cloudPitchY = 0;
     nextPlayer.bugLegs = null;
     nextPlayer.bugActiveLegIndex = -1;
     nextPlayer.bugMoveX = 1;
@@ -3450,6 +3463,8 @@ function updateMenuSimulation(timeSeconds) {
     simulateCarMovement(player, move, effects, dtSeconds);
   } else if (gameMode === GAME_MODES.bugs) {
     simulateBugMovement(player, move, effects, dtSeconds, state.menu.asteroid);
+  } else if (gameMode === GAME_MODES.clouds) {
+    simulateCloudMovement(player, move, effects, dtSeconds);
   } else {
     updateShipModeFacing(player, move, dtSeconds, gameMode);
     if (canThrust) {
@@ -3457,7 +3472,7 @@ function updateMenuSimulation(timeSeconds) {
     }
   }
 
-  player.thrusting = gameMode === GAME_MODES.bugs ? false : canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds ? false : canThrust;
   player.mining = physicalMiningInputActive() && !state.chat.active;
   setMenuPlayerInput(move.x, move.y, player.mining);
   if (player.mining) {
@@ -5023,6 +5038,8 @@ function serializeLocalBotPlayer(player) {
     carHeading: player.carHeading ?? player.angle,
     carSteerAngle: player.carSteerAngle || 0,
     carAngularVelocity: player.carAngularVelocity || 0,
+    cloudPitchX: player.cloudPitchX || 0,
+    cloudPitchY: player.cloudPitchY || 0,
     facingMoveX: player.facingMoveX,
     facingMoveY: player.facingMoveY,
     pendingFacingSignX: player.pendingFacingSignX,
@@ -5300,6 +5317,8 @@ function restoreLocalBotPlayer(player, savedPlayer) {
     "carHeading",
     "carSteerAngle",
     "carAngularVelocity",
+    "cloudPitchX",
+    "cloudPitchY",
     "facingMoveX",
     "facingMoveY",
     "pendingFacingSignX",
@@ -5655,7 +5674,7 @@ function menuEntities() {
 
 function menuModeButtons(mode) {
   const currentMode = normalizeMenuMode(mode);
-  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs].map((slot) => {
+  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs, GAME_MODES.clouds].map((slot) => {
     const selected = currentMode === slot;
     return {
       slot,
@@ -5674,6 +5693,9 @@ function menuModeLabel(mode) {
   }
   if (mode === GAME_MODES.bugs) {
     return "BUGS";
+  }
+  if (mode === GAME_MODES.clouds) {
+    return "SKY";
   }
   return "SHIPS";
 }
@@ -9426,7 +9448,7 @@ function updateLocalShipAudio(player, timeSeconds) {
 
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
-  const inputLevel = alive && audioGameMode() !== GAME_MODES.bugs
+  const inputLevel = alive && audioGameMode() !== GAME_MODES.bugs && audioGameMode() !== GAME_MODES.clouds
     ? playerThrustInputLevel(player)
     : 0;
   const miningActive = state.room?.state !== "ended" && alive && playerMiningAudioActive(player);
@@ -10299,6 +10321,12 @@ function reconcilePrediction(snapshot, timeSeconds) {
     carHeading: Number.isFinite(predicted.carHeading) ? predicted.carHeading : predicted.angle,
     carSteerAngle: Number.isFinite(predicted.carSteerAngle) ? predicted.carSteerAngle : 0,
     carAngularVelocity: Number.isFinite(predicted.carAngularVelocity) ? predicted.carAngularVelocity : 0,
+    cloudPitchX: Number.isFinite(predicted.cloudPitchX)
+      ? predicted.cloudPitchX + ((authoritative.cloudPitchX || 0) - predicted.cloudPitchX) * PREDICTION_VELOCITY_CORRECTION
+      : authoritative.cloudPitchX || 0,
+    cloudPitchY: Number.isFinite(predicted.cloudPitchY)
+      ? predicted.cloudPitchY + ((authoritative.cloudPitchY || 0) - predicted.cloudPitchY) * PREDICTION_VELOCITY_CORRECTION
+      : authoritative.cloudPitchY || 0,
     bugLegCenterX: Number.isFinite(predicted.bugLegCenterX)
       ? predicted.bugLegCenterX + ((authoritative.bugLegCenterX ?? authoritative.x) - predicted.bugLegCenterX) * PREDICTION_POSITION_CORRECTION
       : authoritative.bugLegCenterX ?? authoritative.x,
@@ -10334,6 +10362,8 @@ function resetPredictedFacingState(player) {
     carHeading: Number.isFinite(player.carHeading) ? player.carHeading : player.angle,
     carSteerAngle: Number.isFinite(player.carSteerAngle) ? player.carSteerAngle : 0,
     carAngularVelocity: Number.isFinite(player.carAngularVelocity) ? player.carAngularVelocity : 0,
+    cloudPitchX: Number.isFinite(player.cloudPitchX) ? player.cloudPitchX : 0,
+    cloudPitchY: Number.isFinite(player.cloudPitchY) ? player.cloudPitchY : 0,
     bugLegCenterX: Number.isFinite(player.bugLegCenterX) ? player.bugLegCenterX : player.x,
     bugLegCenterY: Number.isFinite(player.bugLegCenterY) ? player.bugLegCenterY : player.y,
     bugLegs: cloneBugLegs(player.bugLegs),
@@ -10378,6 +10408,8 @@ function updatePrediction(timeSeconds) {
     simulateCarMovement(predicted, move, effects, dtSeconds);
   } else if (gameMode === GAME_MODES.bugs) {
     simulateBugMovement(predicted, move, effects, dtSeconds, state.asteroid);
+  } else if (gameMode === GAME_MODES.clouds) {
+    simulateCloudMovement(predicted, move, effects, dtSeconds);
   } else {
     updateShipModeFacing(predicted, move, dtSeconds, gameMode);
     if (canThrust) {
@@ -10397,7 +10429,7 @@ function updatePrediction(timeSeconds) {
     predicted.miningHoldSeconds = 0;
   }
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
-  predicted.thrusting = gameMode === GAME_MODES.bugs ? false : canThrust;
+  predicted.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds ? false : canThrust;
 
   applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds);
   predicted.x += predicted.vx * dtSeconds;
@@ -10429,6 +10461,8 @@ function predictedLocalPlayer() {
     carHeading: predicted.carHeading,
     carSteerAngle: predicted.carSteerAngle,
     carAngularVelocity: predicted.carAngularVelocity,
+    cloudPitchX: predicted.cloudPitchX,
+    cloudPitchY: predicted.cloudPitchY,
     bugLegCenterX: predicted.bugLegCenterX,
     bugLegCenterY: predicted.bugLegCenterY,
     bugLegs: cloneBugLegs(predicted.bugLegs),

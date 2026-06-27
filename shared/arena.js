@@ -14,6 +14,7 @@ import {
 } from "./asteroid.js";
 import { createEmptyInput, normalizeInput } from "./input.js";
 import { simulateCarMovement } from "./car-physics.js";
+import { simulateCloudMovement } from "./cloud-physics.js";
 import {
   clampBugLegStateToCore,
   ensureBugLegState,
@@ -117,6 +118,8 @@ export function addPlayer(arena, playerOptions) {
     carSteerAngle: 0,
     subReverseActive: false,
     subReverseConeAngle: spawn.angle + Math.PI,
+    cloudPitchX: 0,
+    cloudPitchY: 0,
     bugLegCenterX: spawn.x,
     bugLegCenterY: spawn.y,
     bugLegs: null,
@@ -534,12 +537,14 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
-  player.thrusting = gameMode === GAME_MODES.bugs ? false : canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds ? false : canThrust;
 
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(player, move, effects, dtSeconds);
   } else if (gameMode === GAME_MODES.bugs) {
     simulateBugMovement(player, move, effects, dtSeconds, arena.asteroid);
+  } else if (gameMode === GAME_MODES.clouds) {
+    simulateCloudMovement(player, move, effects, dtSeconds);
   } else {
     updateShipModeFacing(player, move, dtSeconds, gameMode);
     if (canThrust) {
@@ -2957,6 +2962,8 @@ function snapshotPlayer(player, tick = 0, mode = GAME_MODES.bitspace) {
     carAngularVelocity: roundForSnapshot(player.carAngularVelocity || 0),
     subReverseActive: Boolean(player.subReverseActive),
     subReverseConeAngle: roundForSnapshot(player.subReverseConeAngle ?? player.angle + Math.PI),
+    cloudPitchX: roundForSnapshot(player.cloudPitchX || 0),
+    cloudPitchY: roundForSnapshot(player.cloudPitchY || 0),
     bugLegCenterX: roundForSnapshot(player.bugLegCenterX ?? player.x),
     bugLegCenterY: roundForSnapshot(player.bugLegCenterY ?? player.y),
     bugLegs: normalizeGameMode(mode) === GAME_MODES.bugs ? serializeBugLegsForSnapshot(player) : null,
@@ -3027,6 +3034,9 @@ function normalizeGameMode(mode) {
   }
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
+  }
+  if (mode === GAME_MODES.clouds) {
+    return GAME_MODES.clouds;
   }
   return GAME_MODES.bitspace;
 }
