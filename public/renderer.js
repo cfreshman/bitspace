@@ -5470,6 +5470,18 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       }
     });
 
+    if (options.gameMode === GAME_MODES.octopus) {
+      prewarmOctopusTentaclesForViewportPlayers(
+        renderPlayers,
+        camera,
+        ctx.width,
+        ctx.height,
+        options.asteroid,
+        options.timeSeconds ?? snapshot.tick / 60,
+        options.octopusTentacleStates
+      );
+    }
+
     measureBucket("raysMs", () => {
       for (const renderPlayer of worldRenderPlayers) {
         if (
@@ -10980,6 +10992,43 @@ function playerTouchesAsteroidVisibility(visibility, player) {
     asteroidVisibilityScreenPointVisible(visibility, screenX + radius * 0.7, screenY - radius * 0.7) ||
     asteroidVisibilityScreenPointVisible(visibility, screenX + radius * 0.7, screenY + radius * 0.7) ||
     asteroidVisibilityScreenPointVisible(visibility, screenX - radius * 0.7, screenY + radius * 0.7);
+}
+
+function prewarmOctopusTentaclesForViewportPlayers(
+  players,
+  camera,
+  viewportWidth,
+  viewportHeight,
+  asteroid,
+  timeSeconds,
+  tentacleStates
+) {
+  if (!(tentacleStates instanceof Map) || !Array.isArray(players) || !camera) {
+    return;
+  }
+
+  for (const player of players) {
+    if (!player || player.hidden || player.alive === false || !playerInsideViewportCircle(player, camera, viewportWidth, viewportHeight)) {
+      continue;
+    }
+
+    const radius = shipMainRadius(player);
+    const rearAngle = octopusRearAngle(player, shipVisualAngle(player));
+    const state = octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds);
+    octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds);
+  }
+}
+
+function playerInsideViewportCircle(player, camera, viewportWidth, viewportHeight) {
+  const centerX = Number(viewportWidth || 0) * 0.5;
+  const centerY = Number(viewportHeight || 0) * 0.5;
+  const visualRadius = Math.max(1, Math.min(Number(viewportWidth || 0), Number(viewportHeight || 0)) * 0.5);
+  const screenX = Number(player?.x || 0) - Number(camera?.x || 0);
+  const screenY = Number(player?.y || 0) - Number(camera?.y || 0);
+  const playerRadius = Math.max(1, Number(player?.radius || ENGINE.ship.radius || 1));
+  const dx = screenX - centerX;
+  const dy = screenY - centerY;
+  return dx * dx + dy * dy <= (visualRadius + playerRadius) * (visualRadius + playerRadius);
 }
 
 function drawBuildPreview(ctx, asteroid, player, players, camera, build, colors) {
