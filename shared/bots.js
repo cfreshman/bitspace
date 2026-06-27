@@ -1,4 +1,12 @@
-import { ENGINE, RENDER, miningRayLengthForGameMode, miningSecondsForGameMode } from "./constants.js";
+import {
+  ENGINE,
+  GAME_MODES,
+  RENDER,
+  miningRayLengthForGameMode,
+  miningSecondsForGameMode,
+  shipFrictionForGameMode,
+  shipThrustForGameMode
+} from "./constants.js";
 import {
   ASTEROID_TILE,
   STORM_STATE,
@@ -433,7 +441,26 @@ function updatePilotBotBrainImpl(arena, bot, brain) {
     move = addVector(move, incomingRock.dodge);
   }
 
-  if (nearestThreat && shouldFleeThreat) {
+  const stormEscapeTarget = botStormInteriorTarget(arena, bot);
+  if (stormEscapeTarget) {
+    debugMode = "storm-escape";
+    debugTarget = stormEscapeTarget;
+    const toward = directionBetween(bot, stormEscapeTarget);
+    aimAngle = Math.atan2(toward.y, toward.x);
+    const nav = botNavigateToPoint(arena, bot, brain, stormEscapeTarget, {
+      arriveDistance: Math.max(8, bot.radius * 0.9),
+      allowMining: true,
+      strictPathMining: true,
+      allowUnsafeStorm: stormEscapeTarget.allowUnsafeStorm === true,
+      pathLimitToView: false,
+      key: `storm-escape:${stormEscapeTarget.index}:${stormEscapeTarget.allowUnsafeStorm ? "unsafe" : "edge"}`,
+      rayReach
+    });
+    debugNav = botDebugNav(nav);
+    move = addVector(move, nav.move);
+    mining = nav.mining;
+    aimAngle = nav.aimAngle ?? aimAngle;
+  } else if (nearestThreat && shouldFleeThreat) {
     const away = directionBetween(nearestThreat.enemy, bot);
     const fleeTarget = botFleeTarget(arena, bot, brain, nearestThreat.enemy);
     debugMode = "flee";
@@ -4451,9 +4478,13 @@ function botNavigateToPoint(arena, bot, brain, target, options = {}) {
 }
 
 function botExecuteCurrentLocalPlan(arena, bot, brain, rayReach) {
+  const stormEscapePlan = typeof brain?.navGoalKey === "string" &&
+    brain.navGoalKey.startsWith("storm-escape:");
   const pathOptions = botVisiblePathOptions(bot, {
     allowMining: true,
-    strictPathMining: true
+    strictPathMining: true,
+    allowUnsafeStorm: stormEscapePlan && !botSafeStormTile(arena, tileIndexAtPoint(arena.asteroid, bot.x, bot.y)),
+    pathLimitToView: stormEscapePlan ? false : undefined
   });
   const pathStep = botExistingPathStep(arena, bot, brain, pathOptions);
 
@@ -4488,7 +4519,7 @@ function botExistingPathStep(arena, bot, brain, options = {}) {
   }
 
   const asteroid = arena.asteroid;
-  const pathOptions = botPathOptions(bot, options);
+  const pathOptions = botPathOptions(bot, { ...options, gameMode: arena?.mode });
   brain.navPathCursor = clamp(Math.floor(Number(brain.navPathCursor || 0)), 0, brain.navPath.length - 1);
 
   while (brain.navPathCursor < brain.navPath.length - 1) {
@@ -4838,7 +4869,7 @@ function botPathCenterlineMove(arena, bot, target, forward, normal, lateral, rem
   const stopAtTarget = target.mineable === true || !Number.isInteger(target.nextIndex);
   const coast = stopAtTarget &&
     lateralAbs <= BOT_SEGMENT_COAST_LATERAL_LIMIT_PIXELS &&
-    botPathShouldCoastToStop(bot, forwardSpeed, remaining);
+    botPathShouldCoastToStop(bot, forwardSpeed, remaining, arena?.mode);
   const alongCommand = coast ? 0 : 1;
 
   if (lateralAbs <= BOT_SEGMENT_LATERAL_DEADBAND_PIXELS) {
@@ -4866,7 +4897,7 @@ function botPathCenterlineMove(arena, bot, target, forward, normal, lateral, rem
   });
 }
 
-function botPathShouldCoastToStop(bot, forwardSpeed, remaining) {
+function botPathShouldCoastToStop(bot, forwardSpeed, remaining, gameMode = null) {
   if (remaining <= BOT_SEGMENT_PROGRESS_EPSILON) {
     return true;
   }
@@ -4874,13 +4905,13 @@ function botPathShouldCoastToStop(bot, forwardSpeed, remaining) {
     return false;
   }
 
-  const distance = botPathFrictionStopDistance(forwardSpeed);
+  const distance = botPathFrictionStopDistance(forwardSpeed, gameMode);
   return distance + BOT_SEGMENT_STOP_BUFFER_PIXELS >= remaining;
 }
 
-function botPathFrictionStopDistance(forwardSpeed) {
+function botPathFrictionStopDistance(forwardSpeed, gameMode = null) {
   const dt = 1 / ENGINE.tickRate;
-  const friction = ENGINE.ship.friction;
+  const friction = botPhysicsFrictionForMode(gameMode);
   let speed = Math.max(0, Number(forwardSpeed || 0));
   let distance = 0;
 
@@ -4972,7 +5003,7 @@ function botPathReachedWaypoint(arena, bot, brain, cursor, waypoint, arrivalDist
 
 function botDesiredPathSpeed(arena, bot, target, distance) {
   const effects = aggregateUpgradeEffects(bot.upgrades);
-  const maxSpeed = botPathAirSpeedForEffects(effects);
+  const maxSpeed = botPathAirSpeedForEffects(effects, arena?.mode);
   const tileSize = arena.asteroid?.tileSize || RENDER.tileSize || 16;
   const nextIsMineable = target.mineable === true || isAsteroidRockTile(target.tile);
   const stopDistance = nextIsMineable
@@ -6024,7 +6055,7 @@ function botPathArrivalDistance(asteroid, brain, cursor) {
 
 function botPathRouteToTarget(arena, bot, target, options = {}) {
   const asteroid = arena.asteroid;
-  const pathOptions = botPathOptions(bot, options);
+  const pathOptions = botPathOptions(bot, { ...options, gameMode: arena?.mode });
   const startIndex = tileIndexAtPoint(asteroid, bot.x, bot.y);
   if (!botPathTileAllowed(arena, startIndex, { ...pathOptions, startIndex, allowUnsafeStart: true })) {
     return null;
@@ -6104,7 +6135,7 @@ function botPathOptions(bot, options = {}) {
     ...options,
     pathPrepared: true,
     pathRadius: Math.max(1, Number(options.pathRadius ?? bot?.radius ?? ENGINE.ship.radius ?? 7)),
-    pathAirSpeed: botPathAirSpeedForEffects(effects),
+    pathAirSpeed: botPathAirSpeedForEffects(effects, options.gameMode ?? options.mode),
     pathMiningPower: Math.max(0.1, Number(effects.miningPowerMultiplier || 1)),
     pathTileInfo: options.pathTileInfo instanceof Map ? options.pathTileInfo : new Map(),
     pathStormClearance: options.pathStormClearance instanceof Map ? options.pathStormClearance : new Map(),
@@ -6187,11 +6218,34 @@ function botPathDangerKey(options = {}) {
   return `e${Math.round(options.pathEnemyDangerX / tileSize)},${Math.round(options.pathEnemyDangerY / tileSize)},${Math.round(scale * 100)}`;
 }
 
-function botPathAirSpeedForEffects(effects) {
+function botPathAirSpeedForEffects(effects, gameMode = null) {
+  const mode = botGameMode(gameMode);
+  const speedScale = mode === GAME_MODES.clouds
+    ? Math.max(0.01, Number(ENGINE.clouds.speedMultiplier) || 1)
+    : 1;
   return Math.max(
     1,
-    (ENGINE.ship.baseTerminalSpeed || 1) * Math.max(0.1, Number(effects.thrustMultiplier || 1))
+    (ENGINE.ship.baseTerminalSpeed || 1) * speedScale * Math.max(0.1, Number(effects.thrustMultiplier || 1))
   );
+}
+
+function botGameMode(gameMode) {
+  return gameMode === GAME_MODES.clouds ? GAME_MODES.clouds : gameMode;
+}
+
+function botPhysicsFrictionForMode(gameMode) {
+  if (botGameMode(gameMode) === GAME_MODES.clouds) {
+    return ENGINE.ship.friction;
+  }
+  return shipFrictionForGameMode(gameMode);
+}
+
+function botPhysicsAccelerationForMode(gameMode, effects) {
+  const multiplier = Math.max(0.1, Number(effects?.thrustMultiplier || 1));
+  if (botGameMode(gameMode) === GAME_MODES.clouds) {
+    return ENGINE.ship.thrust * Math.max(1, Number(ENGINE.clouds.speedMultiplier) || 1) * multiplier;
+  }
+  return shipThrustForGameMode(gameMode) * multiplier;
 }
 
 function findBotPath(arena, startIndex, goalIndex, options = {}) {
@@ -7287,8 +7341,8 @@ function botPlanTrajectorySequence(arena, bot, desired) {
 function botPlanTrajectorySequenceImpl(arena, bot, desired) {
   const effects = aggregateUpgradeEffects(bot.upgrades);
   const dt = BOT_TRAJECTORY_SOLVER_DT_SECONDS;
-  const friction = Math.pow(ENGINE.ship.friction, dt / (1 / ENGINE.tickRate));
-  const acceleration = ENGINE.ship.thrust * Math.max(0.1, Number(effects.thrustMultiplier || 1));
+  const friction = Math.pow(botPhysicsFrictionForMode(arena?.mode), dt / (1 / ENGINE.tickRate));
+  const acceleration = botPhysicsAccelerationForMode(arena?.mode, effects);
   const radius = Math.max(1, Number(bot.radius || ENGINE.ship.radius)) + BOT_TRAJECTORY_HARD_RADIUS_MARGIN;
   const trajectoryContext = botTrajectoryContext(arena, bot, radius, acceleration, dt);
   const nativePlan = botPlanNativeTrajectorySequence(

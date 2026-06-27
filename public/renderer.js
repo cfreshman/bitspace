@@ -79,10 +79,11 @@ const BUG_MODE_COLORS = Object.freeze({
   health: "#ff2f2f"
 });
 const CLOUD_MODE_COLORS = Object.freeze({
-  foreground: "#f8f8f8",
-  background: "#080808",
+  foreground: "#080808",
+  background: "#f8f8f8",
   backgroundDark: "#5d9ecf",
-  backing: "#647095",
+  // backing: "#7884a8",
+  backing: "#b2b2b2",
   groundWater: "#67b7e8",
   groundPlains: "#84c874",
   groundForest: "#4b8d58",
@@ -90,8 +91,8 @@ const CLOUD_MODE_COLORS = Object.freeze({
   groundRock: "#9298a4",
   groundWheat: "#d9bd64",
   groundLine: "#cde6ee",
-  ore: "#378aff",
-  diamond: "#4400ff",
+  ore: mixHexColors("#eeeeff", "#ffffff", 0.5),
+  diamond: mixHexColors("#84ffe8", "#ffffff", 0.25),
   rockFill: "#d5edfb",
   rockLine: "#e8e9ef",
   wallFill: "#bad9ef",
@@ -101,7 +102,7 @@ const CLOUD_MODE_COLORS = Object.freeze({
   bodyLine: "#000000",
   wingFill: "#ccefff",
   wingLine: "#f8fdff",
-  beam: "#3236ff",
+  beam: "#4400ff",
   stormForeground: "#d6a2ff",
   stormBackground: "#7c42d8",
   stormBacking: "#251044",
@@ -117,7 +118,7 @@ const CLOUD_DRAGONFLY_DOT_RADIUS = 1;
 const CLOUD_QUADCOPTER_FRAME_RADIUS = 2;
 const CLOUD_QUADCOPTER_PITCH_SCALE = 0.16;
 const CLOUD_QUADCOPTER_ROTOR_RADIUS = 3;
-const CLOUD_QUADCOPTER_VISUAL_RADIUS_BONUS = 2;
+const CLOUD_QUADCOPTER_VISUAL_RADIUS_BONUS = 1;
 const BUG_HUCK_ROCK_WEB_LIGHT = "#ffffff";
 const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
 const SUB_SHADOW_MASK_COLOR = "#010203";
@@ -188,6 +189,12 @@ const CLOUD_LANDSCAPE_HEX_HEIGHT = Math.sqrt(3) * CLOUD_LANDSCAPE_HEX_RADIUS;
 const CLOUD_LANDSCAPE_HEX_X_STEP = CLOUD_LANDSCAPE_HEX_RADIUS * 1.5;
 const CLOUD_LANDSCAPE_HEX_CORNER_JITTER = 1.4;
 const CLOUD_LANDSCAPE_FOG_CELL_SIZE = 4;
+const CLOUD_BACKING_TEXTURE_SIZE = 512;
+const CLOUD_BACKING_TEXTURE_DRIFT_X = 1.15;
+const CLOUD_BACKING_TEXTURE_DRIFT_Y = -0.45;
+const CLOUD_BACKING_TEXTURE_CONTRAST = 1.08;
+const cloudBackingTextureCache = new Map();
+const cloudBackingTextureUrlCache = new Map();
 const BUG_LEG_CONFIGS = Object.freeze(
   Array.from({ length: 8 }, (_, index) => ({
     angleOffset: (index / 8) * Math.PI * 2 + Math.PI * 2 / 16
@@ -280,6 +287,117 @@ function colorsForGameMode(colors, gameMode, params = {}) {
 
 function trueBackingColor(colors) {
   return colors.trueBacking || colors.backing || "#000000";
+}
+
+function cloudBackingTexturePixels(colors = {}) {
+  const key = [
+    colors.background || CLOUD_MODE_COLORS.background,
+    colors.foreground || CLOUD_MODE_COLORS.foreground
+  ].join(":");
+  let texture = cloudBackingTextureCache.get(key);
+  if (texture) {
+    return texture;
+  }
+
+  const base = packColor(darkenHexColor(colors.background || CLOUD_MODE_COLORS.background, 0.78)) >>> 0;
+  const light = packColor("#ffffff") >>> 0;
+  const baseR = base & 0xff;
+  const baseG = (base >>> 8) & 0xff;
+  const baseB = (base >>> 16) & 0xff;
+  const lightR = light & 0xff;
+  const lightG = (light >>> 8) & 0xff;
+  const lightB = (light >>> 16) & 0xff;
+  texture = new Uint32Array(CLOUD_BACKING_TEXTURE_SIZE * CLOUD_BACKING_TEXTURE_SIZE);
+  const cloudValues = new Float32Array(CLOUD_BACKING_TEXTURE_SIZE * CLOUD_BACKING_TEXTURE_SIZE);
+  let minCloud = Infinity;
+  let maxCloud = -Infinity;
+
+  const hash = (x, y, salt) => {
+    let value = Math.imul((x | 0) + 0x9e3779b9, 0x85ebca6b) ^
+      Math.imul((y | 0) + salt, 0xc2b2ae35);
+    value ^= value >>> 16;
+    value = Math.imul(value, 0x27d4eb2d);
+    value ^= value >>> 15;
+    return (value >>> 0) / 4294967295;
+  };
+  const smooth = (value) => value * value * (3 - value * 2);
+  const layer = (x, y, cells, salt) => {
+    const gx = (x / CLOUD_BACKING_TEXTURE_SIZE) * cells;
+    const gy = (y / CLOUD_BACKING_TEXTURE_SIZE) * cells;
+    const x0 = Math.floor(gx);
+    const y0 = Math.floor(gy);
+    const tx = smooth(gx - x0);
+    const ty = smooth(gy - y0);
+    const cx0 = ((x0 % cells) + cells) % cells;
+    const cy0 = ((y0 % cells) + cells) % cells;
+    const cx1 = (cx0 + 1) % cells;
+    const cy1 = (cy0 + 1) % cells;
+    const a = hash(cx0, cy0, salt);
+    const b = hash(cx1, cy0, salt);
+    const c = hash(cx0, cy1, salt);
+    const d = hash(cx1, cy1, salt);
+    const top = a + (b - a) * tx;
+    const bottom = c + (d - c) * tx;
+    return top + (bottom - top) * ty;
+  };
+
+  for (let y = 0; y < CLOUD_BACKING_TEXTURE_SIZE; y += 1) {
+    for (let x = 0; x < CLOUD_BACKING_TEXTURE_SIZE; x += 1) {
+      const warpX = (layer(x, y, 3, 131) - 0.5) * 72;
+      const warpY = (layer(x, y, 3, 397) - 0.5) * 72;
+      const cloud =
+        layer(x + warpX, y + warpY, 5, 17) * 0.58 +
+        layer(x + warpX * 0.45, y + warpY * 0.45, 10, 53) * 0.30 +
+        layer(x, y, 20, 89) * 0.12;
+      const index = y * CLOUD_BACKING_TEXTURE_SIZE + x;
+      cloudValues[index] = cloud;
+      minCloud = Math.min(minCloud, cloud);
+      maxCloud = Math.max(maxCloud, cloud);
+    }
+  }
+
+  const cloudRange = Math.max(0.0001, maxCloud - minCloud);
+  for (let y = 0; y < CLOUD_BACKING_TEXTURE_SIZE; y += 1) {
+    for (let x = 0; x < CLOUD_BACKING_TEXTURE_SIZE; x += 1) {
+      const index = y * CLOUD_BACKING_TEXTURE_SIZE + x;
+      const normalized = smoothstep01((cloudValues[index] - minCloud) / cloudRange);
+      const amount = clamp(normalized * CLOUD_BACKING_TEXTURE_CONTRAST, 0, 1);
+      const red = Math.round(baseR + (lightR - baseR) * amount);
+      const green = Math.round(baseG + (lightG - baseG) * amount);
+      const blue = Math.round(baseB + (lightB - baseB) * amount);
+      texture[index] = (255 << 24) | (blue << 16) | (green << 8) | red;
+    }
+  }
+
+  cloudBackingTextureCache.set(key, texture);
+  return texture;
+}
+
+function cloudBackingTextureCssUrl(colors = {}) {
+  const key = [
+    colors.background || CLOUD_MODE_COLORS.background,
+    colors.foreground || CLOUD_MODE_COLORS.foreground
+  ].join(":");
+  let url = cloudBackingTextureUrlCache.get(key);
+  if (url || typeof document === "undefined") {
+    return url || "";
+  }
+
+  const texture = cloudBackingTexturePixels(colors);
+  const canvas = document.createElement("canvas");
+  canvas.width = CLOUD_BACKING_TEXTURE_SIZE;
+  canvas.height = CLOUD_BACKING_TEXTURE_SIZE;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) {
+    return "";
+  }
+
+  const imageData = context.createImageData(CLOUD_BACKING_TEXTURE_SIZE, CLOUD_BACKING_TEXTURE_SIZE);
+  new Uint32Array(imageData.data.buffer).set(texture);
+  context.putImageData(imageData, 0, 0);
+  url = `url("${canvas.toDataURL("image/png")}")`;
+  cloudBackingTextureUrlCache.set(key, url);
+  return url;
 }
 
 function stormPaletteForGameMode(colors, gameMode = GAME_MODES.bitspace, options = {}) {
@@ -396,7 +514,7 @@ const ROCK_INNER_CORNER_RADIUS = 1;
 const CAR_ROCK_OUTLINE_WIDTH = 8;
 const SUB_ROCK_OUTLINE_WIDTH = 2;
 const BUG_ROCK_OUTLINE_WIDTH = 2;
-const CLOUD_ROCK_OUTLINE_WIDTH = 2;
+const CLOUD_ROCK_OUTLINE_WIDTH = 6;
 const CAR_ROCK_OUTER_BEVEL_RADIUS = Math.max(1, ROCK_OUTER_CORNER_RADIUS - 1);
 const ROCK_BEVEL_INNER_EDGE_TOLERANCE = 0.25;
 const ROCK_INNER_BEVEL_ENDPOINT_TOLERANCE = 0.75;
@@ -751,6 +869,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   const visualShipAngles = new Map();
   const subLightAngles = new Map();
   let syncedPageBacking = "";
+  let syncedCloudPageTextureKey = "";
 
   function sizeCanvasBox() {
     const viewport = getViewportSize();
@@ -834,6 +953,54 @@ export function createRenderer(canvas, minimapCanvas = null) {
     document.documentElement.style.backgroundColor = color;
     document.body.style.backgroundColor = color;
     canvas.style.backgroundColor = color;
+  }
+
+  function syncPageCloudBackingTexture(cloudColors = null, camera = null, timeSeconds = 0) {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    if (!cloudColors || !camera) {
+      if (!syncedCloudPageTextureKey) {
+        return;
+      }
+      syncedCloudPageTextureKey = "";
+      document.documentElement.style.backgroundImage = "";
+      document.documentElement.style.backgroundRepeat = "";
+      document.documentElement.style.backgroundSize = "";
+      document.documentElement.style.backgroundPosition = "";
+      document.body.style.backgroundImage = "";
+      document.body.style.backgroundRepeat = "";
+      document.body.style.backgroundSize = "";
+      document.body.style.backgroundPosition = "";
+      return;
+    }
+
+    const sceneRect = sceneContentRect(getViewportSize());
+    const scale = Math.max(0.0001, Number(sceneRect.scale || 1));
+    const textureCssSize = CLOUD_BACKING_TEXTURE_SIZE * scale;
+    const offsetX = Number(camera.x || 0) + Number(timeSeconds || 0) * CLOUD_BACKING_TEXTURE_DRIFT_X;
+    const offsetY = Number(camera.y || 0) + Number(timeSeconds || 0) * CLOUD_BACKING_TEXTURE_DRIFT_Y;
+    const positionX = sceneRect.left - offsetX * scale;
+    const positionY = sceneRect.top - offsetY * scale;
+    const image = cloudBackingTextureCssUrl(cloudColors);
+    const key = [
+      image,
+      textureCssSize.toFixed(3),
+      positionX.toFixed(3),
+      positionY.toFixed(3)
+    ].join(":");
+    if (key === syncedCloudPageTextureKey || !image) {
+      return;
+    }
+
+    syncedCloudPageTextureKey = key;
+    for (const element of [document.documentElement, document.body]) {
+      element.style.backgroundImage = image;
+      element.style.backgroundRepeat = "repeat";
+      element.style.backgroundSize = `${textureCssSize}px ${textureCssSize}px`;
+      element.style.backgroundPosition = `${positionX}px ${positionY}px`;
+    }
   }
 
   function resizeMinimapSurface(viewport = getViewportSize()) {
@@ -1039,6 +1206,9 @@ export function createRenderer(canvas, minimapCanvas = null) {
       const frameColors = colorsForGameMode(colors, gameMode, gameParams);
       currentTextColors = frameColors;
       syncPageBackingColor(trueBackingColor(frameColors));
+      if (gameMode !== GAME_MODES.clouds) {
+        syncPageCloudBackingTexture(null);
+      }
       const frameOptions = {
         ...options,
         gameMode,
@@ -1167,6 +1337,16 @@ export function createRenderer(canvas, minimapCanvas = null) {
         perf.visibilityGpuRequests = stormStats?.visibilityRequests || 0;
       }
       cleanupSubsCircleFringe(surface, overlaySurface, frameOptions.gameMode, frameColors);
+      if (gameMode === GAME_MODES.clouds) {
+        syncPageCloudBackingTexture(frameColors, sharedRenderState.camera, timeSeconds);
+        for (const cloudSurface of [surface, overlaySurface, cloudWingSurface, hudSurface]) {
+          cloudSurface?.replaceBackingWithCloudTexture?.(
+            frameColors,
+            sharedRenderState.camera,
+            timeSeconds
+          );
+        }
+      }
       const presentStart = measurePerf ? performance.now() : 0;
       const worldOverlays = gameMode === GAME_MODES.clouds && cloudWingSurface
         ? [overlaySurface, cloudWingSurface]
@@ -1696,6 +1876,30 @@ function createPixelSurface(canvasContext, width, height) {
         const green = Math.round(baseG + (blendG - baseG) * amount);
         const blue = Math.round(baseB + (blendB - baseB) * amount);
         pixels[index] = (255 << 24) | (blue << 16) | (green << 8) | red;
+      }
+    },
+    replaceBackingWithCloudTexture(colors, camera = {}, timeSeconds = 0) {
+      const backing = colorFor(colors?.backing || RENDER.background, colorCache) >>> 0;
+      const texture = cloudBackingTexturePixels(colors);
+      const textureMask = CLOUD_BACKING_TEXTURE_SIZE - 1;
+      const cameraX = Number(camera?.x || 0);
+      const cameraY = Number(camera?.y || 0);
+      const time = Number(timeSeconds || 0);
+      const offsetX = Math.floor(cameraX + time * CLOUD_BACKING_TEXTURE_DRIFT_X);
+      const offsetY = Math.floor(cameraY + time * CLOUD_BACKING_TEXTURE_DRIFT_Y);
+
+      for (let py = 0; py < height; py += 1) {
+        const row = py * width;
+        const textureY = (py + offsetY) & textureMask;
+        const textureRow = textureY * CLOUD_BACKING_TEXTURE_SIZE;
+        for (let px = 0; px < width; px += 1) {
+          const index = row + px;
+          if ((pixels[index] >>> 0) !== backing) {
+            continue;
+          }
+
+          pixels[index] = texture[textureRow + ((px + offsetX) & textureMask)];
+        }
       }
     },
     fillRectAlpha(x, y, rectWidth, rectHeight, color, alpha = 1) {
@@ -8811,14 +9015,15 @@ function drawAsteroidTiles(
       gameMode === GAME_MODES.subs ||
       gameMode === GAME_MODES.bugs ||
       gameMode === GAME_MODES.clouds;
+    const hullOnly = gameMode === GAME_MODES.bugs;
     const cloudResources = gameMode === GAME_MODES.clouds;
     const oreFillColor = colors.ore || colors.foreground;
     const diamondFillColor = colors.diamond || colors.foreground;
     const oreStrokeColor = cloudResources
-      ? mixHexColors(oreFillColor, "#ffffff", 0.45)
+      ? mixHexColors(oreFillColor, colors.backing, 0.5)
       : colors.backing || colors.foreground;
     const diamondStrokeColor = cloudResources
-      ? mixHexColors(diamondFillColor, "#ffffff", 0.45)
+      ? mixHexColors(diamondFillColor, colors.backing, 0.5)
       : colors.backing || colors.foreground;
     ctx.fillStyle = colors.foreground;
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
@@ -8862,7 +9067,8 @@ function drawAsteroidTiles(
               ? {
                   fillColor: diamondFillColor,
                   edgeColor: diamondStrokeColor,
-                  hullOnly: true
+                  // hullOnly: true,
+                  hullOnly,
                 }
               : null
           );
@@ -13097,10 +13303,12 @@ function drawCloudLandscapeFog(ctx, viewX, viewY, padding, colors = {}) {
         cloudLandscapeNoise(worldX, worldY, 0.013, 239) * 0.10;
       const normalized = clamp(broad * 0.5 + 0.5, 0, 1);
       // const color = normalized >= 0.5 ? '#d7d7d4' : '#d7d7d4'; // e7e6e0
-      const color = normalized >= 0.5 ? '#d7d7d4' : '#d7d7d4'; // e7e6e0
+      // const color = normalized >= 0.5 ? '#d7d7d4' : '#d7d7d4'; // e7e6e0
+      const color = normalized >= 0.5 ? '#e7e6e0' : '#e7e6e0'; // e7e6e0
+      const baseAlpha = 0.2
       const alpha = normalized >= 0.5
-        ? 0.4 + (normalized - 0.5) * 0.5
-        : 0.6 + (0.5 - normalized) * 0.3;
+        ? baseAlpha + (normalized - 0.5) * 0.5
+        : baseAlpha + .2 + (0.5 - normalized) * 0.3;
       if (typeof ctx.fillRectAlpha === "function") {
         ctx.fillRectAlpha(x, y, cellSize, cellSize, color, alpha);
         continue;
@@ -14089,10 +14297,10 @@ function fillProjectedCloudCoreOutline(ctx, cx, cy, half, pitch, radius) {
 
 function fillProjectedCloudCoreDiamond(ctx, cx, cy, pitch, radius) {
   fillProjectedCloudCoreSquare(ctx, cx, cy, 1, pitch, radius);
-  fillProjectedCloudCorePixel(ctx, cx, cy, -2, 0, pitch, radius);
-  fillProjectedCloudCorePixel(ctx, cx, cy, 2, 0, pitch, radius);
-  fillProjectedCloudCorePixel(ctx, cx, cy, 0, -2, pitch, radius);
-  fillProjectedCloudCorePixel(ctx, cx, cy, 0, 2, pitch, radius);
+  // fillProjectedCloudCorePixel(ctx, cx, cy, -2, 0, pitch, radius);
+  // fillProjectedCloudCorePixel(ctx, cx, cy, 2, 0, pitch, radius);
+  // fillProjectedCloudCorePixel(ctx, cx, cy, 0, -2, pitch, radius);
+  // fillProjectedCloudCorePixel(ctx, cx, cy, 0, 2, pitch, radius);
 }
 
 function fillProjectedCloudCorePixel(ctx, cx, cy, x, y, pitch, radius) {
@@ -17694,7 +17902,7 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameM
 
 function miningRayBeamOptionsForGameMode(gameMode) {
   return gameMode === GAME_MODES.clouds
-    ? { widthScale: 0.67, noWaves: true }
+    ? { widthScale: 1, noWaves: true }
     : {};
 }
 
@@ -17751,7 +17959,8 @@ function miningRayRenderColors(colors, gameMode, timeSeconds, player = null) {
   if (gameMode === GAME_MODES.clouds) {
     return {
       ...colors,
-      foreground: player ? cloudPlayerDotColor(player) : colors.beam || CLOUD_MODE_COLORS.beam
+      // foreground: player ? cloudPlayerDotColor(player) : colors.beam || CLOUD_MODE_COLORS.beam,
+      foreground: colors.beam || CLOUD_MODE_COLORS.beam,
     };
   }
 

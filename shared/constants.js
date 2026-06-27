@@ -126,12 +126,13 @@ export const ENGINE = Object.freeze({
     legDriveBias: 0.48
   },
   clouds: {
-    radius: 9,
-    tileSize: 24,
-    speedMultiplier: 8,
+    radius: 5,
+    tileSize: 16,
+    speedMultiplier: 2,
     friction: 1,
     healthScale: 0.25,
-    rayLengthScale: 2,
+    rayLengthScale: 1.25,
+    miningTimeScale: 0.5,
     pitchResponseRate: 2,
     pitchReturnRate: 2,
     maxPitchRadians: Math.PI / 6,
@@ -264,6 +265,9 @@ export function miningSecondsForGameMode(seconds, gameMode) {
   const baseSeconds = Number(seconds) || 0;
   if (gameMode === GAME_MODES.subs) {
     return baseSeconds * ENGINE.subs.miningTimeScale;
+  }
+  if (gameMode === GAME_MODES.clouds) {
+    return baseSeconds * ENGINE.clouds.miningTimeScale;
   }
   return baseSeconds;
 }

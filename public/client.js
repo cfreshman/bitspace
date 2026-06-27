@@ -3012,10 +3012,31 @@ function normalizeMenuMode(mode) {
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
   }
+  if (mode === GAME_MODES.clouds) {
+    return GAME_MODES.clouds;
+  }
   return GAME_MODES.bitspace;
 }
 
+function menuModeFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const mode = String(params.get("mode") || params.get("gameMode") || "").trim().toLowerCase();
+    if (mode === "cloud" || mode === "clouds" || mode === "sky") {
+      return GAME_MODES.clouds;
+    }
+  } catch (error) {
+    // Ignore URL parsing failures; saved/default mode still applies.
+  }
+  return null;
+}
+
 function loadMenuMode() {
+  const urlMode = menuModeFromUrl();
+  if (urlMode) {
+    return urlMode;
+  }
+
   try {
     return normalizeMenuMode(window.localStorage.getItem(MENU_MODE_STORAGE_KEY));
   } catch (error) {
@@ -3132,6 +3153,9 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   }
   if (normalized === GAME_MODES.bugs) {
     return "BITSPACE: BUGS";
+  }
+  if (normalized === GAME_MODES.clouds) {
+    return "BITSPACE: SKY";
   }
   return "BITSPACE";
 }
