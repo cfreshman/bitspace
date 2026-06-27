@@ -3018,15 +3018,66 @@ function normalizeMenuMode(mode) {
   return GAME_MODES.bitspace;
 }
 
-function menuModeFromUrl() {
+function menuModeUrlParams() {
   try {
-    const params = new URLSearchParams(window.location.search);
-    const mode = String(params.get("mode") || params.get("gameMode") || "").trim().toLowerCase();
-    if (mode === "cloud" || mode === "clouds" || mode === "sky") {
-      return GAME_MODES.clouds;
-    }
+    return new URLSearchParams(window.location.search);
   } catch (error) {
-    // Ignore URL parsing failures; saved/default mode still applies.
+    return null;
+  }
+}
+
+function menuModeParamValue(params = menuModeUrlParams()) {
+  return String(params?.get("mode") || params?.get("gameMode") || "").trim().toLowerCase();
+}
+
+function menuModeEnabledByUrl(mode) {
+  const params = menuModeUrlParams();
+  if (!params) {
+    return false;
+  }
+
+  const requestedMode = menuModeParamValue(params);
+  if (mode === GAME_MODES.cars) {
+    return requestedMode === "car" ||
+      requestedMode === "cars" ||
+      params.get("cars") === "1" ||
+      params.get("car") === "1";
+  }
+  if (mode === GAME_MODES.subs) {
+    return requestedMode === "sub" ||
+      requestedMode === "subs" ||
+      params.get("subs") === "1" ||
+      params.get("sub") === "1";
+  }
+  if (mode === GAME_MODES.clouds) {
+    return requestedMode === "cloud" ||
+      requestedMode === "clouds" ||
+      requestedMode === "sky" ||
+      params.get("clouds") === "1" ||
+      params.get("cloud") === "1" ||
+      params.get("sky") === "1";
+  }
+  return true;
+}
+
+function menuModeCanLoad(mode) {
+  const normalized = normalizeMenuMode(mode);
+  return normalized === GAME_MODES.bitspace ||
+    normalized === GAME_MODES.bugs ||
+    menuModeEnabledByUrl(normalized);
+}
+
+function menuModeFromUrl() {
+  const params = menuModeUrlParams();
+  const mode = menuModeParamValue(params);
+  if (mode === "car" || mode === "cars") {
+    return GAME_MODES.cars;
+  }
+  if (mode === "sub" || mode === "subs") {
+    return GAME_MODES.subs;
+  }
+  if (mode === "cloud" || mode === "clouds" || mode === "sky") {
+    return GAME_MODES.clouds;
   }
   return null;
 }
@@ -3038,7 +3089,8 @@ function loadMenuMode() {
   }
 
   try {
-    return normalizeMenuMode(window.localStorage.getItem(MENU_MODE_STORAGE_KEY));
+    const storedMode = normalizeMenuMode(window.localStorage.getItem(MENU_MODE_STORAGE_KEY));
+    return menuModeCanLoad(storedMode) ? storedMode : GAME_MODES.bitspace;
   } catch (error) {
     return GAME_MODES.bitspace;
   }
@@ -3127,7 +3179,7 @@ function selectedMenuMode() {
 }
 
 function toggleMenuMode() {
-  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs];
+  const modes = [GAME_MODES.bitspace, ...menuModeButtonSlots()];
   const current = selectedMenuMode();
   const index = modes.indexOf(current);
   setMenuMode(modes[(index + 1) % modes.length]);
@@ -5694,7 +5746,7 @@ function menuEntities() {
 
 function menuModeButtons(mode) {
   const currentMode = normalizeMenuMode(mode);
-  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs].map((slot) => {
+  return menuModeButtonSlots().map((slot) => {
     const selected = currentMode === slot;
     return {
       slot,
@@ -5702,6 +5754,11 @@ function menuModeButtons(mode) {
       label: selected ? menuModeLabel(GAME_MODES.bitspace) : menuModeLabel(slot)
     };
   });
+}
+
+function menuModeButtonSlots() {
+  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs]
+    .filter((mode) => mode === GAME_MODES.bugs || menuModeEnabledByUrl(mode));
 }
 
 function menuModeLabel(mode) {
