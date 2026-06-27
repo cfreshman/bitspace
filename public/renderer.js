@@ -83,19 +83,29 @@ const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
 const SUB_SHADOW_MASK_COLOR = "#010203";
 const SUB_NON_RENDER_OCEAN_SHADOW_ALPHA = 0.95;
 const CAR_BODY_COLORS = Object.freeze([
-  "#ff3024",
-  "#2f60ff",
-  "#1fe84f",
-  "#ff8f1f",
-  "#9c35ff",
-  "#ff36c4",
-  "#ffd81f",
-  "#12d6ff",
+  "#df261c",
+  "#2452dc",
+  "#18c941",
+  "#de7819",
+  "#8429de",
+  "#df27a9",
+  "#dfbc19",
+  "#0eb9df",
 ]);
 const BUG_HEALTH_COLORS = Object.freeze([
   BUG_MODE_COLORS.health,
   "#2f63ff",
   "#2fff63",
+  "#ff942f",
+  "#942fff",
+  "#ff2fc3",
+  "#ffdf2f",
+  "#2fdfff"
+]);
+const SUB_HEALTH_COLORS = Object.freeze([
+  SUB_MODE_COLORS.health,
+  BUG_MODE_COLORS.health,
+  "#2f63ff",
   "#ff942f",
   "#942fff",
   "#ff2fc3",
@@ -108,10 +118,12 @@ const CAR_TIRE_WIDTH = 3;
 const CAR_CENTER_TIRE_LENGTH_SCALE = 1.36;
 const CAR_CENTER_TIRE_RADIUS_SCALE = 0.32;
 const CAR_CENTER_TIRE_TREAD_SPACING = 4;
-const CAR_BODY_LIGHT_MIX = 0.24;
-const CAR_BODY_MID_LIGHT_MIX = 0.08;
-const CAR_BODY_MID_DARKEN = 0.76;
-const CAR_BODY_DARKEN = 0.54;
+const CAR_BODY_LIGHT_MIX = 0.22;
+const CAR_BODY_MID_LIGHT_MIX = 0.07;
+const CAR_BODY_MID_DARKEN = 0.78;
+const CAR_BODY_DARKEN = 0.58;
+const CAR_BODY_SHADE_DESATURATE = 0.1;
+const CAR_BODY_SPHERE_DITHER = 0.42;
 const CAR_BODY_LEAN_VISUAL_SHIFT = 1.5;
 const CAR_ENGINE_NOZZLE_LENGTH = 5;
 const CAR_ENGINE_NOZZLE_WIDTH = 2;
@@ -890,6 +902,12 @@ export function createRenderer(canvas, minimapCanvas = null) {
   return {
     resize() {
       sizeCanvasBox();
+    },
+    clearParticles() {
+      particles.length = 0;
+      miningParticles.length = 0;
+      tireTrackParticles.length = 0;
+      emitCarry.clear();
     },
     draw(snapshot, options = {}) {
       const nextMinimapVisible = options.playerMapVisible === true &&
@@ -13180,7 +13198,10 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
       }
       drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim, gameMode);
     });
-    drawShipHealthIndicator(ctx, x, y, player, colors);
+    drawShipHealthIndicator(ctx, x, y, player, {
+      ...colors,
+      health: subHealthColor(player)
+    });
     drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
     return;
   }
@@ -14255,16 +14276,21 @@ function bugHealthColor(player) {
   return BUG_HEALTH_COLORS[index] || BUG_MODE_COLORS.health;
 }
 
+function subHealthColor(player) {
+  const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), SUB_HEALTH_COLORS.length);
+  return SUB_HEALTH_COLORS[index] || SUB_MODE_COLORS.health;
+}
+
 function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
   const radiusSq = radius * radius;
   const minX = Math.floor(cx - radius);
   const maxX = Math.ceil(cx + radius);
   const minY = Math.floor(cy - radius);
   const maxY = Math.ceil(cy + radius);
-  const darkColor = darkenHexColor(bodyColor, CAR_BODY_DARKEN);
-  const midDarkColor = darkenHexColor(bodyColor, CAR_BODY_MID_DARKEN);
-  const midLightColor = mixHexColors(bodyColor, "#ffffff", CAR_BODY_MID_LIGHT_MIX);
-  const lightColor = mixHexColors(bodyColor, "#ffffff", CAR_BODY_LIGHT_MIX);
+  const darkColor = desaturateHexColor(darkenHexColor(bodyColor, CAR_BODY_DARKEN), CAR_BODY_SHADE_DESATURATE);
+  const midDarkColor = desaturateHexColor(darkenHexColor(bodyColor, CAR_BODY_MID_DARKEN), CAR_BODY_SHADE_DESATURATE);
+  const midLightColor = desaturateHexColor(mixHexColors(bodyColor, "#ffffff", CAR_BODY_MID_LIGHT_MIX), CAR_BODY_SHADE_DESATURATE);
+  const lightColor = desaturateHexColor(mixHexColors(bodyColor, "#ffffff", CAR_BODY_LIGHT_MIX), CAR_BODY_SHADE_DESATURATE);
   let currentColor = "";
 
   for (let py = minY; py <= maxY; py += 1) {
@@ -14287,12 +14313,12 @@ function fillCarBodySphere(ctx, cx, cy, radius, bodyColor) {
         1
       );
       const dither = (SHIP_SPHERE_DITHER[(positiveModulo(px, 4)) + positiveModulo(py, 4) * 4] - 7.5) / 16;
-      const shade = light + dither * 0.32;
-      const color = shade > 0.72
+      const shade = light + dither * CAR_BODY_SPHERE_DITHER;
+      const color = shade > 0.78
         ? lightColor
-        : shade > 0.34 ? midLightColor
-          : shade < -0.26 ? darkColor
-            : shade < -0.04 ? midDarkColor : bodyColor;
+        : shade > 0.4 ? midLightColor
+          : shade < -0.34 ? darkColor
+            : shade < -0.1 ? midDarkColor : bodyColor;
       if (color !== currentColor) {
         ctx.fillStyle = color;
         currentColor = color;

@@ -73,6 +73,7 @@ const ROOM_NAME_STORAGE_KEY = "bitspace.roomName";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
 const MENU_MODE_STORAGE_KEY = "bitspace.menuMode";
+const MENU_STATE_STORAGE_KEY = "bitspace.menuState";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
 const LOCAL_BOT_COUNT_STORAGE_KEY = "bitspace.localBotCount";
 const BOT_DEBUG_OVERLAY_STORAGE_KEY = "bitspace.debugBotOverlay";
@@ -141,6 +142,8 @@ const LOCAL_BOT_MAX_COUNT = 7;
 const LOCAL_BOT_DEFAULT_COUNT = 5;
 const LOCAL_BOT_SAVE_VERSION = 2;
 const LOCAL_BOT_SAVE_INTERVAL_SECONDS = 1;
+const MENU_STATE_STORAGE_VERSION = 1;
+const MENU_STATE_SAVE_INTERVAL_SECONDS = 0.5;
 const LOCAL_BOT_PLAN_INTERVAL_TICKS = 12;
 const LOCAL_BOT_INPUT_INTERVAL_TICKS = 2;
 const LOCAL_BOT_MAX_STEPS_PER_FRAME = 4;
@@ -535,6 +538,9 @@ const state = {
 };
 
 state.menu.themeBaseId = themePresetIdForTheme(state.theme);
+if (Number.isInteger(state.menu.settingsSelectedIndex)) {
+  state.settingsUi.selectedIndex = state.menu.settingsSelectedIndex;
+}
 updateDocumentTitleForMenuMode();
 
 setBotDebugEnabled(state.botDebugOverlay);
@@ -663,7 +669,13 @@ function applyServerRoom(room) {
     state.menu.activeTargetId = null;
     resetLocalDamageAudioState();
     syncVoiceRoomState();
-    enterMenuRoom(MENU_ROOMS.ready);
+    const initialLocalMenuRestore = !previousState && !previousRoomId;
+    if (initialLocalMenuRestore) {
+      syncMenuRoomState();
+      saveMenuState();
+    } else {
+      enterMenuRoom(MENU_ROOMS.ready);
+    }
     forgetRegisteredRoom();
     return;
   }
@@ -690,6 +702,7 @@ function applyServerRoom(room) {
     resetEntitySmoothing();
     state.prediction.huckRockCooldownSeconds = 0;
     clearPredictedHuckRocks();
+    clearRendererParticles();
     cancelMiningRay();
   }
   if (previousState === "waiting" && room?.state === "active") {
@@ -2020,6 +2033,7 @@ function handleMenuRayCountKey(event) {
   if (state.menu.player) {
     state.menu.player.prototypeMiningRayCount = state.menu.rayCount;
   }
+  saveMenuState();
   return true;
 }
 
@@ -2942,17 +2956,24 @@ function createControllerState() {
 
 function createMenuState() {
   const mode = loadMenuMode();
+  const savedMenuState = loadMenuState(mode);
   const readyAsteroid = createReadyMenuAsteroid(mode);
   const asteroids = {
     [MENU_ROOMS.ready]: readyAsteroid,
     [MENU_ROOMS.theme]: createThemeMenuAsteroid(mode),
     [MENU_ROOMS.settings]: readyAsteroid
   };
-  const asteroid = asteroids[MENU_ROOMS.ready];
-  const arena = createMenuArena(MENU_ROOMS.ready, asteroid, mode);
+  const room = savedMenuRoom(savedMenuState?.room);
+  const asteroid = asteroids[room] || readyAsteroid;
+  const arena = createMenuArena(room, asteroid, mode);
+  const player = arena.players.get(MENU_PLAYER_ID);
+  const rayCount = savedMenuRayCount(savedMenuState?.rayCount);
+  if (player && savedMenuState?.player) {
+    restoreMenuPlayerState(player, savedMenuState.player, asteroid, rayCount);
+  }
 
   return {
-    room: MENU_ROOMS.ready,
+    room,
     mode: normalizeMenuMode(arena.mode),
     arena,
     tick: 0,
@@ -2967,12 +2988,14 @@ function createMenuState() {
     asteroid,
     huckRocks: [],
     huckRockCooldownSeconds: 0,
-    rayCount: 1,
+    rayCount,
+    lastStateSaveSeconds: 0,
+    settingsSelectedIndex: Math.max(0, Math.floor(Number(savedMenuState?.settingsSelectedIndex) || 0)),
     themeFocusStartedMs: 0,
     themeFocusUntilMs: 0,
     themeFocusTheme: null,
     themeBaseId: null,
-    player: arena.players.get(MENU_PLAYER_ID)
+    player
   };
 }
 
@@ -3005,6 +3028,76 @@ function saveMenuMode(mode = selectedMenuMode()) {
   }
 }
 
+function loadMenuState(mode = loadMenuMode()) {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(MENU_STATE_STORAGE_KEY) || "null");
+    if (
+      !saved ||
+      saved.version !== MENU_STATE_STORAGE_VERSION ||
+      normalizeMenuMode(saved.mode) !== normalizeMenuMode(mode)
+    ) {
+      return null;
+    }
+    return saved;
+  } catch (error) {
+    try {
+      window.localStorage.removeItem(MENU_STATE_STORAGE_KEY);
+    } catch (removeError) {
+      // Ignore storage failures; menu can still be rebuilt.
+    }
+    return null;
+  }
+}
+
+function saveMenuState() {
+  const menu = state?.menu;
+  if (!menu?.player) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(MENU_STATE_STORAGE_KEY, JSON.stringify({
+      version: MENU_STATE_STORAGE_VERSION,
+      savedAt: Date.now(),
+      mode: normalizeMenuMode(menu.mode),
+      room: savedMenuRoom(menu.room),
+      rayCount: savedMenuRayCount(menu.rayCount),
+      settingsSelectedIndex: Number.isInteger(state.settingsUi?.selectedIndex)
+        ? state.settingsUi.selectedIndex
+        : 0,
+      player: serializeLocalBotPlayer(menu.player)
+    }));
+  } catch (error) {
+    // Ignore storage failures; this is only reload continuity.
+  }
+}
+
+function saveMenuStateThrottled(timeSeconds) {
+  const menu = state?.menu;
+  if (!menu) {
+    return;
+  }
+
+  if (timeSeconds - Number(menu.lastStateSaveSeconds || 0) < MENU_STATE_SAVE_INTERVAL_SECONDS) {
+    return;
+  }
+
+  menu.lastStateSaveSeconds = timeSeconds;
+  saveMenuState();
+}
+
+function savedMenuRoom(room) {
+  return Object.values(MENU_ROOMS).includes(room) ? room : MENU_ROOMS.ready;
+}
+
+function savedMenuRayCount(value) {
+  return clamp(
+    Math.floor(Number(value) || MENU_MINING_RAY_MIN_COUNT),
+    MENU_MINING_RAY_MIN_COUNT,
+    MENU_MINING_RAY_MAX_COUNT
+  );
+}
+
 function selectedMenuMode() {
   return normalizeMenuMode(state.menu?.mode);
 }
@@ -3022,6 +3115,7 @@ function setMenuMode(mode) {
   updateDocumentTitleForMenuMode();
   rebuildMenuAsteroidsForMode(state.menu.mode);
   rebuildMenuArena();
+  saveMenuState();
   requestMechanicalBeep();
 }
 
@@ -3170,6 +3264,9 @@ function resetMenuPlayer(player, asteroid) {
   player.vx = 0;
   player.vy = 0;
   player.angle = Math.PI / 4;
+  player.carHeading = Math.PI / 4;
+  player.carSteerAngle = 0;
+  player.carAngularVelocity = 0;
   player.bugLegCenterX = center.x;
   player.bugLegCenterY = center.y;
   player.bugLegs = null;
@@ -3196,6 +3293,27 @@ function resetMenuPlayer(player, asteroid) {
   player.lastKillDropTick = Number.NEGATIVE_INFINITY;
   player.alive = true;
   return player;
+}
+
+function restoreMenuPlayerState(player, savedPlayer, asteroid, rayCount = MENU_MINING_RAY_MIN_COUNT) {
+  restoreLocalBotPlayer(player, savedPlayer || {});
+  if (!Number.isFinite(player.x) || !Number.isFinite(player.y)) {
+    resetMenuPlayer(player, asteroid);
+  }
+  player.id = MENU_PLAYER_ID;
+  player.name = "READY";
+  player.alive = true;
+  player.prototypeMiningRayCount = savedMenuRayCount(rayCount);
+  player.mining = false;
+  player.miningRay = null;
+  player.miningHoldSeconds = 0;
+  player.rayExtension = 0;
+  player.buttonTargetId = null;
+  player.buttonTargetSeconds = 0;
+  player.buttonTargetActivated = false;
+  player.huckRockEngineCutoutSeconds = 0;
+  player.thrusting = false;
+  ensureBugLegCenter(player);
 }
 
 function cancelMiningRay() {
@@ -3225,15 +3343,17 @@ function cancelMiningRay() {
   }
 }
 
-function enterMenuRoom(room) {
+function enterMenuRoom(room, options = {}) {
   if (!Object.values(MENU_ROOMS).includes(room)) {
     return;
   }
 
   cancelMiningRay();
   releaseSpaceUntilKeyup();
+  clearRendererParticles();
 
-  const preserveMenuCamera = room === MENU_ROOMS.settings && state.menu.room === MENU_ROOMS.ready;
+  const preserveMenuCamera = options.preservePlayer === true ||
+    (room === MENU_ROOMS.settings && state.menu.room === MENU_ROOMS.ready);
   state.menu.room = room;
   state.menu.asteroid = state.menu.asteroids[room];
   state.menu.huckRocks = [];
@@ -3263,6 +3383,9 @@ function enterMenuRoom(room) {
   nextPlayer.vy = 0;
   if (!preserveMenuCamera) {
     nextPlayer.angle = Math.PI / 4;
+    nextPlayer.carHeading = Math.PI / 4;
+    nextPlayer.carSteerAngle = 0;
+    nextPlayer.carAngularVelocity = 0;
   }
   nextPlayer.facingMoveX = 0;
   nextPlayer.facingMoveY = 0;
@@ -3278,6 +3401,7 @@ function enterMenuRoom(room) {
   nextPlayer.huckRockEngineCutoutSeconds = 0;
   nextPlayer.thrusting = false;
   updateMobileControlUi();
+  saveMenuState();
 }
 
 function updateMenuSimulation(timeSeconds) {
@@ -3304,6 +3428,7 @@ function updateMenuSimulation(timeSeconds) {
     player.rayExtension = 0;
     state.menu.activeTargetId = null;
     resetMenuButtonTarget();
+    saveMenuStateThrottled(timeSeconds);
     return;
   }
 
@@ -3351,6 +3476,7 @@ function updateMenuSimulation(timeSeconds) {
 
   updateMenuMiningRay(player, dtSeconds);
   updateMenuHuckRocks(player, dtSeconds);
+  saveMenuStateThrottled(timeSeconds);
 }
 
 function setMenuPlayerInput(moveX, moveY, mining) {
@@ -4303,6 +4429,9 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = 
       localPlayer.vx = preservePlayer.vx || 0;
       localPlayer.vy = preservePlayer.vy || 0;
       localPlayer.angle = preservePlayer.angle || localPlayer.angle;
+      localPlayer.carHeading = preservePlayer.carHeading ?? preservePlayer.angle ?? localPlayer.carHeading;
+      localPlayer.carSteerAngle = preservePlayer.carSteerAngle || 0;
+      localPlayer.carAngularVelocity = preservePlayer.carAngularVelocity || 0;
       localPlayer.aimAngle = preservePlayer.aimAngle || localPlayer.aimAngle;
       localPlayer.resources = {
         ...localPlayer.resources,
@@ -4312,6 +4441,9 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = 
       localPlayer.x = center.x;
       localPlayer.y = center.y;
       localPlayer.angle = -Math.PI / 2;
+      localPlayer.carHeading = -Math.PI / 2;
+      localPlayer.carSteerAngle = 0;
+      localPlayer.carAngularVelocity = 0;
       localPlayer.aimAngle = -Math.PI / 2;
     }
     localPlayer.lobbyHost = true;
@@ -4334,6 +4466,9 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = 
     bot.vx = 0;
     bot.vy = 0;
     bot.angle = position.angle;
+    bot.carHeading = position.angle;
+    bot.carSteerAngle = 0;
+    bot.carAngularVelocity = 0;
     bot.aimAngle = position.angle;
   }
 
@@ -4805,9 +4940,6 @@ function saveLocalBotGame(options = {}) {
   if (!localGame.active || !localGame.arena) {
     return;
   }
-  if (state.room?.state === "waiting") {
-    return;
-  }
 
   const timeSeconds = Number.isFinite(options.timeSeconds)
     ? options.timeSeconds
@@ -4846,7 +4978,8 @@ function createLocalBotSave() {
     mode: normalizeMenuMode(arena.mode),
     tick: arena.tick,
     inputSeq: state.localGame.inputSeq,
-    roomState: state.room?.state === "ended" ? "ended" : "active",
+    roomState: localBotSaveRoomState(state.room?.state),
+    botCount: clampLocalBotCount(state.localGame.botCount || Math.max(0, arena.players.size - 1)),
     winnerId: state.room?.winnerId ?? null,
     asteroid: snapshotAsteroid(arena),
     asteroidMining: Array.from(arena.asteroidMining.entries()).map(([index, mining]) => ({
@@ -4865,6 +4998,16 @@ function createLocalBotSave() {
   };
 }
 
+function localBotSaveRoomState(roomState) {
+  if (roomState === "waiting") {
+    return "waiting";
+  }
+  if (roomState === "ended") {
+    return "ended";
+  }
+  return "active";
+}
+
 function serializeLocalBotPlayer(player) {
   return {
     id: player.id,
@@ -4877,6 +5020,9 @@ function serializeLocalBotPlayer(player) {
     vx: player.vx,
     vy: player.vy,
     angle: player.angle,
+    carHeading: player.carHeading ?? player.angle,
+    carSteerAngle: player.carSteerAngle || 0,
+    carAngularVelocity: player.carAngularVelocity || 0,
     facingMoveX: player.facingMoveX,
     facingMoveY: player.facingMoveY,
     pendingFacingSignX: player.pendingFacingSignX,
@@ -4957,13 +5103,16 @@ function restoreLocalBotGame() {
     return false;
   }
 
+  const roomState = localBotSaveRoomState(save.roomState);
+  const botCount = clampLocalBotCount(save.botCount ?? Math.max(0, (save.players || []).length - 1));
+  const waitingRoom = roomState === "waiting";
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed: save.seed,
     mode: normalizeMenuMode(save.mode),
     playerCount: Math.max(1, (save.players || []).length),
-    playerDamage: true,
-    storm: true,
+    playerDamage: !waitingRoom,
+    storm: !waitingRoom,
     asteroid
   });
   arena.tick = Math.max(0, Math.floor(Number(save.tick) || 0));
@@ -4993,38 +5142,41 @@ function restoreLocalBotGame() {
   restoreLocalBotBugFootsteps(arena, save.bugFootsteps);
   restoreLocalBotEntities(arena, save.entities);
 
-  const savedBrainById = new Map((save.bots || []).map((brain) => [String(brain.id), brain]));
   const bots = new Map();
-  for (const player of arena.players.values()) {
-    if (player.id === LOCAL_BOT_PLAYER_ID) {
-      continue;
-    }
+  if (!waitingRoom) {
+    const savedBrainById = new Map((save.bots || []).map((brain) => [String(brain.id), brain]));
+    for (const player of arena.players.values()) {
+      if (player.id === LOCAL_BOT_PLAYER_ID) {
+        continue;
+      }
 
-    const savedBrain = savedBrainById.get(player.id) || {};
-    const brain = createPilotBotBrain(player.id, {
-      ...savedBrain,
-      seed: savedBrain.seed || `${save.seed}:${player.id}`
-    });
-    resetRestoredBotBrainTransientState(brain);
-    bots.set(player.id, brain);
-    player.inputSessionId = brain.sessionId;
-    player.lastInputSeq = brain.seq || 0;
+      const savedBrain = savedBrainById.get(player.id) || {};
+      const brain = createPilotBotBrain(player.id, {
+        ...savedBrain,
+        seed: savedBrain.seed || `${save.seed}:${player.id}`
+      });
+      resetRestoredBotBrainTransientState(brain);
+      bots.set(player.id, brain);
+      player.inputSessionId = brain.sessionId;
+      player.lastInputSeq = brain.seq || 0;
+    }
   }
 
   state.localGame.active = true;
   state.localGame.arena = arena;
   state.localGame.bots = bots;
   state.localGame.mode = normalizeMenuMode(arena.mode);
-  state.localGame.botCount = clampLocalBotCount(bots.size || LOCAL_BOT_DEFAULT_COUNT);
-  state.localGame.lobbySeed = null;
+  state.localGame.botCount = botCount;
+  state.localGame.lobbySeed = waitingRoom ? save.seed : null;
   state.localGame.lastStepTimeSeconds = 0;
   state.localGame.accumulatorSeconds = 0;
   state.localGame.inputSeq = numberOr(save.inputSeq, 0);
   state.localGame.lastSaveTimeSeconds = 0;
   state.playerId = LOCAL_BOT_PLAYER_ID;
   state.room = localBotRoomFromArena(arena, {
-    state: save.roomState,
-    winnerId: save.winnerId
+    state: roomState,
+    winnerId: save.winnerId,
+    botCount
   });
   state.lastRoomId = LOCAL_BOT_ROOM_ID;
   state.resumePending = false;
@@ -5145,6 +5297,9 @@ function restoreLocalBotPlayer(player, savedPlayer) {
     "vx",
     "vy",
     "angle",
+    "carHeading",
+    "carSteerAngle",
+    "carAngularVelocity",
     "facingMoveX",
     "facingMoveY",
     "pendingFacingSignX",
@@ -5189,6 +5344,15 @@ function restoreLocalBotPlayer(player, savedPlayer) {
 
   player.name = savedPlayer.name || player.name;
   player.talk = savedPlayer.talk || "";
+  if (!Number.isFinite(savedPlayer.carHeading) && Number.isFinite(savedPlayer.angle)) {
+    player.carHeading = savedPlayer.angle;
+  }
+  if (!Number.isFinite(player.carSteerAngle)) {
+    player.carSteerAngle = 0;
+  }
+  if (!Number.isFinite(player.carAngularVelocity)) {
+    player.carAngularVelocity = 0;
+  }
   player.mining = savedPlayer.mining === true;
   player.buttonTargetId = savedPlayer.buttonTargetId ?? null;
   player.buttonTargetActivated = savedPlayer.buttonTargetActivated === true;
@@ -5769,6 +5933,7 @@ function updateSettingsDrag(x, y, pointerId) {
   }
 
   state.settingsUi.selectedIndex = index;
+  saveMenuState();
   setSettingValue(row.id, settingSliderValueFromPoint(index, x, { clampOutside: true }), { silent: true });
   requestVolumePreview(row.id);
   return true;
@@ -5879,6 +6044,7 @@ function updateSettingsSelectionFromPoint(x, y) {
   const index = settingsIndexAtPoint(x, y);
   if (Number.isInteger(index)) {
     state.settingsUi.selectedIndex = index;
+    saveMenuState();
   }
   return index;
 }
@@ -5892,6 +6058,7 @@ function moveSettingsSelection(direction) {
 
   const next = (state.settingsUi.selectedIndex + Math.sign(direction || 1) + rows.length) % rows.length;
   state.settingsUi.selectedIndex = next;
+  saveMenuState();
   requestMechanicalBeep();
 }
 
@@ -5916,6 +6083,7 @@ function activateSelectedSetting(options = {}) {
   }
 
   state.settingsUi.selectedIndex = index;
+  saveMenuState();
   if (row.id === "back") {
     leaveSettingsMenuRoom();
     return true;
@@ -10873,6 +11041,10 @@ function frameAlpha(perTickAlpha, dtSeconds) {
 
 function resetEntitySmoothing() {
   state.entitySmoothing.byId.clear();
+}
+
+function clearRendererParticles() {
+  renderer.clearParticles?.();
 }
 
 function resolvePredictionCollisions(player) {
