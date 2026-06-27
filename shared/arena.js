@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningRayLengthForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, mapTileSizeForGameMode, miningRayLengthForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -539,7 +539,7 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
-  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds ? false : canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.octopus ? false : canThrust;
 
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(player, move, effects, dtSeconds);
@@ -716,7 +716,7 @@ function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.fric
 }
 
 function applyShipModeFriction(player, dtSeconds, gameMode) {
-  if (gameMode !== GAME_MODES.subs) {
+  if (!isSubThemedGameMode(gameMode)) {
     applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
     return;
   }
@@ -785,7 +785,7 @@ function clampBugLegCenterToCore(player, terrain = null) {
 }
 
 function thrustAccelerationScaleForGameMode(player, move, gameMode) {
-  if (gameMode !== GAME_MODES.subs) {
+  if (!isSubThemedGameMode(gameMode)) {
     return 1;
   }
 
@@ -824,8 +824,28 @@ function updateShipModeFacing(player, move, dtSeconds, gameMode) {
     updateSubFacing(player, move, dtSeconds);
     return;
   }
+  if (gameMode === GAME_MODES.subs2) {
+    updateExactInputFacing(player, move);
+    return;
+  }
 
   updateShipFacing(player, move, dtSeconds);
+}
+
+function updateExactInputFacing(player, move) {
+  if (move.x === 0 && move.y === 0) {
+    player.facingMoveX = 0;
+    player.facingMoveY = 0;
+    player.subReverseActive = false;
+    clearPendingFacing(player);
+    return;
+  }
+
+  player.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  player.facingMoveX = move.x;
+  player.facingMoveY = move.y;
+  player.subReverseActive = false;
+  clearPendingFacing(player);
 }
 
 function updateSubFacing(player, move, dtSeconds) {
@@ -2884,15 +2904,15 @@ function addShake(player, impact) {
 }
 
 function boundaryRestitutionForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs || gameMode === GAME_MODES.bugs ? 0 : ENGINE.collision.boundaryRestitution;
+  return isSubThemedGameMode(gameMode) || gameMode === GAME_MODES.bugs ? 0 : ENGINE.collision.boundaryRestitution;
 }
 
 function shipRestitutionForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.shipRestitution;
+  return isSubThemedGameMode(gameMode) ? 0 : ENGINE.collision.shipRestitution;
 }
 
 function shipPushForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.shipPush;
+  return isSubThemedGameMode(gameMode) ? 0 : ENGINE.collision.shipPush;
 }
 
 function nextPlayerNumber(arena) {
@@ -3041,11 +3061,17 @@ function normalizeGameMode(mode) {
   if (mode === GAME_MODES.subs) {
     return GAME_MODES.subs;
   }
+  if (mode === GAME_MODES.subs2) {
+    return GAME_MODES.subs2;
+  }
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
   }
   if (mode === GAME_MODES.clouds) {
     return GAME_MODES.clouds;
+  }
+  if (mode === GAME_MODES.octopus) {
+    return GAME_MODES.octopus;
   }
   return GAME_MODES.bitspace;
 }

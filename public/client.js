@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningRayLengthForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, mapTileSizeForGameMode, miningRayLengthForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -3009,11 +3009,17 @@ function normalizeMenuMode(mode) {
   if (mode === GAME_MODES.subs) {
     return GAME_MODES.subs;
   }
+  if (mode === GAME_MODES.subs2) {
+    return GAME_MODES.subs2;
+  }
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
   }
   if (mode === GAME_MODES.clouds) {
     return GAME_MODES.clouds;
+  }
+  if (mode === GAME_MODES.octopus) {
+    return GAME_MODES.octopus;
   }
   return GAME_MODES.bitspace;
 }
@@ -3049,6 +3055,10 @@ function menuModeEnabledByUrl(mode) {
       params.get("subs") === "1" ||
       params.get("sub") === "1";
   }
+  if (mode === GAME_MODES.subs2) {
+    return requestedMode === "subs2" ||
+      params.get("subs2") === "1";
+  }
   if (mode === GAME_MODES.clouds) {
     return requestedMode === "cloud" ||
       requestedMode === "clouds" ||
@@ -3056,6 +3066,12 @@ function menuModeEnabledByUrl(mode) {
       params.get("clouds") === "1" ||
       params.get("cloud") === "1" ||
       params.get("sky") === "1";
+  }
+  if (mode === GAME_MODES.octopus) {
+    return requestedMode === "octopus" ||
+      requestedMode === "octo" ||
+      params.get("octopus") === "1" ||
+      params.get("octo") === "1";
   }
   return true;
 }
@@ -3076,8 +3092,14 @@ function menuModeFromUrl() {
   if (mode === "sub" || mode === "subs") {
     return GAME_MODES.subs;
   }
+  if (mode === "subs2") {
+    return GAME_MODES.subs2;
+  }
   if (mode === "cloud" || mode === "clouds" || mode === "sky") {
     return GAME_MODES.clouds;
+  }
+  if (mode === "octopus" || mode === "octo") {
+    return GAME_MODES.octopus;
   }
   return null;
 }
@@ -3200,7 +3222,7 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   if (normalized === GAME_MODES.cars) {
     return "BITSPACE: CARS";
   }
-  if (normalized === GAME_MODES.subs) {
+  if (normalized === GAME_MODES.subs || normalized === GAME_MODES.subs2) {
     return "BITSPACE: SUBS";
   }
   if (normalized === GAME_MODES.bugs) {
@@ -3208,6 +3230,9 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   }
   if (normalized === GAME_MODES.clouds) {
     return "BITSPACE: SKY";
+  }
+  if (normalized === GAME_MODES.octopus) {
+    return "BITSPACE: OCTOPUS";
   }
   return "BITSPACE";
 }
@@ -3544,7 +3569,7 @@ function updateMenuSimulation(timeSeconds) {
     }
   }
 
-  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds ? false : canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.octopus ? false : canThrust;
   player.mining = physicalMiningInputActive() && !state.chat.active;
   setMenuPlayerInput(move.x, move.y, player.mining);
   if (player.mining) {
@@ -5757,7 +5782,8 @@ function menuModeButtons(mode) {
 }
 
 function menuModeButtonSlots() {
-  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs]
+  const subMode = menuModeEnabledByUrl(GAME_MODES.subs2) ? GAME_MODES.subs2 : GAME_MODES.subs;
+  return [GAME_MODES.cars, subMode, GAME_MODES.bugs, GAME_MODES.octopus]
     .filter((mode) => mode === GAME_MODES.bugs || menuModeEnabledByUrl(mode));
 }
 
@@ -5765,11 +5791,14 @@ function menuModeLabel(mode) {
   if (mode === GAME_MODES.cars) {
     return "CARS";
   }
-  if (mode === GAME_MODES.subs) {
+  if (mode === GAME_MODES.subs || mode === GAME_MODES.subs2) {
     return "SUBS";
   }
   if (mode === GAME_MODES.bugs) {
     return "BUGS";
+  }
+  if (mode === GAME_MODES.octopus) {
+    return "OCTO";
   }
   return "SHIPS";
 }
@@ -9522,7 +9551,7 @@ function updateLocalShipAudio(player, timeSeconds) {
 
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
-  const inputLevel = alive && audioGameMode() !== GAME_MODES.bugs && audioGameMode() !== GAME_MODES.clouds
+  const inputLevel = alive && audioGameMode() !== GAME_MODES.bugs && audioGameMode() !== GAME_MODES.clouds && audioGameMode() !== GAME_MODES.octopus
     ? playerThrustInputLevel(player)
     : 0;
   const miningActive = state.room?.state !== "ended" && alive && playerMiningAudioActive(player);
@@ -10081,7 +10110,7 @@ function applyShipFriction(player, dtSeconds, frictionPerTick = ENGINE.ship.fric
 }
 
 function applyShipModeFriction(player, dtSeconds, gameMode) {
-  if (gameMode !== GAME_MODES.subs) {
+  if (!isSubThemedGameMode(gameMode)) {
     applyShipFriction(player, dtSeconds, shipFrictionForGameMode(gameMode));
     return;
   }
@@ -10150,7 +10179,7 @@ function clampBugLegCenterToCore(player, terrain = null) {
 }
 
 function thrustAccelerationScaleForGameMode(player, move, gameMode) {
-  if (gameMode !== GAME_MODES.subs) {
+  if (!isSubThemedGameMode(gameMode)) {
     return 1;
   }
 
@@ -10189,8 +10218,28 @@ function updateShipModeFacing(player, move, dtSeconds, gameMode) {
     updateSubFacing(player, move, dtSeconds);
     return;
   }
+  if (gameMode === GAME_MODES.subs2) {
+    updateExactInputFacing(player, move);
+    return;
+  }
 
   updateShipFacing(player, move, dtSeconds);
+}
+
+function updateExactInputFacing(player, move) {
+  if (move.x === 0 && move.y === 0) {
+    player.facingMoveX = 0;
+    player.facingMoveY = 0;
+    player.subReverseActive = false;
+    clearPendingFacing(player);
+    return;
+  }
+
+  player.angle = normalizeAngle(Math.atan2(move.y, move.x));
+  player.facingMoveX = move.x;
+  player.facingMoveY = move.y;
+  player.subReverseActive = false;
+  clearPendingFacing(player);
 }
 
 function updateSubFacing(player, move, dtSeconds) {
@@ -10503,7 +10552,7 @@ function updatePrediction(timeSeconds) {
     predicted.miningHoldSeconds = 0;
   }
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
-  predicted.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds ? false : canThrust;
+  predicted.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.octopus ? false : canThrust;
 
   applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds);
   predicted.x += predicted.vx * dtSeconds;
@@ -11233,11 +11282,11 @@ function resolvePredictionPlayerCollisions(player, gameMode = activeGameMode()) 
 }
 
 function boundaryRestitutionForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs || gameMode === GAME_MODES.bugs ? 0 : ENGINE.collision.boundaryRestitution;
+  return isSubThemedGameMode(gameMode) || gameMode === GAME_MODES.bugs ? 0 : ENGINE.collision.boundaryRestitution;
 }
 
 function shipRestitutionForGameMode(gameMode) {
-  return gameMode === GAME_MODES.subs ? 0 : ENGINE.collision.shipRestitution;
+  return isSubThemedGameMode(gameMode) ? 0 : ENGINE.collision.shipRestitution;
 }
 
 function circleTileOverlap(circle, tile) {

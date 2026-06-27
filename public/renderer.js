@@ -1,6 +1,13 @@
-import { ENGINE, GAME_MODES, RENDER, miningRayLengthForGameMode } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, isWaterThemedGameMode, miningRayLengthForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin } from "/shared/build.js";
-import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
+import {
+  ASTEROID_TILE,
+  STORM_STATE,
+  blockingTilesNearCircle,
+  circleBlockerOverlap,
+  isAsteroidRockTile,
+  raycastAsteroid
+} from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
 import {
   miningRayClippedSideStartDistance,
@@ -153,6 +160,16 @@ const SUB_HEALTH_COLORS = Object.freeze([
   "#ffdf2f",
   "#2fdfff"
 ]);
+const OCTOPUS_BODY_COLORS = Object.freeze([
+  "#00ff5a",
+  "#ff3030",
+  "#2f63ff",
+  "#ff8a00",
+  "#8a2cff",
+  "#ff2fc3",
+  "#ffe600",
+  "#00e6ff"
+]);
 const CAR_TIRE_COLOR = "#000000";
 const CAR_TIRE_LENGTH = 6;
 const CAR_TIRE_WIDTH = 3;
@@ -227,6 +244,21 @@ const BUG_LEG_TEARDROP_FRONT_SIDE_SCALE = 1;
 const BUG_LEG_TEARDROP_REAR_SIDE_SCALE = 0;
 const BUG_LEG_LINE_WIDTH = 2;
 const BUG_LEG_CAMERA_HEIGHT_SCALE = 12;
+const OCTOPUS_TENTACLE_COUNT = 8;
+const OCTOPUS_TENTACLE_TRAIL_REACH_SCALE = 3.8;
+const OCTOPUS_TENTACLE_BASE_WIDTH = 5.2;
+const OCTOPUS_TENTACLE_TIP_WIDTH = 1.35;
+const OCTOPUS_TENTACLE_SEGMENTS = 12;
+const OCTOPUS_TENTACLE_FLUID_DRAG = 8.5;
+const OCTOPUS_TENTACLE_INTENT_PULL = 7.2;
+const OCTOPUS_TENTACLE_CONSTRAINT_PASSES = 4;
+const OCTOPUS_TENTACLE_BEND_STIFFNESS = 0.34;
+const OCTOPUS_TENTACLE_REST_SPRING_SCALE = 2.4;
+const OCTOPUS_TENTACLE_MAX_SEGMENT_SCALE = 0.62;
+const OCTOPUS_TENTACLE_MAX_BEND_SEGMENT_SCALE = 1.32;
+const OCTOPUS_TENTACLE_COLLISION_BACKOFF = 0.25;
+const OCTOPUS_TENTACLE_CONTACT_RADIUS = 2.25;
+const OCTOPUS_TENTACLE_CONTACT_PASSES = 3;
 const SUB_WAVE_SIM_SIZE = 256;
 const SUB_WAVE_SIM_FPS = 30;
 const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
@@ -246,8 +278,23 @@ function renderGameParams(snapshot, options = {}) {
   return snapshot?.params || options.room?.params || {};
 }
 
+function octopusTentacleStateKey(snapshot, options = {}, gameMode = GAME_MODES.bitspace) {
+  if (gameMode !== GAME_MODES.octopus) {
+    return "";
+  }
+
+  const room = options.menuRoom || options.room || {};
+  return [
+    gameMode,
+    room.roomId || "",
+    room.state || "",
+    snapshot?.arenaId || "",
+    snapshot?.seed || ""
+  ].join(":");
+}
+
 function colorsForGameMode(colors, gameMode, params = {}) {
-  if (gameMode === GAME_MODES.subs) {
+  if (isWaterThemedGameMode(gameMode)) {
     return {
       ...colors,
       ...SUB_MODE_COLORS
@@ -438,7 +485,7 @@ function asteroidVisibilityOuterBevelRadiusForGameMode(gameMode = GAME_MODES.bit
 
 function usesCarRockRenderer(gameMode = GAME_MODES.bitspace) {
   return gameMode === GAME_MODES.cars ||
-    gameMode === GAME_MODES.subs ||
+    isWaterThemedGameMode(gameMode) ||
     gameMode === GAME_MODES.bugs ||
     gameMode === GAME_MODES.clouds;
 }
@@ -855,6 +902,8 @@ export function createRenderer(canvas, minimapCanvas = null) {
   const tireTrackParticles = [];
   const emitCarry = new Map();
   const bugLegStates = new Map();
+  const octopusTentacleStates = new Map();
+  let octopusTentacleRoomKey = "";
   let minimapSurface = null;
   let minimapTextRenderer = null;
   let particleSeed = 1;
@@ -1160,6 +1209,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
       miningParticles.length = 0;
       tireTrackParticles.length = 0;
       emitCarry.clear();
+      octopusTentacleStates.clear();
     },
     draw(snapshot, options = {}) {
       const nextMinimapVisible = options.playerMapVisible === true &&
@@ -1209,6 +1259,11 @@ export function createRenderer(canvas, minimapCanvas = null) {
       if (gameMode !== GAME_MODES.clouds) {
         syncPageCloudBackingTexture(null);
       }
+      const octopusRoomKey = octopusTentacleStateKey(snapshot, options, gameMode);
+      if (octopusRoomKey !== octopusTentacleRoomKey) {
+        octopusTentacleStates.clear();
+        octopusTentacleRoomKey = octopusRoomKey;
+      }
       const frameOptions = {
         ...options,
         gameMode,
@@ -1218,6 +1273,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         visualShipAngles,
         subLightAngles,
         bugLegStates,
+        octopusTentacleStates,
         gpuStormRenderer,
         gpuFrameStormReady: framePresenter?.supportsStorm === true,
         gpuFrameCheckerReady: framePresenter?.supportsChecker === true,
@@ -2464,7 +2520,7 @@ function createPixelSurface(canvasContext, width, height) {
 }
 
 function cleanupSubsCircleFringe(surface, overlaySurface, gameMode, colors) {
-  if (gameMode !== GAME_MODES.subs) {
+  if (!isWaterThemedGameMode(gameMode)) {
     return;
   }
 
@@ -5103,7 +5159,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   const mobileUpgradeModal = options.mobileActive === true && options.upgrades?.active === true;
   const roomState = options.room?.state || "";
   const gpuWorldEffectsAllowed = roomState === "active" || roomState === "ended";
-  const causticSourceScene = options.gameMode === GAME_MODES.subs &&
+  const causticSourceScene = isWaterThemedGameMode(options.gameMode) &&
     options.gpuFrameCausticsReady === true &&
     shouldDrawWorld &&
     !options.playerMapLarge;
@@ -5141,7 +5197,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   let renderMask = sharedState?.renderMask;
   let worldRenderPlayers = sharedState?.worldRenderPlayers;
   let localShipDrawsAfterVisibility = sharedState?.localShipDrawsAfterVisibility || false;
-  if (options.gameMode !== GAME_MODES.subs) {
+  if (!isWaterThemedGameMode(options.gameMode)) {
     litVisibility = null;
     renderMask = null;
   }
@@ -5227,7 +5283,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         !causticSourceTransparency,
         !causticSourceScene
       );
-      if (!causticSourceTransparency && options.gameMode === GAME_MODES.subs && renderMask?.spans) {
+      if (!causticSourceTransparency && isWaterThemedGameMode(options.gameMode) && renderMask?.spans) {
         drawSubBaseOceanWithRenderMask(
           ctx,
           colors,
@@ -5252,7 +5308,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           perfBuckets,
           options.gameMode
         ));
-        if (options.gameMode === GAME_MODES.subs) {
+        if (isWaterThemedGameMode(options.gameMode)) {
           measureBucket("particlesMs", () => drawSubOwnBubblesInBaseOcean(
             ctx,
             particleState.particles,
@@ -5363,7 +5419,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     });
 
     measureBucket("particlesMs", () => {
-      if (options.gameMode === GAME_MODES.subs) {
+      if (isWaterThemedGameMode(options.gameMode)) {
         drawWithoutWorldMask(ctx, () => {
           drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
         });
@@ -5376,7 +5432,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       for (const renderPlayer of worldRenderPlayers) {
         if (
           options.gameMode !== GAME_MODES.cars &&
-          options.gameMode !== GAME_MODES.subs &&
+          !isWaterThemedGameMode(options.gameMode) &&
           renderPlayer.mining
         ) {
           drawWithoutWorldMask(ctx, () => {
@@ -5401,7 +5457,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           textRenderer,
           options.room?.state === "ended",
           options.gameMode,
-          options.bugLegStates
+          options.bugLegStates,
+          options.octopusTentacleStates
         );
       }
     });
@@ -5420,7 +5477,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           textRenderer,
           options.room?.state === "ended",
           options.gameMode,
-          options.bugLegStates
+          options.bugLegStates,
+          options.octopusTentacleStates
         );
       }));
     }
@@ -8614,7 +8672,7 @@ function visualRetargetThresholdForMode(gameMode) {
 }
 
 function subLightHeadingForGameMode(gameMode, lightAngles, player, dtSeconds) {
-  if (gameMode !== GAME_MODES.subs || !player) {
+  if (!isWaterThemedGameMode(gameMode) || !player) {
     if (lightAngles instanceof Map) {
       lightAngles.clear();
     }
@@ -8880,7 +8938,7 @@ function drawAsteroidTiles(
         drawRockFill(ctx, screenX, screenY, tileSize, colors, tile);
       }
     }
-  } else if (gameMode === GAME_MODES.subs) {
+  } else if (isWaterThemedGameMode(gameMode)) {
     const subsRockFillColors = {
       ...colors,
       rockFill: colors.backing || "#000000",
@@ -8947,7 +9005,7 @@ function drawAsteroidTiles(
 
   const rockLineWidth = gameMode === GAME_MODES.cars
     ? CAR_ROCK_OUTLINE_WIDTH
-    : gameMode === GAME_MODES.subs
+    : isWaterThemedGameMode(gameMode)
       ? SUB_ROCK_OUTLINE_WIDTH
       : gameMode === GAME_MODES.bugs
         ? BUG_ROCK_OUTLINE_WIDTH
@@ -9012,7 +9070,7 @@ function drawAsteroidTiles(
 
   const drawResources = () => {
     const coloredResources = gameMode === GAME_MODES.cars ||
-      gameMode === GAME_MODES.subs ||
+      isWaterThemedGameMode(gameMode) ||
       gameMode === GAME_MODES.bugs ||
       gameMode === GAME_MODES.clouds;
     const hullOnly = gameMode === GAME_MODES.bugs;
@@ -9153,7 +9211,7 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
 }
 
 function createLitVisibilityForGameMode(gameMode, visibility, player, headingOverride = null) {
-  if (!SUB_ARC_MASKS_ENABLED || gameMode !== GAME_MODES.subs || !visibility || !player) {
+  if (!SUB_ARC_MASKS_ENABLED || !isWaterThemedGameMode(gameMode) || !visibility || !player) {
     return null;
   }
 
@@ -9229,7 +9287,7 @@ function createSubLitVisibility(visibility, heading) {
 }
 
 function createRenderMaskForGameMode(gameMode, ctx, asteroid, player, camera, headingOverride = null) {
-  if (!SUB_ARC_MASKS_ENABLED || gameMode !== GAME_MODES.subs || !ctx || !player || !camera) {
+  if (!SUB_ARC_MASKS_ENABLED || !isWaterThemedGameMode(gameMode) || !ctx || !player || !camera) {
     return null;
   }
 
@@ -9519,7 +9577,7 @@ function drawAsteroidVisibilityGhostMap(
     viewMaxTileY
   );
   let gpuCheckerQueued = false;
-  const solidShadow = gameMode === GAME_MODES.subs;
+  const solidShadow = isWaterThemedGameMode(gameMode);
   const cloudCheckerFallthrough = gameMode === GAME_MODES.clouds;
   const checkerColor = solidShadow
     ? SUB_SHADOW_MASK_COLOR
@@ -13152,7 +13210,7 @@ function drawWorldAmbient(
     return;
   }
 
-  if (gameMode === GAME_MODES.subs) {
+  if (isWaterThemedGameMode(gameMode)) {
     drawWaterDebris(ctx, snapshot, camera, visibility, colors, timeSeconds, renderMask);
     return;
   }
@@ -13536,7 +13594,7 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
       });
     } else {
       drawHuckRockEntity(ctx, entity, camera, colors, {
-        filled: options.gameMode === GAME_MODES.subs
+        filled: isWaterThemedGameMode(options.gameMode)
       });
     }
     return;
@@ -13997,7 +14055,19 @@ function shipSmallOrbRadius(geometryScale) {
   return Math.max(1, SMALL_ORB_RADIUS * geometryScale);
 }
 
-function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRenderer, freezeAuxiliaryAim = false, gameMode = GAME_MODES.bitspace, bugLegStates = null) {
+function drawShip(
+  ctx,
+  player,
+  camera,
+  asteroid,
+  colors,
+  timeSeconds,
+  textRenderer,
+  freezeAuxiliaryAim = false,
+  gameMode = GAME_MODES.bitspace,
+  bugLegStates = null,
+  octopusTentacleStates = null
+) {
   const screen = worldToScreen(player, camera);
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
@@ -14035,7 +14105,7 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
     return;
   }
 
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     drawSubmarineBody(ctx, x, y, player, mainRadius, bodyAngle, colors, () => {
       if (player.mining) {
         drawWithoutWorldMask(ctx, () => {
@@ -14048,6 +14118,26 @@ function drawShip(ctx, player, camera, asteroid, colors, timeSeconds, textRender
       ...colors,
       health: subHealthColor(player)
     });
+    drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+    return;
+  }
+
+  if (gameMode === GAME_MODES.octopus) {
+    const bodyColor = octopusBodyColor(player);
+    const octopusColors = {
+      ...colors,
+      octopusBodyColor: bodyColor,
+      health: octopusHealthColor(player)
+    };
+    drawOctopusBody(ctx, x, y, player, camera, asteroid, mainRadius, bodyAngle, octopusColors, timeSeconds, octopusTentacleStates, () => {
+      if (player.mining) {
+        drawWithoutWorldMask(ctx, () => {
+          drawMiningRay(ctx, player, camera, asteroid, timeSeconds, octopusColors, gameMode);
+        });
+      }
+      drawMiningRayEmitters(ctx, player, camera, asteroid, octopusColors, freezeAuxiliaryAim, gameMode);
+    });
+    drawShipHealthIndicator(ctx, x, y, player, octopusColors);
     drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
     return;
   }
@@ -14447,6 +14537,513 @@ function drawSubmarineBody(ctx, x, y, player, radius, angle, colors, drawMiddleL
     drawMiddleLayer();
   }
   drawSphere(ctx, x, y, radius, angle, bodyColors);
+}
+
+function drawOctopusBody(ctx, x, y, player, camera, asteroid, radius, angle, colors, timeSeconds, tentacleStates = null, drawMiddleLayer = null) {
+  const bodyColor = colors.bodyFill || SUB_MODE_COLORS.bodyFill || "#000000";
+  const outlineColor = colors.bodyFill || SUB_MODE_COLORS.bodyFill || "#000000";
+  const rearAngle = octopusRearAngle(player, angle);
+  const state = octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds);
+  const tentacles = octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds);
+
+  for (const tentacle of tentacles) {
+    drawOctopusTentacle(ctx, camera, tentacle, bodyColor, outlineColor);
+  }
+
+  if (typeof drawMiddleLayer === "function") {
+    drawMiddleLayer();
+  }
+
+  ctx.fillStyle = bodyColor;
+  fillSolidDisk(ctx, x, y, radius);
+  ctx.fillStyle = outlineColor;
+  drawCircle(ctx, x, y, radius);
+}
+
+function octopusRearAngle(player, fallbackAngle = 0) {
+  const speed = Math.hypot(Number(player?.vx) || 0, Number(player?.vy) || 0);
+  if (speed > 1.2) {
+    return Math.atan2(player.vy, player.vx) + Math.PI;
+  }
+
+  return Number.isFinite(fallbackAngle) ? fallbackAngle + Math.PI : Math.PI;
+}
+
+function octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds) {
+  const key = player?.id || `octopus-${player?.number || 0}`;
+  if (!(tentacleStates instanceof Map)) {
+    return {
+      key,
+      lastSeenAt: timeSeconds,
+      lastUpdateTime: Number.NaN,
+      tentacles: octopusCreateTentacleStates(key)
+    };
+  }
+
+  let state = tentacleStates.get(key);
+  if (!state || !Array.isArray(state.tentacles) || state.tentacles.length !== OCTOPUS_TENTACLE_COUNT) {
+    state = {
+      key,
+      lastSeenAt: timeSeconds,
+      lastUpdateTime: Number.NaN,
+      tentacles: octopusCreateTentacleStates(key)
+    };
+    tentacleStates.set(key, state);
+  }
+  state.key = key;
+  state.lastSeenAt = timeSeconds;
+  pruneOctopusTentacleStates(tentacleStates, timeSeconds);
+  return state;
+}
+
+function octopusCreateTentacleStates(key) {
+  return Array.from({ length: OCTOPUS_TENTACLE_COUNT }, (_unused, index) => ({
+    seed: hashCell("octopus-tentacle", key, index),
+    targetX: Number.NaN,
+    targetY: Number.NaN,
+    points: null
+  }));
+}
+
+function pruneOctopusTentacleStates(tentacleStates, timeSeconds) {
+  if (!(tentacleStates instanceof Map)) {
+    return;
+  }
+
+  for (const [key, state] of tentacleStates) {
+    if (timeSeconds - Number(state?.lastSeenAt || 0) > 3) {
+      tentacleStates.delete(key);
+    }
+  }
+}
+
+function octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds) {
+  const dtSeconds = Number.isFinite(state.lastUpdateTime)
+    ? clamp(timeSeconds - state.lastUpdateTime, 0, 1 / 12)
+    : 0;
+  const speed = Math.hypot(Number(player?.vx) || 0, Number(player?.vy) || 0);
+  const speedStretch = 1 + clamp(speed / 120, 0, 0.34);
+  const controlRest = octopusControlRestAmount(player);
+  const restSpringScale = lerp(1, OCTOPUS_TENTACLE_REST_SPRING_SCALE, controlRest);
+  const placements = [];
+  const rear = {
+    x: Math.cos(rearAngle),
+    y: Math.sin(rearAngle)
+  };
+  const side = {
+    x: -rear.y,
+    y: rear.x
+  };
+
+  for (let index = 0; index < OCTOPUS_TENTACLE_COUNT; index += 1) {
+    const tentacle = state.tentacles[index];
+    const baseAngle = rearAngle + Math.PI + Math.PI / OCTOPUS_TENTACLE_COUNT + (index / OCTOPUS_TENTACLE_COUNT) * Math.PI * 2;
+    const seed = Number(tentacle.seed) || index + 1;
+    const baseRadial = {
+      x: Math.cos(baseAngle),
+      y: Math.sin(baseAngle)
+    };
+    const sideOffset = baseRadial.x * side.x + baseRadial.y * side.y;
+    const idleReachPulse = 0.78 +
+      Math.sin(timeSeconds * (0.86 + randomUnit(seed, 15) * 0.4) + randomUnit(seed, 16) * Math.PI * 2) * 0.09;
+    const base = {
+      x: player.x + baseRadial.x * radius * 0.58,
+      y: player.y + baseRadial.y * radius * 0.58
+    };
+    const trailReach = radius * OCTOPUS_TENTACLE_TRAIL_REACH_SCALE * speedStretch * (0.9 + randomUnit(seed, 4) * 0.16) * idleReachPulse;
+    const swimIntent = {
+      x: player.x + rear.x * trailReach + side.x * sideOffset * radius * (1.2 + randomUnit(seed, 6) * 0.25),
+      y: player.y + rear.y * trailReach + side.y * sideOffset * radius * (1.2 + randomUnit(seed, 6) * 0.25)
+    };
+    const restReach = radius * 2.8 * (0.9 + randomUnit(seed, 17) * 0.18) * idleReachPulse;
+    const restIntent = {
+      x: base.x + baseRadial.x * restReach,
+      y: base.y + baseRadial.y * restReach
+    };
+    const intent = {
+      x: lerp(swimIntent.x, restIntent.x, controlRest),
+      y: lerp(swimIntent.y, restIntent.y, controlRest)
+    };
+    const reachableIntent = octopusReachableTentacleIntent(asteroid, base, intent, tentacle);
+    const points = octopusSimulateTentacle(tentacle, player, asteroid, base, reachableIntent, radius, rear, side, dtSeconds, timeSeconds, restSpringScale);
+
+    placements.push({
+      base,
+      points
+    });
+  }
+
+  state.lastUpdateTime = timeSeconds;
+  return placements;
+}
+
+function octopusReachableTentacleIntent(asteroid, base, intent, tentacle = null) {
+  if (!asteroid || !base || !intent) {
+    return intent;
+  }
+
+  const dx = intent.x - base.x;
+  const dy = intent.y - base.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance <= 0.001) {
+    return intent;
+  }
+
+  const hit = raycastAsteroid(asteroid, base.x, base.y, Math.atan2(dy, dx), distance, { blockNonPlayable: true });
+  if (!hit?.hit || Number(hit.distance || 0) >= distance) {
+    if (tentacle) {
+      tentacle.targetX = intent.x;
+      tentacle.targetY = intent.y;
+    }
+    return intent;
+  }
+
+  const baseAngle = Math.atan2(dy, dx);
+  const fallback = octopusCandidateTentacleIntent(asteroid, base, baseAngle, distance, 0, 0);
+  let best = fallback;
+  const previousTarget = tentacle && Number.isFinite(tentacle.targetX) && Number.isFinite(tentacle.targetY)
+    ? { x: tentacle.targetX, y: tentacle.targetY }
+    : null;
+  if (previousTarget) {
+    const previousDx = previousTarget.x - base.x;
+    const previousDy = previousTarget.y - base.y;
+    const previousDistance = Math.hypot(previousDx, previousDy);
+    if (previousDistance > 0.001) {
+      const previousOffset = normalizeSignedAngle(Math.atan2(previousDy, previousDx) - baseAngle);
+      const previous = octopusCandidateTentacleIntent(asteroid, base, Math.atan2(previousDy, previousDx), Math.min(distance, previousDistance), previousOffset, 1.6);
+      if (previous.score > best.score) {
+        best = previous;
+      }
+    }
+  }
+
+  const angularOffsets = [
+    12, -12,
+    22, -22,
+    34, -34,
+    50, -50,
+    70, -70,
+    96, -96,
+    128, -128
+  ];
+  for (const degrees of angularOffsets) {
+    const offset = degrees * Math.PI / 180;
+    const candidate = octopusCandidateTentacleIntent(asteroid, base, baseAngle + offset, distance, offset, 0);
+    if (candidate.score > best.score) {
+      best = candidate;
+    }
+  }
+
+  if (tentacle) {
+    tentacle.targetX = best.x;
+    tentacle.targetY = best.y;
+  }
+  return {
+    x: best.x,
+    y: best.y
+  };
+}
+
+function octopusCandidateTentacleIntent(asteroid, base, angle, distance, angleOffset, continuityBonus) {
+  const hit = raycastAsteroid(asteroid, base.x, base.y, angle, distance, { blockNonPlayable: true });
+  const hitDistance = hit?.hit ? Math.max(0, Number(hit.distance || 0) - OCTOPUS_TENTACLE_COLLISION_BACKOFF) : distance;
+  const clear = !hit?.hit || Number(hit.distance || 0) >= distance;
+  const usableDistance = clear ? distance : hitDistance;
+  const progress = distance > 0 ? usableDistance / distance : 0;
+  const anglePenalty = Math.abs(angleOffset) * 0.28;
+  const score = (clear ? 100 : 0) + progress * 12 - anglePenalty + continuityBonus;
+  return {
+    x: base.x + Math.cos(angle) * usableDistance,
+    y: base.y + Math.sin(angle) * usableDistance,
+    score
+  };
+}
+
+function octopusControlRestAmount(player) {
+  const moveX = Number(player?.moveX ?? player?.input?.moveX ?? 0);
+  const moveY = Number(player?.moveY ?? player?.input?.moveY ?? 0);
+  const magnitude = Math.hypot(
+    Number.isFinite(moveX) ? moveX : 0,
+    Number.isFinite(moveY) ? moveY : 0
+  );
+  return 1 - clamp((magnitude - 0.02) / 0.18, 0, 1);
+}
+
+function octopusSimulateTentacle(tentacle, player, asteroid, base, intent, radius, rear, side, dtSeconds, timeSeconds, springScale = 1) {
+  const segmentCount = OCTOPUS_TENTACLE_SEGMENTS;
+  const restLength = radius * 0.46;
+  const maxSegmentLength = radius * OCTOPUS_TENTACLE_MAX_SEGMENT_SCALE;
+  const maxBendSegmentLength = radius * OCTOPUS_TENTACLE_MAX_BEND_SEGMENT_SCALE;
+  if (!Array.isArray(tentacle.points) || tentacle.points.length !== segmentCount + 1) {
+    tentacle.points = Array.from({ length: segmentCount + 1 }, (_unused, index) => {
+      const t = index / segmentCount;
+      return {
+        x: lerp(base.x, intent.x, t),
+        y: lerp(base.y, intent.y, t),
+        vx: 0,
+        vy: 0
+      };
+    });
+  }
+
+  const points = tentacle.points;
+  points[0].x = base.x;
+  points[0].y = base.y;
+  points[0].vx = 0;
+  points[0].vy = 0;
+  const flow = {
+    x: -(Number(player?.vx) || 0) * 0.38,
+    y: -(Number(player?.vy) || 0) * 0.38
+  };
+  const dt = Math.max(0, dtSeconds);
+  const seed = Number(tentacle.seed) || 1;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    const t = index / segmentCount;
+    const intentPoint = {
+      x: lerp(base.x, intent.x, t),
+      y: lerp(base.y, intent.y, t)
+    };
+    const eddy = Math.sin(timeSeconds * (0.9 + randomUnit(seed, index) * 0.6) + t * 5.2 + randomUnit(seed, index + 20) * Math.PI * 2) *
+      radius * 0.65;
+    const localFlow = {
+      x: flow.x + side.x * eddy * 0.16 + rear.x * eddy * 0.04,
+      y: flow.y + side.y * eddy * 0.16 + rear.y * eddy * 0.04
+    };
+    const swimPullShape = 0.3 + t * t;
+    const restPullShape = 1.45 - t * 0.9;
+    const pullShape = lerp(swimPullShape, restPullShape, clamp((springScale - 1) / Math.max(0.001, OCTOPUS_TENTACLE_REST_SPRING_SCALE - 1), 0, 1));
+    const pull = OCTOPUS_TENTACLE_INTENT_PULL * springScale * Math.max(0.22, pullShape);
+    point.vx += (intentPoint.x - point.x) * pull * dt;
+    point.vy += (intentPoint.y - point.y) * pull * dt;
+    point.vx += (localFlow.x - point.vx) * OCTOPUS_TENTACLE_FLUID_DRAG * dt;
+    point.vy += (localFlow.y - point.vy) * OCTOPUS_TENTACLE_FLUID_DRAG * dt;
+  }
+
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    octopusMoveTentaclePoint(point, point.x + point.vx * dt, point.y + point.vy * dt, asteroid);
+  }
+
+  for (let pass = 0; pass < OCTOPUS_TENTACLE_CONSTRAINT_PASSES; pass += 1) {
+    points[0].x = base.x;
+    points[0].y = base.y;
+    points[0].vx = 0;
+    points[0].vy = 0;
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const point = points[index];
+      const dx = point.x - previous.x;
+      const dy = point.y - previous.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance <= 0.0001) {
+        continue;
+      }
+      const contactLimited = previous.octopusContact || point.octopusContact;
+      if (contactLimited && distance <= maxSegmentLength) {
+        continue;
+      }
+      const targetLength = contactLimited ? maxSegmentLength : restLength;
+      const correction = (distance - targetLength) / distance;
+      const moveX = dx * correction;
+      const moveY = dy * correction;
+      if (index === 1) {
+        octopusMoveTentaclePoint(point, point.x - moveX, point.y - moveY, asteroid);
+      } else {
+        octopusMoveTentaclePoint(previous, previous.x + moveX * 0.5, previous.y + moveY * 0.5, asteroid);
+        octopusMoveTentaclePoint(point, point.x - moveX * 0.5, point.y - moveY * 0.5, asteroid);
+      }
+    }
+    for (let index = 2; index < points.length; index += 1) {
+      const previous = points[index - 2];
+      const point = points[index];
+      const dx = point.x - previous.x;
+      const dy = point.y - previous.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance <= 0.0001) {
+        continue;
+      }
+      const contactLimited = previous.octopusContact || point.octopusContact || points[index - 1]?.octopusContact;
+      if (contactLimited && distance <= maxBendSegmentLength) {
+        continue;
+      }
+      const targetLength = contactLimited ? maxBendSegmentLength : restLength * 2;
+      const correction = ((distance - targetLength) / distance) * OCTOPUS_TENTACLE_BEND_STIFFNESS * springScale;
+      const moveX = dx * correction;
+      const moveY = dy * correction;
+      if (index === 2) {
+        octopusMoveTentaclePoint(point, point.x - moveX, point.y - moveY, asteroid);
+      } else {
+        octopusMoveTentaclePoint(previous, previous.x + moveX * 0.5, previous.y + moveY * 0.5, asteroid);
+        octopusMoveTentaclePoint(point, point.x - moveX * 0.5, point.y - moveY * 0.5, asteroid);
+      }
+    }
+  }
+
+  return points;
+}
+
+function octopusMoveTentaclePoint(point, targetX, targetY, asteroid) {
+  const previousX = point.x;
+  const previousY = point.y;
+  point.octopusContact = false;
+  point.x = targetX;
+  point.y = targetY;
+  const rayContact = octopusResolveTentaclePointCollision(point, previousX, previousY, asteroid);
+  const shapeContact = octopusResolveTentacleContacts(point, asteroid);
+  point.octopusContact = rayContact || shapeContact.resolved;
+}
+
+function octopusResolveTentaclePointCollision(point, previousX, previousY, asteroid) {
+  if (!asteroid) {
+    return false;
+  }
+
+  const dx = point.x - previousX;
+  const dy = point.y - previousY;
+  const distance = Math.hypot(dx, dy);
+  if (distance <= 0.001) {
+    return false;
+  }
+
+  const hit = raycastAsteroid(asteroid, previousX, previousY, Math.atan2(dy, dx), distance, { blockNonPlayable: true });
+  if (!hit?.hit || Number(hit.distance || 0) >= distance) {
+    return false;
+  }
+
+  const backoff = Math.max(0, Number(hit.distance || 0) - OCTOPUS_TENTACLE_COLLISION_BACKOFF);
+  const invDistance = 1 / distance;
+  const clampedX = previousX + dx * invDistance * backoff;
+  const clampedY = previousY + dy * invDistance * backoff;
+  const remaining = Math.max(0, distance - backoff);
+  point.x = clampedX;
+  point.y = clampedY;
+  const contact = octopusResolveTentacleContacts(point, asteroid);
+  const slide = octopusSlideAlongTentacleContact(point, asteroid, dx * invDistance, dy * invDistance, remaining, contact);
+  point.vx *= slide.moved ? 0.72 : 0.15;
+  point.vy *= slide.moved ? 0.72 : 0.15;
+  return true;
+}
+
+function octopusResolveTentacleContacts(point, asteroid) {
+  if (!asteroid || !point) {
+    return { resolved: false, normalX: 0, normalY: 0 };
+  }
+
+  let resolved = false;
+  let totalNormalX = 0;
+  let totalNormalY = 0;
+  for (let pass = 0; pass < OCTOPUS_TENTACLE_CONTACT_PASSES; pass += 1) {
+    const blockers = blockingTilesNearCircle(
+      asteroid,
+      point.x,
+      point.y,
+      OCTOPUS_TENTACLE_CONTACT_RADIUS,
+      { blockNonPlayable: true }
+    );
+    let passResolved = false;
+    for (const blocker of blockers) {
+      const hit = circleBlockerOverlap({
+        x: point.x,
+        y: point.y,
+        radius: OCTOPUS_TENTACLE_CONTACT_RADIUS
+      }, blocker);
+      if (!hit) {
+        continue;
+      }
+
+      const normalX = Number.isFinite(hit.normalX) ? hit.normalX : 0;
+      const normalY = Number.isFinite(hit.normalY) ? hit.normalY : 0;
+      const normalLength = Math.hypot(normalX, normalY);
+      if (normalLength <= 0.0001) {
+        continue;
+      }
+
+      const nx = normalX / normalLength;
+      const ny = normalY / normalLength;
+      const push = Math.max(0, Number(hit.overlap) || 0) + 0.05;
+      point.x += nx * push;
+      point.y += ny * push;
+      totalNormalX += nx;
+      totalNormalY += ny;
+      const inwardSpeed = point.vx * nx + point.vy * ny;
+      if (inwardSpeed < 0) {
+        point.vx -= inwardSpeed * nx;
+        point.vy -= inwardSpeed * ny;
+      }
+      passResolved = true;
+      resolved = true;
+    }
+    if (!passResolved) {
+      break;
+    }
+  }
+
+  const normalLength = Math.hypot(totalNormalX, totalNormalY);
+  return {
+    resolved,
+    normalX: normalLength > 0.0001 ? totalNormalX / normalLength : 0,
+    normalY: normalLength > 0.0001 ? totalNormalY / normalLength : 0
+  };
+}
+
+function octopusSlideAlongTentacleContact(point, asteroid, moveDirX, moveDirY, remainingDistance, contact) {
+  if (!asteroid || !point || !contact?.resolved || remainingDistance <= 0.001) {
+    return { moved: false };
+  }
+
+  const normalDot = moveDirX * contact.normalX + moveDirY * contact.normalY;
+  const slideX = moveDirX - contact.normalX * normalDot;
+  const slideY = moveDirY - contact.normalY * normalDot;
+  const slideLength = Math.hypot(slideX, slideY);
+  if (slideLength <= 0.0001) {
+    return { moved: false };
+  }
+
+  return octopusMoveTentaclePointAlongDirection(
+    point,
+    asteroid,
+    slideX / slideLength,
+    slideY / slideLength,
+    Math.min(remainingDistance, 4.5)
+  );
+}
+
+function octopusMoveTentaclePointAlongDirection(point, asteroid, dirX, dirY, distance) {
+  const hit = raycastAsteroid(asteroid, point.x, point.y, Math.atan2(dirY, dirX), distance, { blockNonPlayable: true });
+  const traveled = hit?.hit
+    ? Math.max(0, Number(hit.distance || 0) - OCTOPUS_TENTACLE_COLLISION_BACKOFF)
+    : distance;
+  if (traveled <= 0.05) {
+    return { moved: false };
+  }
+
+  point.x += dirX * traveled;
+  point.y += dirY * traveled;
+  octopusResolveTentacleContacts(point, asteroid);
+  return { moved: true };
+}
+
+function drawOctopusTentacle(ctx, camera, tentacle, tentacleColor, outlineColor) {
+  if (!Array.isArray(tentacle.points) || tentacle.points.length < 2) {
+    return;
+  }
+
+  const points = tentacle.points.map((point) => worldToScreenExact(point, camera));
+  drawOctopusTentacleStroke(ctx, points, outlineColor, 1.2);
+  drawOctopusTentacleStroke(ctx, points, tentacleColor, 0);
+}
+
+function drawOctopusTentacleStroke(ctx, points, color, widthAdd) {
+  ctx.fillStyle = color;
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    const segmentT = (index - 0.5) / (points.length - 1);
+    const width = lerp(OCTOPUS_TENTACLE_BASE_WIDTH, OCTOPUS_TENTACLE_TIP_WIDTH, segmentT) + widthAdd;
+    drawFilledCapsule(ctx, previous, point, Math.max(0.5, width * 0.5));
+  }
 }
 
 function drawSubmarinePropellerBodyConnector(ctx, x, y, radius, rear, side, colors) {
@@ -15449,6 +16046,16 @@ function carBodyColor(player) {
   return player?.alive === false ? desaturateHexColor(color, 0.5) : color;
 }
 
+function octopusBodyColor(player) {
+  const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), OCTOPUS_BODY_COLORS.length);
+  const color = OCTOPUS_BODY_COLORS[index] || OCTOPUS_BODY_COLORS[0];
+  return player?.alive === false ? desaturateHexColor(color, 0.58) : color;
+}
+
+function octopusHealthColor(player) {
+  return mixHexColors(octopusBodyColor(player), "#ffffff", 0.48);
+}
+
 function bugHealthColor(player) {
   const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), BUG_HEALTH_COLORS.length);
   return BUG_HEALTH_COLORS[index] || BUG_MODE_COLORS.health;
@@ -15800,7 +16407,7 @@ function drawShipHealthIndicator(ctx, x, y, player, colors, angleOrigin = null) 
 
 function particleEmissionPlayersForFrame(gameMode, worldRenderPlayers, localPlayer, cameraPlayer) {
   const players = Array.isArray(worldRenderPlayers) ? [...worldRenderPlayers] : [];
-  if (gameMode !== GAME_MODES.subs) {
+  if (!isWaterThemedGameMode(gameMode)) {
     return players;
   }
 
@@ -16926,7 +17533,7 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
       const particleHeat = clamp(0.18 + centerHeat * 0.88 + randomUnit(seed, 10) * 0.08, 0, 1);
       const thrusterKind = gameMode === GAME_MODES.cars
         ? CAR_THRUSTER_PARTICLE_KIND
-        : gameMode === GAME_MODES.subs
+        : isSubThemedGameMode(gameMode)
           ? SUB_THRUSTER_PARTICLE_KIND
           : null;
 
@@ -16961,7 +17568,7 @@ function thrusterEngineRamp(player, gameMode = GAME_MODES.bitspace) {
   const t = THRUSTER_ENGINE_MAX_LEVEL > 0 ? level / THRUSTER_ENGINE_MAX_LEVEL : 0;
   const ramp = gameMode === GAME_MODES.cars
     ? CAR_THRUSTER_ENGINE_RAMP
-    : gameMode === GAME_MODES.subs
+    : isSubThemedGameMode(gameMode)
       ? SUB_THRUSTER_ENGINE_RAMP
       : THRUSTER_ENGINE_RAMP;
 
@@ -17104,7 +17711,7 @@ function rearEnginePlumeOrigins(player, rear, side, gameMode = GAME_MODES.bitspa
   if (gameMode === GAME_MODES.cars) {
     return carRearEnginePlumeOrigins(player, rear, side, engineRamp, camera);
   }
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     return subRearEnginePlumeOrigins(player, rear, engineRamp);
   }
 
@@ -17940,7 +18547,7 @@ function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colo
 }
 
 function miningRayRenderColors(colors, gameMode, timeSeconds, player = null) {
-  if (gameMode === GAME_MODES.subs) {
+  if (isWaterThemedGameMode(gameMode)) {
     return {
       ...colors,
       foreground: "#c8ffff",
@@ -17985,7 +18592,17 @@ function miningRayEmitterRenderColors(colors, gameMode) {
     };
   }
 
-  if (gameMode === GAME_MODES.subs) {
+  if (gameMode === GAME_MODES.octopus) {
+    const bodyColor = colors.bodyFill || SUB_MODE_COLORS.bodyFill || "#000000";
+    return {
+      ...colors,
+      foreground: bodyColor,
+      background: bodyColor,
+      solidEmitter: true
+    };
+  }
+
+  if (isSubThemedGameMode(gameMode)) {
     const bodyColor = colors.bodyFill || colors.foreground;
     return {
       ...colors,

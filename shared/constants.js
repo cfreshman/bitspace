@@ -6,8 +6,10 @@ export const GAME_MODES = Object.freeze({
   bitspace: "bitspace",
   cars: "cars",
   subs: "subs",
+  subs2: "subs2",
   bugs: "bugs",
-  clouds: "clouds"
+  clouds: "clouds",
+  octopus: "octopus"
 });
 
 export const RENDER = Object.freeze({
@@ -139,6 +141,10 @@ export const ENGINE = Object.freeze({
     rotorAcceleration: 10000,
     airFriction: .5,
   },
+  octopus: {
+    radius: 7,
+    tileSize: 16
+  },
   player: {
     startingHealthBars: 3,
     maxHealthBars: 8,
@@ -204,7 +210,7 @@ export function shipFrictionForGameMode(gameMode) {
   if (gameMode === GAME_MODES.cars) {
     return ENGINE.car.friction;
   }
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     return ENGINE.subs.friction;
   }
   if (gameMode === GAME_MODES.clouds) {
@@ -214,7 +220,7 @@ export function shipFrictionForGameMode(gameMode) {
 }
 
 export function shipThrustForGameMode(gameMode) {
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     return ENGINE.ship.thrust * ENGINE.subs.thrustMultiplier;
   }
   return ENGINE.ship.thrust;
@@ -232,7 +238,7 @@ export function mapTileSizeForGameMode(gameMode) {
   if (gameMode === GAME_MODES.cars) {
     return RENDER.tileSize * ENGINE.car.tileScale;
   }
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     return ENGINE.subs.tileSize;
   }
   if (gameMode === GAME_MODES.bugs) {
@@ -240,6 +246,9 @@ export function mapTileSizeForGameMode(gameMode) {
   }
   if (gameMode === GAME_MODES.clouds) {
     return ENGINE.clouds.tileSize;
+  }
+  if (gameMode === GAME_MODES.octopus) {
+    return ENGINE.octopus.tileSize;
   }
   return RENDER.tileSize;
 }
@@ -251,11 +260,14 @@ export function playerRadiusForGameMode(gameMode) {
   if (gameMode === GAME_MODES.clouds) {
     return ENGINE.clouds.radius;
   }
+  if (gameMode === GAME_MODES.octopus) {
+    return ENGINE.octopus.radius;
+  }
   return ENGINE.ship.radius;
 }
 
 export function playerMassScaleForGameMode(gameMode) {
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     return ENGINE.subs.massScale;
   }
   return 1;
@@ -263,11 +275,19 @@ export function playerMassScaleForGameMode(gameMode) {
 
 export function miningSecondsForGameMode(seconds, gameMode) {
   const baseSeconds = Number(seconds) || 0;
-  if (gameMode === GAME_MODES.subs) {
+  if (isSubThemedGameMode(gameMode)) {
     return baseSeconds * ENGINE.subs.miningTimeScale;
   }
   if (gameMode === GAME_MODES.clouds) {
     return baseSeconds * ENGINE.clouds.miningTimeScale;
   }
   return baseSeconds;
+}
+
+export function isSubThemedGameMode(gameMode) {
+  return gameMode === GAME_MODES.subs || gameMode === GAME_MODES.subs2;
+}
+
+export function isWaterThemedGameMode(gameMode) {
+  return isSubThemedGameMode(gameMode) || gameMode === GAME_MODES.octopus;
 }

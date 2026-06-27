@@ -1054,11 +1054,17 @@ function normalizeGameMode(mode) {
   if (mode === GAME_MODES.subs) {
     return GAME_MODES.subs;
   }
+  if (mode === GAME_MODES.subs2) {
+    return GAME_MODES.subs2;
+  }
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
   }
   if (mode === GAME_MODES.clouds) {
     return GAME_MODES.clouds;
+  }
+  if (mode === GAME_MODES.octopus) {
+    return GAME_MODES.octopus;
   }
   return GAME_MODES.bitspace;
 }
