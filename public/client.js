@@ -3076,8 +3076,10 @@ function menuModeEnabledByUrl(mode) {
   if (mode === GAME_MODES.octopus) {
     return requestedMode === "octopus" ||
       requestedMode === "octo" ||
+      requestedMode === "octos" ||
       params.get("octopus") === "1" ||
-      params.get("octo") === "1";
+      params.get("octo") === "1" ||
+      params.get("octos") === "1";
   }
   return true;
 }
@@ -3086,6 +3088,7 @@ function menuModeCanLoad(mode) {
   const normalized = normalizeMenuMode(mode);
   return normalized === GAME_MODES.bitspace ||
     normalized === GAME_MODES.bugs ||
+    normalized === GAME_MODES.octopus ||
     menuModeEnabledByUrl(normalized);
 }
 
@@ -3104,7 +3107,7 @@ function menuModeFromUrl() {
   if (mode === "cloud" || mode === "clouds" || mode === "sky") {
     return GAME_MODES.clouds;
   }
-  if (mode === "octopus" || mode === "octo") {
+  if (mode === "octopus" || mode === "octo" || mode === "octos") {
     return GAME_MODES.octopus;
   }
   return null;
@@ -3238,7 +3241,7 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
     return "BITSPACE: SKY";
   }
   if (normalized === GAME_MODES.octopus) {
-    return "BITSPACE: OCTOPUS";
+    return "BITSPACE: OCTOS";
   }
   return "BITSPACE";
 }
@@ -5790,7 +5793,7 @@ function menuModeButtons(mode) {
 function menuModeButtonSlots() {
   const subMode = menuModeEnabledByUrl(GAME_MODES.subs2) ? GAME_MODES.subs2 : GAME_MODES.subs;
   return [GAME_MODES.cars, subMode, GAME_MODES.bugs, GAME_MODES.octopus]
-    .filter((mode) => mode === GAME_MODES.bugs || menuModeEnabledByUrl(mode));
+    .filter((mode) => mode === GAME_MODES.bugs || mode === GAME_MODES.octopus || menuModeEnabledByUrl(mode));
 }
 
 function menuModeLabel(mode) {
@@ -5804,7 +5807,7 @@ function menuModeLabel(mode) {
     return "BUGS";
   }
   if (mode === GAME_MODES.octopus) {
-    return "OCTO";
+    return "OCTOS";
   }
   return "SHIPS";
 }
