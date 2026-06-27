@@ -2969,8 +2969,10 @@ function createMenuState() {
   const arena = createMenuArena(room, asteroid, mode);
   const player = arena.players.get(MENU_PLAYER_ID);
   const rayCount = savedMenuRayCount(savedMenuState?.rayCount);
-  if (player && savedMenuState?.player) {
+  if (player && savedMenuState?.player && room !== MENU_ROOMS.ready) {
     restoreMenuPlayerState(player, savedMenuState.player, asteroid, rayCount);
+  } else if (player) {
+    player.prototypeMiningRayCount = rayCount;
   }
 
   return {
@@ -3009,9 +3011,6 @@ function normalizeMenuMode(mode) {
   }
   if (mode === GAME_MODES.bugs) {
     return GAME_MODES.bugs;
-  }
-  if (mode === GAME_MODES.clouds) {
-    return GAME_MODES.clouds;
   }
   return GAME_MODES.bitspace;
 }
@@ -3107,7 +3106,7 @@ function selectedMenuMode() {
 }
 
 function toggleMenuMode() {
-  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs, GAME_MODES.clouds];
+  const modes = [GAME_MODES.bitspace, GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs];
   const current = selectedMenuMode();
   const index = modes.indexOf(current);
   setMenuMode(modes[(index + 1) % modes.length]);
@@ -3133,9 +3132,6 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   }
   if (normalized === GAME_MODES.bugs) {
     return "BITSPACE: BUGS";
-  }
-  if (normalized === GAME_MODES.clouds) {
-    return "BITSPACE: SKY";
   }
   return "BITSPACE";
 }
@@ -5674,7 +5670,7 @@ function menuEntities() {
 
 function menuModeButtons(mode) {
   const currentMode = normalizeMenuMode(mode);
-  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs, GAME_MODES.clouds].map((slot) => {
+  return [GAME_MODES.cars, GAME_MODES.subs, GAME_MODES.bugs].map((slot) => {
     const selected = currentMode === slot;
     return {
       slot,
@@ -5693,9 +5689,6 @@ function menuModeLabel(mode) {
   }
   if (mode === GAME_MODES.bugs) {
     return "BUGS";
-  }
-  if (mode === GAME_MODES.clouds) {
-    return "SKY";
   }
   return "SHIPS";
 }

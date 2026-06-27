@@ -57,7 +57,7 @@ const SUB_MODE_COLORS = Object.freeze({
   diamond: "#00f7ff",
   rockLine: "#364251",
   // bodyFill: "#222222",
-  bodyFill: "#111111",
+  bodyFill: "#000000",
   health: "#48f06d"
 });
 const BUG_BACKING_COLOR = "#070b06";
