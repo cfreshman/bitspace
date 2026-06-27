@@ -806,6 +806,7 @@ function applyClientAsteroidUpdates(updates) {
     return;
   }
 
+  const newBlockingTiles = [];
   for (const update of updates) {
     if (update.type === "storm") {
       if (!state.asteroid.storm) {
@@ -824,10 +825,15 @@ function applyClientAsteroidUpdates(updates) {
       continue;
     }
 
+    const previousTile = state.asteroid.tiles[update.index];
     state.asteroid.tiles[update.index] = update.tile;
     state.asteroid.amounts[update.index] = update.amount;
+    if (!isAsteroidRockTile(previousTile) && isAsteroidRockTile(update.tile)) {
+      newBlockingTiles.push(update);
+    }
   }
   state.asteroid.revision = (Number(state.asteroid.revision) || 0) + 1;
+  renderer.invalidateOctopusTentaclesForAsteroidUpdates?.(state.asteroid, newBlockingTiles);
 }
 
 function applyStormWarnings(asteroid, warnings) {

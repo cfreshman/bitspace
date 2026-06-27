@@ -129,6 +129,7 @@ const CLOUD_QUADCOPTER_VISUAL_RADIUS_BONUS = 1;
 const BUG_HUCK_ROCK_WEB_LIGHT = "#ffffff";
 const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
 const SUB_SHADOW_MASK_COLOR = "#010203";
+const SUB_FISH_MASK_COLOR = "#020103";
 const SUB_NON_RENDER_OCEAN_SHADOW_ALPHA = 0.95;
 const CAR_BODY_COLORS = Object.freeze([
   "#df261c",
@@ -259,6 +260,24 @@ const OCTOPUS_TENTACLE_MAX_BEND_SEGMENT_SCALE = 1.32;
 const OCTOPUS_TENTACLE_COLLISION_BACKOFF = 0.25;
 const OCTOPUS_TENTACLE_CONTACT_RADIUS = 2.25;
 const OCTOPUS_TENTACLE_CONTACT_PASSES = 3;
+const WATER_FISH_CELL_SIZE = 96;
+const WATER_FISH_DENSITY = 0.32;
+const WATER_FISH_MIN_SCHOOL_SIZE = 2;
+const WATER_FISH_MAX_SCHOOL_SIZE = 54;
+const WATER_FISH_RENDER_SCALE = 2;
+const WATER_FISH_MIN_SPEED = 22;
+const WATER_FISH_MAX_SPEED = 64;
+const WATER_FISH_PERCEPTION_RADIUS = 96;
+const WATER_FISH_SEPARATION_RADIUS = 22;
+const WATER_FISH_SPATIAL_CELL_SIZE = WATER_FISH_PERCEPTION_RADIUS;
+const WATER_FISH_HOME_RADIUS = 160;
+const WATER_FISH_PRUNE_PADDING = 420;
+const WATER_FISH_ALPHA = 0.16;
+const WATER_FISH_AVOID_FACTOR = 26;
+const WATER_FISH_MATCHING_FACTOR = 2.8;
+const WATER_FISH_CENTERING_FACTOR = 0.68;
+const WATER_FISH_HOME_FACTOR = 0.22;
+const WATER_FISH_DRIFT_FACTOR = 0.9;
 const SUB_WAVE_SIM_SIZE = 256;
 const SUB_WAVE_SIM_FPS = 30;
 const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
@@ -903,6 +922,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   const emitCarry = new Map();
   const bugLegStates = new Map();
   const octopusTentacleStates = new Map();
+  const waterFishState = createWaterFishState();
   let octopusTentacleRoomKey = "";
   let minimapSurface = null;
   let minimapTextRenderer = null;
@@ -1210,6 +1230,10 @@ export function createRenderer(canvas, minimapCanvas = null) {
       tireTrackParticles.length = 0;
       emitCarry.clear();
       octopusTentacleStates.clear();
+      resetWaterFishState(waterFishState);
+    },
+    invalidateOctopusTentaclesForAsteroidUpdates(asteroid, updates) {
+      resetBlockedOctopusTentaclesForAsteroidUpdates(octopusTentacleStates, asteroid, updates);
     },
     draw(snapshot, options = {}) {
       const nextMinimapVisible = options.playerMapVisible === true &&
@@ -1274,6 +1298,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
         subLightAngles,
         bugLegStates,
         octopusTentacleStates,
+        waterFishState,
         gpuStormRenderer,
         gpuFrameStormReady: framePresenter?.supportsStorm === true,
         gpuFrameCheckerReady: framePresenter?.supportsChecker === true,
@@ -2746,6 +2771,8 @@ function createGpuFramePresenter(canvas, width, height) {
         backgroundColor: gl.getUniformLocation(causticProgram, "u_backgroundColor"),
         backgroundDarkColor: gl.getUniformLocation(causticProgram, "u_backgroundDarkColor"),
         shadowMaskColor: gl.getUniformLocation(causticProgram, "u_shadowMaskColor"),
+        fishMaskColor: gl.getUniformLocation(causticProgram, "u_fishMaskColor"),
+        fishAlpha: gl.getUniformLocation(causticProgram, "u_fishAlpha"),
         shadowColor: gl.getUniformLocation(causticProgram, "u_shadowColor"),
         shadowAlpha: gl.getUniformLocation(causticProgram, "u_shadowAlpha"),
         nonRenderOceanAlpha: gl.getUniformLocation(causticProgram, "u_nonRenderOceanAlpha"),
@@ -3202,6 +3229,7 @@ function createGpuFramePresenter(canvas, width, height) {
       const background = rgbFloatsForHex(palette.background || SUB_MODE_COLORS.background);
       const backgroundDark = rgbFloatsForHex(palette.backgroundDark || SUB_MODE_COLORS.backgroundDark);
       const shadowMask = rgbFloatsForHex(SUB_SHADOW_MASK_COLOR);
+      const fishMask = rgbFloatsForHex(SUB_FISH_MASK_COLOR);
       const shadowPalette = shadowLayer?.palette || palette;
       const shadowHex = String(shadowPalette.shadow || "").toLowerCase();
       const shadow = rgbFloatsForHex(
@@ -3233,6 +3261,8 @@ function createGpuFramePresenter(canvas, width, height) {
       gl.uniform3f(causticLocations.backgroundColor, background[0], background[1], background[2]);
       gl.uniform3f(causticLocations.backgroundDarkColor, backgroundDark[0], backgroundDark[1], backgroundDark[2]);
       gl.uniform3f(causticLocations.shadowMaskColor, shadowMask[0], shadowMask[1], shadowMask[2]);
+      gl.uniform3f(causticLocations.fishMaskColor, fishMask[0], fishMask[1], fishMask[2]);
+      gl.uniform1f(causticLocations.fishAlpha, WATER_FISH_ALPHA);
       gl.uniform3f(causticLocations.shadowColor, shadow[0], shadow[1], shadow[2]);
       gl.uniform1f(causticLocations.shadowAlpha, shadowAlpha);
       gl.uniform1f(causticLocations.nonRenderOceanAlpha, nonRenderOceanAlpha);
@@ -3909,6 +3939,8 @@ uniform float u_waveSize;
 uniform vec3 u_backgroundColor;
 uniform vec3 u_backgroundDarkColor;
 uniform vec3 u_shadowMaskColor;
+uniform vec3 u_fishMaskColor;
+uniform float u_fishAlpha;
 uniform vec3 u_shadowColor;
 uniform float u_shadowAlpha;
 uniform float u_nonRenderOceanAlpha;
@@ -3932,6 +3964,12 @@ bool frameIsShadowMaskColor(vec4 frame) {
   return all(equal(frameByte, shadowByte));
 }
 
+bool frameIsFishMaskColor(vec4 frame) {
+  vec3 frameByte = floor(clamp(frame.rgb, 0.0, 1.0) * 255.0 + 0.5);
+  vec3 fishByte = floor(clamp(u_fishMaskColor, 0.0, 1.0) * 255.0 + 0.5);
+  return all(equal(frameByte, fishByte));
+}
+
 bool frameIsBackingColor(vec4 frame) {
   vec3 frameByte = floor(clamp(frame.rgb, 0.0, 1.0) * 255.0 + 0.5);
   vec3 backingByte = floor(clamp(u_backingColor, 0.0, 1.0) * 255.0 + 0.5);
@@ -3939,7 +3977,7 @@ bool frameIsBackingColor(vec4 frame) {
 }
 
 float sceneAlphaForFrame(vec4 frame) {
-  return frame.a * ((frameIsBackgroundColor(frame) || frameIsShadowMaskColor(frame)) ? 0.0 : 1.0);
+  return frame.a * ((frameIsBackgroundColor(frame) || frameIsShadowMaskColor(frame) || frameIsFishMaskColor(frame)) ? 0.0 : 1.0);
 }
 
 float decodeRenderMaskCoordinate(vec2 bytes) {
@@ -4100,6 +4138,7 @@ void main() {
   bool sceneCanRender = !sampleIsNonRenderOcean;
   vec3 shadowColor = mix(u_backgroundDarkColor, u_backingColor, 0.35);
   bool refractedIsShadow = sceneCanRender && frameIsShadowMaskColor(refractedFrame);
+  bool refractedIsFish = sceneCanRender && frameIsFishMaskColor(refractedFrame);
   vec3 waterBase = waterSurface;
   waterBase = mix(waterBase, waterSurface, surfaceAlpha);
   waterBase = mix(waterBase, shadowColor, clamp(normalShadow * 0.26, 0.0, 0.20));
@@ -4107,6 +4146,7 @@ void main() {
   waterBase = mix(waterBase, elevationColor, clamp(0.42, 0.0, 0.38));
   waterBase = mix(waterBase, contourColor, clamp(contourPixel * 0.075, 0.0, 0.075));
   waterBase = mix(waterBase, vec3(1.0), clamp(specular * 0.18, 0.0, 0.16));
+  waterBase = mix(waterBase, vec3(0.0), refractedIsFish ? clamp(u_fishAlpha, 0.0, 1.0) : 0.0);
   waterBase = mix(waterBase, u_shadowColor, refractedIsShadow ? clamp(u_shadowAlpha, 0.0, 1.0) : 0.0);
   waterBase = mix(waterBase, u_shadowColor, sampleIsNonRenderOcean ? clamp(u_nonRenderOceanAlpha, 0.0, 1.0) : 0.0);
   float sceneAlpha = (!sceneCanRender || refractedIsShadow) ? 0.0 : sceneAlphaForFrame(refractedFrame);
@@ -5340,7 +5380,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
           options.gameMode,
-          renderMask
+          renderMask,
+          options.waterFishState
         ));
       } else {
         measureBucket("starsMs", () => drawWorldAmbient(
@@ -5351,7 +5392,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           colors,
           options.timeSeconds ?? snapshot.tick / 60,
           options.gameMode,
-          renderMask
+          renderMask,
+          options.waterFishState
         ));
       }
       if (options.asteroid) {
@@ -9073,7 +9115,8 @@ function drawAsteroidTiles(
       isWaterThemedGameMode(gameMode) ||
       gameMode === GAME_MODES.bugs ||
       gameMode === GAME_MODES.clouds;
-    const hullOnly = gameMode === GAME_MODES.bugs;
+    const hullOnly = gameMode === GAME_MODES.bugs
+      || gameMode === GAME_MODES.octopus;
     const cloudResources = gameMode === GAME_MODES.clouds;
     const oreFillColor = colors.ore || colors.foreground;
     const diamondFillColor = colors.diamond || colors.foreground;
@@ -13203,7 +13246,8 @@ function drawWorldAmbient(
   colors = {},
   timeSeconds = 0,
   gameMode = GAME_MODES.bitspace,
-  renderMask = null
+  renderMask = null,
+  waterFishState = null
 ) {
   if (gameMode === GAME_MODES.cars || gameMode === GAME_MODES.bugs) {
     drawGroundDebris(ctx, snapshot, camera, visibility, colors, timeSeconds);
@@ -13211,7 +13255,7 @@ function drawWorldAmbient(
   }
 
   if (isWaterThemedGameMode(gameMode)) {
-    drawWaterDebris(ctx, snapshot, camera, visibility, colors, timeSeconds, renderMask);
+    drawWaterDebris(ctx, snapshot, camera, visibility, colors, timeSeconds, renderMask, waterFishState);
     return;
   }
 
@@ -13455,9 +13499,39 @@ function drawGroundGrassTuft(ctx, x, y, hash, timeSeconds) {
   ctx.fillRect(x - 1, y, 3, 1);
 }
 
-function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, timeSeconds = 0, renderMask = null) {
-  if (typeof ctx.queueGpuCausticLayer !== "function") {
-    return false;
+function createWaterFishState() {
+  return {
+    key: "",
+    lastTime: Number.NaN,
+    schools: new Map()
+  };
+}
+
+function resetWaterFishState(state) {
+  if (!state) {
+    return;
+  }
+
+  state.key = "";
+  state.lastTime = Number.NaN;
+  state.schools.clear();
+}
+
+function drawWaterDebris(
+  ctx,
+  snapshot,
+  camera,
+  visibility = null,
+  colors = {},
+  timeSeconds = 0,
+  renderMask = null,
+  waterFishState = null
+) {
+  const gpuCaustics = typeof ctx.queueGpuCausticLayer === "function";
+  updateWaterFishBoids(waterFishState, snapshot, camera, timeSeconds, ctx.width, ctx.height);
+  drawWaterFishField(ctx, waterFishState, camera, visibility, renderMask, gpuCaustics);
+  if (!gpuCaustics) {
+    return true;
   }
 
   return ctx.queueGpuCausticLayer({
@@ -13478,6 +13552,344 @@ function drawWaterDebris(ctx, snapshot, camera, visibility = null, colors = {}, 
       backing: colors.backing || SUB_MODE_COLORS.backing
     }
   });
+}
+
+function updateWaterFishBoids(state, snapshot, camera, timeSeconds, width, height) {
+  if (!state || !snapshot || !camera) {
+    return;
+  }
+
+  const key = `${snapshot?.arenaId || snapshot?.seed || "water"}:fish`;
+  if (state.key !== key) {
+    resetWaterFishState(state);
+    state.key = key;
+  }
+
+  const dt = Number.isFinite(state.lastTime)
+    ? clamp(timeSeconds - state.lastTime, 0, 1 / 20)
+    : 1 / 60;
+  state.lastTime = timeSeconds;
+  ensureWaterFishSchools(state, camera, width, height);
+  pruneWaterFishSchools(state, camera, width, height);
+  updateWaterFishFlocks(state, dt, timeSeconds);
+}
+
+function ensureWaterFishSchools(state, camera, width, height) {
+  const bounds = waterFishCellBounds(camera, width, height, cameraCullPadding(camera) + WATER_FISH_PRUNE_PADDING);
+  for (let cellY = bounds.minY; cellY <= bounds.maxY; cellY += 1) {
+    for (let cellX = bounds.minX; cellX <= bounds.maxX; cellX += 1) {
+      const id = `${cellX}:${cellY}`;
+      if (state.schools.has(id)) {
+        continue;
+      }
+
+      const hash = hashCell(state.key, cellX, cellY);
+      if (randomUnit(hash, 1) > WATER_FISH_DENSITY) {
+        continue;
+      }
+
+      state.schools.set(id, createWaterFishSchool(hash, cellX, cellY));
+    }
+  }
+}
+
+function pruneWaterFishSchools(state, camera, width, height) {
+  const bounds = waterFishCellBounds(camera, width, height, cameraCullPadding(camera) + WATER_FISH_PRUNE_PADDING * 1.5);
+  for (const [id, school] of state.schools) {
+    if (
+      school.cellX < bounds.minX ||
+      school.cellX > bounds.maxX ||
+      school.cellY < bounds.minY ||
+      school.cellY > bounds.maxY
+    ) {
+      state.schools.delete(id);
+    }
+  }
+}
+
+function waterFishCellBounds(camera, width, height, padding) {
+  return {
+    minX: Math.floor((camera.x - padding) / WATER_FISH_CELL_SIZE) - 1,
+    maxX: Math.ceil((camera.x + width + padding) / WATER_FISH_CELL_SIZE) + 1,
+    minY: Math.floor((camera.y - padding) / WATER_FISH_CELL_SIZE) - 1,
+    maxY: Math.ceil((camera.y + height + padding) / WATER_FISH_CELL_SIZE) + 1
+  };
+}
+
+function createWaterFishSchool(hash, cellX, cellY) {
+  const count = waterFishSchoolSize(hash);
+  const sizeRatio = clamp(
+    (count - WATER_FISH_MIN_SCHOOL_SIZE) / Math.max(1, WATER_FISH_MAX_SCHOOL_SIZE - WATER_FISH_MIN_SCHOOL_SIZE),
+    0,
+    1
+  );
+  const schoolRadius = WATER_FISH_HOME_RADIUS * (0.75 + Math.sqrt(sizeRatio) * 1.5 + randomUnit(hash, 10) * 0.35);
+  const homeX = (cellX + 0.5) * WATER_FISH_CELL_SIZE +
+    (randomUnit(hash, 3) - 0.5) * WATER_FISH_CELL_SIZE * 0.45;
+  const homeY = (cellY + 0.5) * WATER_FISH_CELL_SIZE +
+    (randomUnit(hash, 4) - 0.5) * WATER_FISH_CELL_SIZE * 0.45;
+  const baseAngle = randomUnit(hash, 5) * Math.PI * 2;
+  const fish = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const fishHash = hashCell(hash, index, 19);
+    const angle = baseAngle + (randomUnit(fishHash, 1) - 0.5) * 1.4;
+    const radius = Math.sqrt(randomUnit(fishHash, 2)) * schoolRadius * 0.55;
+    const spreadAngle = randomUnit(fishHash, 3) * Math.PI * 2;
+    const speed = WATER_FISH_MAX_SPEED * (0.42 + randomUnit(fishHash, 4) * 0.34);
+    fish.push({
+      x: homeX + Math.cos(spreadAngle) * radius,
+      y: homeY + Math.sin(spreadAngle) * radius,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      heading: angle,
+      shapeRoll: randomUnit(fishHash, 5)
+    });
+  }
+
+  return {
+    cellX,
+    cellY,
+    homeX,
+    homeY,
+    phase: randomUnit(hash, 6) * Math.PI * 2,
+    phase2: randomUnit(hash, 7) * Math.PI * 2,
+    turnRate: 0.12 + randomUnit(hash, 8) * 0.11,
+    turnRate2: 0.04 + randomUnit(hash, 9) * 0.07,
+    driftAngle: baseAngle,
+    schoolRadius,
+    fish
+  };
+}
+
+function waterFishSchoolSize(hash) {
+  const roll = randomUnit(hash, 2);
+  if (roll < 0.5) {
+    return 2 + Math.floor(randomUnit(hash, 11) * 5);
+  }
+  if (roll < 0.78) {
+    return 7 + Math.floor(randomUnit(hash, 12) * 9);
+  }
+  if (roll < 0.94) {
+    return 16 + Math.floor(randomUnit(hash, 13) * 17);
+  }
+
+  return 33 + Math.floor(randomUnit(hash, 14) * (WATER_FISH_MAX_SCHOOL_SIZE - 32));
+}
+
+function updateWaterFishFlocks(state, dt, timeSeconds) {
+  const entries = [];
+  const grid = new Map();
+
+  for (const school of state.schools.values()) {
+    updateWaterFishSchoolIntent(school, timeSeconds);
+    for (let index = 0; index < school.fish.length; index += 1) {
+      const fish = school.fish[index];
+      const entry = { fish, school, next: null };
+      entries.push(entry);
+      const key = waterFishSpatialKey(fish.x, fish.y);
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(entry);
+    }
+  }
+
+  for (const entry of entries) {
+    entry.next = nextWaterFishBoidState(entry, grid, dt);
+  }
+
+  for (const entry of entries) {
+    Object.assign(entry.fish, entry.next);
+  }
+}
+
+function updateWaterFishSchoolIntent(school, timeSeconds) {
+  const driftAngle = school.driftAngle +
+    Math.sin(timeSeconds * school.turnRate + school.phase) * 0.9 +
+    Math.sin(timeSeconds * school.turnRate2 + school.phase2) * 0.42;
+  school.driftVX = Math.cos(driftAngle) * WATER_FISH_MAX_SPEED * 0.62;
+  school.driftVY = Math.sin(driftAngle) * WATER_FISH_MAX_SPEED * 0.62;
+}
+
+function nextWaterFishBoidState(entry, grid, dt) {
+  const fish = entry.fish;
+  const school = entry.school;
+  let closeDx = 0;
+  let closeDy = 0;
+  let xVelocityAverage = 0;
+  let yVelocityAverage = 0;
+  let xPositionAverage = 0;
+  let yPositionAverage = 0;
+  let visibleCount = 0;
+  const cellX = Math.floor(fish.x / WATER_FISH_SPATIAL_CELL_SIZE);
+  const cellY = Math.floor(fish.y / WATER_FISH_SPATIAL_CELL_SIZE);
+
+  for (let yOffset = -1; yOffset <= 1; yOffset += 1) {
+    for (let xOffset = -1; xOffset <= 1; xOffset += 1) {
+      const bucket = grid.get(`${cellX + xOffset}:${cellY + yOffset}`);
+      if (!bucket) {
+        continue;
+      }
+
+      for (const otherEntry of bucket) {
+        const other = otherEntry.fish;
+        if (other === fish) {
+          continue;
+        }
+
+        const dx = other.x - fish.x;
+        const dy = other.y - fish.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > WATER_FISH_PERCEPTION_RADIUS * WATER_FISH_PERCEPTION_RADIUS || distSq <= 0.0001) {
+          continue;
+        }
+
+        if (distSq < WATER_FISH_SEPARATION_RADIUS * WATER_FISH_SEPARATION_RADIUS) {
+          closeDx -= dx;
+          closeDy -= dy;
+          continue;
+        }
+
+        xVelocityAverage += other.vx;
+        yVelocityAverage += other.vy;
+        xPositionAverage += other.x;
+        yPositionAverage += other.y;
+        visibleCount += 1;
+      }
+    }
+  }
+
+  const maxSpeed = WATER_FISH_MAX_SPEED * (0.72 + fish.shapeRoll * 0.34);
+  let nextVX = fish.vx + closeDx * WATER_FISH_AVOID_FACTOR * dt;
+  let nextVY = fish.vy + closeDy * WATER_FISH_AVOID_FACTOR * dt;
+
+  if (visibleCount > 0) {
+    xVelocityAverage /= visibleCount;
+    yVelocityAverage /= visibleCount;
+    xPositionAverage /= visibleCount;
+    yPositionAverage /= visibleCount;
+    nextVX += (xVelocityAverage - fish.vx) * WATER_FISH_MATCHING_FACTOR * dt;
+    nextVY += (yVelocityAverage - fish.vy) * WATER_FISH_MATCHING_FACTOR * dt;
+    nextVX += (xPositionAverage - fish.x) * WATER_FISH_CENTERING_FACTOR * dt;
+    nextVY += (yPositionAverage - fish.y) * WATER_FISH_CENTERING_FACTOR * dt;
+  }
+
+  const homeRadius = Number.isFinite(school.schoolRadius) ? school.schoolRadius : WATER_FISH_HOME_RADIUS;
+  const homeDx = school.homeX - fish.x;
+  const homeDy = school.homeY - fish.y;
+  const homeDistance = Math.hypot(homeDx, homeDy);
+  if (homeDistance > homeRadius * 0.9) {
+    const weight = clamp((homeDistance - homeRadius * 0.9) / Math.max(1, homeRadius * 0.4), 0, 1);
+    nextVX += homeDx * WATER_FISH_HOME_FACTOR * weight * dt;
+    nextVY += homeDy * WATER_FISH_HOME_FACTOR * weight * dt;
+  }
+
+  nextVX += (Number(school.driftVX || 0) - fish.vx) * WATER_FISH_DRIFT_FACTOR * dt;
+  nextVY += (Number(school.driftVY || 0) - fish.vy) * WATER_FISH_DRIFT_FACTOR * dt;
+
+  const velocity = clampBoidSpeed(nextVX, nextVY, WATER_FISH_MIN_SPEED, maxSpeed);
+  const speed = Math.hypot(velocity.x, velocity.y);
+  return {
+    vx: velocity.x,
+    vy: velocity.y,
+    x: fish.x + velocity.x * dt,
+    y: fish.y + velocity.y * dt,
+    heading: speed > 0.01 ? Math.atan2(velocity.y, velocity.x) : fish.heading,
+    shapeRoll: fish.shapeRoll
+  };
+}
+
+function waterFishSpatialKey(x, y) {
+  return `${Math.floor(x / WATER_FISH_SPATIAL_CELL_SIZE)}:${Math.floor(y / WATER_FISH_SPATIAL_CELL_SIZE)}`;
+}
+
+function clampBoidSpeed(x, y, minLength, maxLength) {
+  const length = Math.hypot(x, y);
+  if (length <= 0.0001) {
+    return { x: minLength, y: 0 };
+  }
+
+  if (length < minLength) {
+    const scale = minLength / length;
+    return { x: x * scale, y: y * scale };
+  }
+
+  if (length > maxLength) {
+    const scale = maxLength / length;
+    return { x: x * scale, y: y * scale };
+  }
+
+  return { x, y };
+}
+
+function drawWaterFishField(ctx, fishState, camera, visibility = null, renderMask = null, gpuCaustics = false) {
+  if (!fishState?.schools?.size) {
+    return;
+  }
+
+  ctx.fillStyle = gpuCaustics ? SUB_FISH_MASK_COLOR : "#000000";
+  for (const school of fishState.schools.values()) {
+    for (const fish of school.fish) {
+      const screen = worldToScreen(fish, camera);
+      if (
+        screen.x < -8 ||
+        screen.x >= ctx.width + 8 ||
+        screen.y < -8 ||
+        screen.y >= ctx.height + 8
+      ) {
+        continue;
+      }
+      if (visibility && !starVisibleInAsteroidMask(visibility, camera, screen.x, screen.y)) {
+        continue;
+      }
+      if (renderMask?.screenSpans && !spanMaskScreenPointVisible(renderMask.screenSpans, screen.x, screen.y)) {
+        continue;
+      }
+
+      drawWaterFish(ctx, screen.x, screen.y, fish.heading, fish.shapeRoll, gpuCaustics);
+    }
+  }
+}
+
+function drawWaterFish(ctx, x, y, heading, shapeRoll, gpuCaustics = false) {
+  const forward = {
+    x: Math.cos(heading),
+    y: Math.sin(heading)
+  };
+  const side = {
+    x: -forward.y,
+    y: forward.x
+  };
+  const length = (shapeRoll < 0.18 ? 4 : shapeRoll < 0.88 ? 6 : 8) * WATER_FISH_RENDER_SCALE;
+  const width = (shapeRoll < 0.18 ? 2 : shapeRoll < 0.58 ? 2.5 : 3) * WATER_FISH_RENDER_SCALE;
+  const majorRadius = length * 0.5;
+  const minorRadius = width * 0.5;
+  const padding = Math.ceil(Math.max(majorRadius, minorRadius)) + 1;
+  const centerX = Math.round(x);
+  const centerY = Math.round(y);
+
+  for (let py = centerY - padding; py <= centerY + padding; py += 1) {
+    for (let px = centerX - padding; px <= centerX + padding; px += 1) {
+      const dx = px - x;
+      const dy = py - y;
+      const along = dx * forward.x + dy * forward.y;
+      const across = dx * side.x + dy * side.y;
+      const ellipse = (along * along) / (majorRadius * majorRadius) +
+        (across * across) / (minorRadius * minorRadius);
+      if (ellipse > 1) {
+        continue;
+      }
+
+      if (gpuCaustics || typeof ctx.fillRectAlpha !== "function") {
+        ctx.fillRect(px, py, 1, 1);
+      } else {
+        ctx.fillRectAlpha(px, py, 1, 1, "#000000", WATER_FISH_ALPHA);
+      }
+    }
+  }
 }
 
 function drawMenuStars(ctx, timeSeconds) {
@@ -14615,6 +15027,123 @@ function pruneOctopusTentacleStates(tentacleStates, timeSeconds) {
       tentacleStates.delete(key);
     }
   }
+}
+
+function resetBlockedOctopusTentaclesForAsteroidUpdates(tentacleStates, asteroid, updates) {
+  if (!(tentacleStates instanceof Map) || !asteroid || !Array.isArray(updates) || updates.length <= 0) {
+    return;
+  }
+
+  for (const state of tentacleStates.values()) {
+    if (!Array.isArray(state?.tentacles)) {
+      continue;
+    }
+
+    for (const tentacle of state.tentacles) {
+      if (octopusTentacleBlockedByNewTiles(tentacle, asteroid, updates)) {
+        octopusResetTentacleState(tentacle);
+      }
+    }
+  }
+}
+
+function octopusResetTentacleState(tentacle) {
+  if (!tentacle) {
+    return;
+  }
+
+  tentacle.targetX = Number.NaN;
+  tentacle.targetY = Number.NaN;
+  tentacle.points = null;
+}
+
+function octopusTentacleBlockedByNewTiles(tentacle, asteroid, updates) {
+  const points = tentacle?.points;
+  if (!Array.isArray(points) || points.length < 2) {
+    return false;
+  }
+
+  for (const update of updates) {
+    if (octopusTentacleTouchesUpdatedTile(points, asteroid, update) && octopusTentacleSegmentBlocked(points, asteroid)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function octopusTentacleTouchesUpdatedTile(points, asteroid, update) {
+  const index = Number(update?.index);
+  const widthTiles = Number(asteroid?.widthTiles) || 0;
+  const tileSize = Number(asteroid?.tileSize) || RENDER.tileSize;
+  if (!Number.isInteger(index) || widthTiles <= 0 || tileSize <= 0) {
+    return false;
+  }
+
+  const tileX = index % widthTiles;
+  const tileY = Math.floor(index / widthTiles);
+  const minX = tileX * tileSize - OCTOPUS_TENTACLE_CONTACT_RADIUS - 1;
+  const minY = tileY * tileSize - OCTOPUS_TENTACLE_CONTACT_RADIUS - 1;
+  const maxX = (tileX + 1) * tileSize + OCTOPUS_TENTACLE_CONTACT_RADIUS + 1;
+  const maxY = (tileY + 1) * tileSize + OCTOPUS_TENTACLE_CONTACT_RADIUS + 1;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    const segmentMinX = Math.min(previous.x, point.x);
+    const segmentMaxX = Math.max(previous.x, point.x);
+    const segmentMinY = Math.min(previous.y, point.y);
+    const segmentMaxY = Math.max(previous.y, point.y);
+    if (segmentMaxX >= minX && segmentMinX <= maxX && segmentMaxY >= minY && segmentMinY <= maxY) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function octopusTentacleSegmentBlocked(points, asteroid) {
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    if (octopusTentaclePointInsideBlocker(previous, asteroid) || octopusTentaclePointInsideBlocker(point, asteroid)) {
+      return true;
+    }
+
+    const dx = point.x - previous.x;
+    const dy = point.y - previous.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance <= 0.001) {
+      continue;
+    }
+
+    const hit = raycastAsteroid(asteroid, previous.x, previous.y, Math.atan2(dy, dx), distance, { blockNonPlayable: true });
+    if (hit?.hit && Number(hit.distance || 0) < distance - 0.01) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function octopusTentaclePointInsideBlocker(point, asteroid) {
+  if (!point || !asteroid) {
+    return false;
+  }
+
+  const tileSize = Number(asteroid.tileSize) || RENDER.tileSize;
+  const tileX = Math.floor(point.x / tileSize);
+  const tileY = Math.floor(point.y / tileSize);
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return true;
+  }
+
+  const index = tileY * asteroid.widthTiles + tileX;
+  if (asteroid.playable && asteroid.playable[index] !== "1" && asteroid.playable[index] !== 1 && asteroid.playable[index] !== true) {
+    return true;
+  }
+
+  return isSolidTile(asteroid.tiles[index]);
 }
 
 function octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds) {
