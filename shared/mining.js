@@ -1,4 +1,4 @@
-import { ENGINE, RENDER } from "./constants.js";
+import { ENGINE } from "./constants.js";
 
 export function miningRayCountForPlayer(player) {
   const rawCount = Number(player?.prototypeMiningRayCount ?? player?.miningRayCount ?? 1);
@@ -22,13 +22,14 @@ export function miningRayLaneOffsets(count, sideOffset = ENGINE.mining.sideRayOf
   return [0, -sideOffset, sideOffset];
 }
 
-export function miningSideRayOffsetForAsteroid(asteroid) {
-  const tileSize = Number(asteroid?.tileSize);
-  if (!Number.isFinite(tileSize) || tileSize <= 0) {
+export function miningSideRayOffsetForPlayer(player) {
+  const radius = Number(player?.radius);
+  const baseRadius = Number(ENGINE.ship.radius) || 1;
+  if (!Number.isFinite(radius) || radius <= 0) {
     return ENGINE.mining.sideRayOffset;
   }
 
-  return ENGINE.mining.sideRayOffset * (tileSize / RENDER.tileSize);
+  return ENGINE.mining.sideRayOffset * (radius / baseRadius);
 }
 
 export function miningRayLanePower(offset) {

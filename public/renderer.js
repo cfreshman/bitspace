@@ -7,7 +7,7 @@ import {
   miningRayCountForPlayer,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
-  miningSideRayOffsetForAsteroid,
+  miningSideRayOffsetForPlayer,
   miningRayLanesForPlayer
 } from "/shared/mining.js";
 import {
@@ -370,7 +370,7 @@ const CAR_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
 });
 const CAR_THRUSTER_ENGINE_RAMP_MAXES = Object.freeze({
   rate: 20,
-  plumeSpeed: 5,
+  plumeSpeed: 2,
   life: .5,
   nozzle: 7,
   spread: 1,
@@ -14445,7 +14445,7 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
   const geometryScale = shipGeometryScaleForRadius(shipMainRadius(player));
   const emitterLength = MINING_RAY_EMITTER_LENGTH * geometryScale;
   const emitterRadius = Math.max(0.5, MINING_RAY_EMITTER_RADIUS * geometryScale);
-  const sideOffset = miningSideRayOffsetForAsteroid(asteroid);
+  const sideOffset = miningSideRayOffsetForPlayer(player);
   const lanes = miningRayLanesForPlayer(player, angle, rayLength, sideOffset)
     .map((lane) => clipRenderMiningRayLaneStart(player, asteroid, lane, angle))
     .filter((lane) => lane.offset !== 0);
@@ -16786,7 +16786,7 @@ function miningRayRenderLanes(player, asteroid, angle, rayLength, extension) {
     return lanes;
   }
 
-  const sideOffset = miningSideRayOffsetForAsteroid(asteroid);
+  const sideOffset = miningSideRayOffsetForPlayer(player);
   return miningRayLanesForPlayer(player, angle, rayLength, sideOffset).map((lane) => {
     lane = clipRenderMiningRayLaneStart(player, asteroid, lane, angle);
     const activeDistance = lane.rayDistance * extension;

@@ -16,7 +16,7 @@ import {
   miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
   miningRayLanesForPlayer,
-  miningSideRayOffsetForAsteroid,
+  miningSideRayOffsetForPlayer,
   miningRaySideStartProbe
 } from "./mining.js";
 import { findPathNative, planTrajectoryNative } from "./core/bitspace-core.js";
@@ -5311,7 +5311,7 @@ function botMiningRayTargeting(arena, bot, aimAngle, rayReach, targetIndex = nul
 function botMiningRayLanes(arena, bot, aimAngle, rayReach) {
   const radius = Number(bot?.radius ?? ENGINE.ship.radius);
   const forwardLength = Math.max(0.000001, Number(rayReach || 0) - radius);
-  const sideOffset = miningSideRayOffsetForAsteroid(arena.asteroid);
+  const sideOffset = miningSideRayOffsetForPlayer(bot);
   return miningRayLanesForPlayer(bot, aimAngle, forwardLength, sideOffset).map((lane) => (
     botClipMiningRayLaneStart(arena, bot, lane, aimAngle)
   ));

@@ -38,9 +38,10 @@ import {
 } from "./upgrades.js";
 import {
   miningRayClippedSideStartDistance,
+  miningRayCountForPlayer,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
-  miningSideRayOffsetForAsteroid,
+  miningSideRayOffsetForPlayer,
   miningRayLanesForPlayer
 } from "./mining.js";
 
@@ -1594,7 +1595,7 @@ function processPlayerMining(arena, player, dtSeconds) {
   const angle = player.aimAngle ?? player.angle;
   const effects = aggregateUpgradeEffects(player.upgrades);
   const fullRayLength = playerMiningRayLength(player, effects);
-  const sideOffset = miningSideRayOffsetForAsteroid(arena.asteroid);
+  const sideOffset = miningSideRayOffsetForPlayer(player);
   const lanes = miningRayLanesForPlayer(player, angle, fullRayLength, sideOffset).map((baseLane) => {
     baseLane = clipMiningRayLaneStart(arena, player, baseLane, angle);
     const start = {
@@ -2967,7 +2968,7 @@ function snapshotPlayer(player, tick = 0, mode = GAME_MODES.bitspace) {
     moveX: roundForSnapshot(player.input?.moveX || 0),
     moveY: roundForSnapshot(player.input?.moveY || 0),
     mining: player.mining,
-    miningRayCount: player.miningRayCount || 1,
+    miningRayCount: miningRayCountForPlayer(player),
     huckRockCooldownSeconds: roundForSnapshot(player.huckRockCooldownSeconds || 0),
     huckRockEngineCutoutSeconds: roundForSnapshot(player.huckRockEngineCutoutSeconds || 0),
     miningRay: player.miningRay,

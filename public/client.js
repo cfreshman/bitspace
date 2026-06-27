@@ -51,7 +51,7 @@ import {
   miningRayClippedSideStartDistance,
   miningRayLaneWithStart,
   miningRaySideStartProbe,
-  miningSideRayOffsetForAsteroid,
+  miningSideRayOffsetForPlayer,
   miningRayLanesForPlayer
 } from "/shared/mining.js";
 import {
@@ -1987,7 +1987,7 @@ function clearPagePointerHover() {
 
 function handleMenuRayCountKey(event) {
   if (
-    state.room?.state !== "menu" ||
+    !isReadyMenu() ||
     event.repeat ||
     event.metaKey ||
     event.ctrlKey ||
@@ -3405,7 +3405,7 @@ function updateMenuMiningRay(player, dtSeconds) {
   const effects = aggregateUpgradeEffects(player.upgrades);
   const fullRayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const angle = player.aimAngle ?? player.angle;
-  const sideOffset = miningSideRayOffsetForAsteroid(state.menu.asteroid);
+  const sideOffset = miningSideRayOffsetForPlayer(player);
   const lanes = miningRayLanesForPlayer(player, angle, fullRayLength, sideOffset).map((baseLane) => {
     baseLane = clipMenuMiningRayLaneStart(player, baseLane, angle);
     const start = {
@@ -10291,7 +10291,7 @@ function predictedMiningRayForPlayer(player, authoritativeRay = null) {
   const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
   const extension = clamp(player.rayExtension ?? miningRayExtension(player.mining, player.miningHoldSeconds || 0), 0, 1);
   const angle = player.aimAngle ?? player.angle ?? 0;
-  const sideOffset = miningSideRayOffsetForAsteroid(asteroid);
+  const sideOffset = miningSideRayOffsetForPlayer(player);
   const lanes = miningRayLanesForPlayer(player, angle, rayLength, sideOffset).map((baseLane) => {
     const lane = clipPredictedMiningRayLaneStart(player, baseLane, angle, asteroid);
     const activeDistance = lane.rayDistance * extension;
