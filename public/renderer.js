@@ -153,6 +153,8 @@ const BUG_LEG_TARGET_RADIAL_JITTER = 0.1;
 const BUG_LEG_TARGET_TANGENTIAL_JITTER = 0.12;
 const BUG_LEG_VELOCITY_LEAD_SECONDS = 0.055;
 const BUG_LEG_VELOCITY_LEAD_MAX = 2.5;
+const BUG_LEG_VIEW_PROJECTION_CENTER_SHIFT = 0.08;
+const BUG_LEG_VIEW_PROJECTION_CENTER_MAX_RADIUS_SCALE = 2.8;
 const BUG_LEG_TEARDROP_MIN_SPEED = 2;
 const BUG_LEG_TEARDROP_CENTER_LEAD = 0.55;
 const BUG_LEG_TEARDROP_FRONT_REACH = 1;
@@ -13410,6 +13412,7 @@ function snapSubmarineBracketDiagonalEndpoint(from, to) {
 
 function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSeconds, legStates = null, drawMiddleLayer = null) {
   const legs = bugLegPlacements(player, camera, radius, angle, timeSeconds, legStates);
+  const projectionCenter = bugLegProjectionCenter(player, camera, ctx, radius);
   const legColor = colors.bugBodyForeground || colors.foreground || RENDER.foreground;
   const bodyColors = {
     ...colors,
@@ -13419,7 +13422,7 @@ function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSecon
 
   ctx.fillStyle = legColor;
   for (const leg of legs) {
-    drawBugLeg(ctx, player, camera, radius, angle, leg);
+    drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter);
   }
 
   if (typeof drawMiddleLayer === "function") {
@@ -13429,9 +13432,8 @@ function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSecon
   drawSphere(ctx, x, y, radius, angle, bodyColors);
 }
 
-function drawBugLeg(ctx, player, camera, radius, angle, leg) {
+function drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter = null) {
   const radial = bugLegRadial(angle, leg.config);
-  const projectionCenter = bugLegVisualCenter(player);
   const legScale = bugVisualLegSizeScale(player);
   const legRadius = radius * legScale;
   const shoulderDistance = Math.max(0, radius * BUG_LEG_SHOULDER_SCALE - BUG_LEG_LINE_WIDTH * 0.5);
@@ -13846,6 +13848,26 @@ function bugLegVisualCenter(player) {
   return {
     x: Number.isFinite(player?.x) ? player.x : 0,
     y: (Number.isFinite(player?.y) ? player.y : 0) + Math.max(0, (Number(player?.radius) || ENGINE.ship.radius)*BUG_LEG_CAMERA_HEIGHT_SCALE/BUG_LEG_CAMERA_HEIGHT_SCALE || 0)
+  };
+}
+
+function bugLegProjectionCenter(player, camera, ctx, radius) {
+  const base = bugLegVisualCenter(player);
+  if (!camera || !ctx || !Number.isFinite(player?.x) || !Number.isFinite(player?.y)) {
+    return base;
+  }
+
+  const screen = worldToScreen(player, camera);
+  const viewCenterX = (Number(ctx.width) || RENDER.width) * 0.5;
+  const viewCenterY = (Number(ctx.height) || RENDER.height) * 0.5;
+  const offsetX = (viewCenterX - screen.x) * BUG_LEG_VIEW_PROJECTION_CENTER_SHIFT;
+  const offsetY = (viewCenterY - screen.y) * BUG_LEG_VIEW_PROJECTION_CENTER_SHIFT;
+  const maxOffset = Math.max(0, radius * BUG_LEG_VIEW_PROJECTION_CENTER_MAX_RADIUS_SCALE);
+  const length = Math.hypot(offsetX, offsetY);
+  const scale = length > maxOffset && length > 0 ? maxOffset / length : 1;
+  return {
+    x: base.x + offsetX * scale,
+    y: base.y + offsetY * scale
   };
 }
 
