@@ -1,4 +1,4 @@
-import { ENGINE, RENDER, miningSecondsForGameMode } from "./constants.js";
+import { ENGINE, RENDER, miningRayLengthForGameMode, miningSecondsForGameMode } from "./constants.js";
 import {
   ASTEROID_TILE,
   STORM_STATE,
@@ -995,7 +995,7 @@ function botEnemyVisibilitySampleClear(arena, bot, sampleX, sampleY, visibleRadi
 }
 
 function botAttackStandoffDistance(bot, enemy, effects) {
-  const rayLength = ENGINE.mining.rayLength + Number(effects?.rayLengthBonus || 0);
+  const rayLength = miningRayLengthForGameMode(bot?.gameMode, effects);
   return (bot.radius || ENGINE.ship.radius) +
     (enemy.radius || ENGINE.ship.radius) +
     rayLength * BOT_ATTACK_STANDOFF_RAY_SCALE;
@@ -1017,8 +1017,7 @@ function botAttackStandoffTolerance(bot) {
 
 function botMiningRayReach(bot, effects = aggregateUpgradeEffects(bot?.upgrades)) {
   return (bot?.radius || ENGINE.ship.radius) +
-    ENGINE.mining.rayLength +
-    Number(effects?.rayLengthBonus || 0);
+    miningRayLengthForGameMode(bot?.gameMode, effects);
 }
 
 function botMiningHitDistance(bot, target, effects) {

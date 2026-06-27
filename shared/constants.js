@@ -126,13 +126,17 @@ export const ENGINE = Object.freeze({
     legDriveBias: 0.48
   },
   clouds: {
-    speedMultiplier: 2,
+    radius: 9,
+    tileSize: 24,
+    speedMultiplier: 8,
     friction: 1,
+    healthScale: 0.25,
+    rayLengthScale: 2,
     pitchResponseRate: 2,
     pitchReturnRate: 2,
     maxPitchRadians: Math.PI / 6,
-    rotorAcceleration: 750,
-    airFriction: .9,
+    rotorAcceleration: 10000,
+    airFriction: .5,
   },
   player: {
     startingHealthBars: 3,
@@ -215,6 +219,14 @@ export function shipThrustForGameMode(gameMode) {
   return ENGINE.ship.thrust;
 }
 
+export function miningRayLengthForGameMode(gameMode, effects = {}) {
+  const baseLength = ENGINE.mining.rayLength + Number(effects?.rayLengthBonus || 0);
+  if (gameMode === GAME_MODES.clouds) {
+    return baseLength * Math.max(0.01, Number(ENGINE.clouds.rayLengthScale) || 1);
+  }
+  return baseLength;
+}
+
 export function mapTileSizeForGameMode(gameMode) {
   if (gameMode === GAME_MODES.cars) {
     return RENDER.tileSize * ENGINE.car.tileScale;
@@ -225,12 +237,18 @@ export function mapTileSizeForGameMode(gameMode) {
   if (gameMode === GAME_MODES.bugs) {
     return ENGINE.bugs.tileSize;
   }
+  if (gameMode === GAME_MODES.clouds) {
+    return ENGINE.clouds.tileSize;
+  }
   return RENDER.tileSize;
 }
 
 export function playerRadiusForGameMode(gameMode) {
   if (gameMode === GAME_MODES.bugs) {
     return ENGINE.bugs.radius;
+  }
+  if (gameMode === GAME_MODES.clouds) {
+    return ENGINE.clouds.radius;
   }
   return ENGINE.ship.radius;
 }

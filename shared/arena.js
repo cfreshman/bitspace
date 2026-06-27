@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningRayLengthForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -103,11 +103,13 @@ export function addPlayer(arena, playerOptions) {
   const spawnNumber = playerOptions.spawnNumber ?? number;
   const spawn = spawnForPlayerNumber(spawnNumber, arena.asteroid);
   const startingResources = playerOptions.resources || {};
+  const gameMode = normalizeGameMode(arena.mode);
   const player = {
     id: playerOptions.id,
     number,
     spawnNumber,
     name: sanitizePlayerName(playerOptions.name || `Pilot ${number}`),
+    gameMode,
     talk: "",
     x: spawn.x,
     y: spawn.y,
@@ -151,8 +153,8 @@ export function addPlayer(arena, playerOptions) {
     radius: playerRadiusForGameMode(arena.mode),
     upgrades: createUpgradeState(),
     healthBars: ENGINE.player.startingHealthBars,
-    health: playerMaxHealth(ENGINE.player.startingHealthBars),
-    maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars),
+    health: playerMaxHealth(ENGINE.player.startingHealthBars, gameMode),
+    maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars, gameMode),
     kills: 0,
     lastKillDropAmount: 0,
     lastKillDropTick: Number.NEGATIVE_INFINITY,
@@ -2702,9 +2704,15 @@ function killDiamondDropAmount(arena, killerId, victimId, tick) {
   return random() < KILL_DROP_SINGLE_DIAMOND_CHANCE ? 1 : 2;
 }
 
-function playerMaxHealth(healthBars) {
+function playerMaxHealth(healthBars, gameMode = GAME_MODES.bitspace) {
   const bars = clamp(Math.round(healthBars), 1, ENGINE.player.maxHealthBars);
-  return bars * ENGINE.player.healthPerBar;
+  return bars * ENGINE.player.healthPerBar * playerHealthScaleForGameMode(gameMode);
+}
+
+function playerHealthScaleForGameMode(gameMode) {
+  return normalizeGameMode(gameMode) === GAME_MODES.clouds
+    ? Math.max(0.01, Number(ENGINE.clouds.healthScale) || 1)
+    : 1;
 }
 
 function playerHealthBars(player) {
@@ -2717,7 +2725,7 @@ function playerHealthBars(player) {
 }
 
 function playerMiningRayLength(player, effects = aggregateUpgradeEffects(player.upgrades)) {
-  return ENGINE.mining.rayLength + effects.rayLengthBonus;
+  return miningRayLengthForGameMode(player.gameMode, effects);
 }
 
 function miningRayExtension(mining, holdSeconds) {
@@ -2730,10 +2738,11 @@ function miningRayExtension(mining, holdSeconds) {
 }
 
 function syncPlayerDerivedStats(player) {
-  const oldMaxHealth = player.maxHealth || playerMaxHealth(ENGINE.player.startingHealthBars);
+  const gameMode = normalizeGameMode(player.gameMode);
+  const oldMaxHealth = player.maxHealth || playerMaxHealth(ENGINE.player.startingHealthBars, gameMode);
   const effects = aggregateUpgradeEffects(player.upgrades);
   const healthBars = playerHealthBars(player);
-  const maxHealth = playerMaxHealth(healthBars);
+  const maxHealth = playerMaxHealth(healthBars, gameMode);
 
   player.miningRayCount = clamp(
     Math.round(effects.miningRayCount || 1),

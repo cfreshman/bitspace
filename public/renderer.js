@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, miningRayLengthForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin } from "/shared/build.js";
 import { ASTEROID_TILE, STORM_STATE, isAsteroidRockTile, raycastAsteroid } from "/shared/asteroid.js";
 import { createSeededRandom, createSimplexNoise3D } from "/shared/math.js";
@@ -79,10 +79,10 @@ const BUG_MODE_COLORS = Object.freeze({
   health: "#ff2f2f"
 });
 const CLOUD_MODE_COLORS = Object.freeze({
-  foreground: "#275ca2",
-  background: "#f7f7f7",
+  foreground: "#f8f8f8",
+  background: "#080808",
   backgroundDark: "#5d9ecf",
-  backing: "#ffffff",
+  backing: "#647095",
   groundWater: "#67b7e8",
   groundPlains: "#84c874",
   groundForest: "#4b8d58",
@@ -93,7 +93,7 @@ const CLOUD_MODE_COLORS = Object.freeze({
   ore: "#378aff",
   diamond: "#4400ff",
   rockFill: "#d5edfb",
-  rockLine: "#ebf0f3",
+  rockLine: "#e8e9ef",
   wallFill: "#bad9ef",
   wallLine: "#f8fdff",
   rockDark: "#9cc8e5",
@@ -112,7 +112,7 @@ const CLOUD_MODE_COLORS = Object.freeze({
   health: "#7cff7c"
 });
 const CLOUD_WING_ALPHA_KEY = "#ff00fe";
-const CLOUD_WING_ALPHA = 0.33;
+const CLOUD_WING_ALPHA = 0.2;
 const CLOUD_DRAGONFLY_DOT_RADIUS = 1;
 const CLOUD_QUADCOPTER_FRAME_RADIUS = 2;
 const CLOUD_QUADCOPTER_PITCH_SCALE = 0.16;
@@ -1035,6 +1035,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
       }
       const gameMode = renderGameMode(snapshot, options);
       const gameParams = renderGameParams(snapshot, options);
+      const baseFrameColors = { ...colors };
       const frameColors = colorsForGameMode(colors, gameMode, gameParams);
       currentTextColors = frameColors;
       syncPageBackingColor(trueBackingColor(frameColors));
@@ -1101,7 +1102,10 @@ export function createRenderer(canvas, minimapCanvas = null) {
           frameColors,
           timeSeconds
         );
-        surface.restoreColorFromSurface(terrainSurface, frameColors.background);
+        surface.restoreColorsFromSurface(terrainSurface, [
+          frameColors.background,
+          baseFrameColors.background
+        ]);
       }
       const worldBuckets = worldFrameOptions.perfBuckets || null;
       overlaySurface?.clear?.();
@@ -1631,6 +1635,28 @@ function createPixelSurface(canvasContext, width, height) {
           const green = Math.round(baseG + (blendG - baseG) * blendAlpha);
           const blue = Math.round(baseB + (blendB - baseB) * blendAlpha);
           pixels[index] = (255 << 24) | (blue << 16) | (green << 8) | red;
+        }
+      }
+    },
+    restoreColorsFromSurface(sourceSurface, targetColors) {
+      const sourceImageData = sourceSurface?.getImageData?.();
+      if (!sourceImageData || sourceImageData.width !== width || sourceImageData.height !== height) {
+        return;
+      }
+
+      const targets = new Set(
+        (Array.isArray(targetColors) ? targetColors : [targetColors])
+          .filter((color) => color !== null && color !== undefined)
+          .map((color) => colorFor(color || RENDER.background, colorCache) >>> 0)
+      );
+      if (targets.size <= 0) {
+        return;
+      }
+
+      const sourcePixels = new Uint32Array(sourceImageData.data.buffer);
+      for (let index = 0; index < pixels.length; index += 1) {
+        if (targets.has(pixels[index] >>> 0)) {
+          pixels[index] = sourcePixels[index];
         }
       }
     },
@@ -7848,21 +7874,35 @@ function drawRoomButtons(ctx, options, colors, textRenderer) {
       buttonLabel(buttonId),
       rect,
       buttonId === options.uiTargetId,
+      options,
       colors,
       textRenderer
     );
   }
 }
 
-function drawRoomButton(ctx, label, rect, selected, colors, textRenderer) {
+function drawRoomButton(ctx, label, rect, selected, options, colors, textRenderer) {
+  const unfilledCloudButton = options.gameMode === GAME_MODES.clouds;
   ctx.fillStyle = colors.foreground;
-  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-  ctx.fillStyle = selected ? colors.foreground : colors.background;
-  ctx.fillRect(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
+  if (unfilledCloudButton) {
+    drawRectOutline(ctx, rect.x, rect.y, rect.width, rect.height);
+  } else {
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  }
+  const inner = {
+    x: rect.x + 1,
+    y: rect.y + 1,
+    width: rect.width - 2,
+    height: rect.height - 2
+  };
+  if (!unfilledCloudButton) {
+    ctx.fillStyle = selected ? colors.foreground : colors.background;
+    ctx.fillRect(inner.x, inner.y, inner.width, inner.height);
+  }
 
   const textOptions = {
     fontSize: 10,
-    color: selected ? colors.background : colors.foreground
+    color: selected && !unfilledCloudButton ? colors.background : colors.foreground
   };
   const labelWidth = textRenderer.measure(label, textOptions);
   textRenderer.draw(ctx, label, Math.round(rect.x + (rect.width - labelWidth) / 2), rect.y + 7, {
@@ -13056,10 +13096,11 @@ function drawCloudLandscapeFog(ctx, viewX, viewY, padding, colors = {}) {
         cloudLandscapeNoise(worldX, worldY, 0.0065, 223) * 0.28 +
         cloudLandscapeNoise(worldX, worldY, 0.013, 239) * 0.10;
       const normalized = clamp(broad * 0.5 + 0.5, 0, 1);
+      // const color = normalized >= 0.5 ? '#d7d7d4' : '#d7d7d4'; // e7e6e0
       const color = normalized >= 0.5 ? '#d7d7d4' : '#d7d7d4'; // e7e6e0
       const alpha = normalized >= 0.5
-        ? 0.3 + (normalized - 0.5) * 0.24
-        : 0.45 + (0.5 - normalized) * 0.4;
+        ? 0.4 + (normalized - 0.5) * 0.5
+        : 0.6 + (0.5 - normalized) * 0.3;
       if (typeof ctx.fillRectAlpha === "function") {
         ctx.fillRectAlpha(x, y, cellSize, cellSize, color, alpha);
         continue;
@@ -13278,9 +13319,16 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
       drawHuckRockEntity(ctx, entity, camera, colors, {
         webFill: true
       });
+    } else if (options.gameMode === GAME_MODES.clouds) {
+      const bodyColor = colors.bodyFill || CLOUD_MODE_COLORS.bodyFill;
+      drawHuckRockEntity(ctx, entity, camera, colors, {
+        filled: true,
+        fillColor: bodyColor,
+        lineColor: bodyColor
+      });
     } else {
       drawHuckRockEntity(ctx, entity, camera, colors, {
-        filled: options.gameMode === GAME_MODES.subs || options.gameMode === GAME_MODES.clouds
+        filled: options.gameMode === GAME_MODES.subs
       });
     }
     return;
@@ -13361,13 +13409,13 @@ function drawHuckRockEntity(ctx, entity, camera, colors, options = {}) {
   if (options.webFill) {
     fillBugHuckRockWeb(ctx, hull);
   } else if (options.filled) {
-    fillConvexPolygon(ctx, hull, colors.rockFill || colors.rockLine || colors.foreground);
+    fillConvexPolygon(ctx, hull, options.fillColor || colors.rockFill || colors.rockLine || colors.foreground);
   }
 
   ctx.fillStyle = options.webFill
     ? BUG_HUCK_ROCK_WEB_LIGHT
     : options.filled
-    ? colors.rockLine || colors.foreground
+    ? options.lineColor || colors.rockLine || colors.foreground
     : colors.foreground;
   for (let index = 0; index < hull.length; index += 1) {
     const from = hull[index];
@@ -13676,14 +13724,23 @@ function drawLobbyButtonEntity(ctx, entity, camera, options, colors, textRendere
   const label = String(entity.label || entity.action || "BUTTON").toUpperCase();
   const selected = entity.selected === true || entity.active === true;
   const fillColor = entity.fillColor || colors.background;
-  const textColor = entity.textColor || (selected ? colors.background : colors.foreground);
+  const unfilledCloudButton = options.gameMode === GAME_MODES.clouds && !entity.fillColor;
+  const textColor = entity.textColor || (selected && !unfilledCloudButton ? colors.background : colors.foreground);
 
   ctx.fillStyle = colors.foreground;
-  ctx.fillRect(x, y, width, height);
-  ctx.fillStyle = selected && !entity.fillColor ? colors.foreground : fillColor;
-  ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  if (unfilledCloudButton) {
+    drawRectOutline(ctx, x, y, width, height);
+  } else {
+    ctx.fillRect(x, y, width, height);
+  }
+  if (!unfilledCloudButton) {
+    ctx.fillStyle = selected && !entity.fillColor ? colors.foreground : fillColor;
+    ctx.fillRect(x + 1, y + 1, width - 2, height - 2);
+  }
   ctx.fillStyle = colors.foreground;
-  drawRectOutline(ctx, x, y, width, height);
+  if (!unfilledCloudButton) {
+    drawRectOutline(ctx, x, y, width, height);
+  }
   if (selected && entity.fillColor) {
     ctx.fillStyle = colors.foreground;
     drawRectOutline(ctx, x + 2, y + 2, width - 4, height - 4);
@@ -13846,16 +13903,7 @@ function drawCloudShipWings(ctx, player, camera, colors, timeSeconds) {
 
 function drawQuadcopterBody(ctx, x, y, player, radius, angle, colors) {
   radius = cloudQuadcopterVisualRadius(radius);
-  const frameRadius = CLOUD_QUADCOPTER_FRAME_RADIUS;
-  const rotorRadius = Math.min(CLOUD_QUADCOPTER_ROTOR_RADIUS, Math.max(2, radius / (1 + Math.SQRT2)));
-  const forward = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
-  const side = {
-    x: -forward.y,
-    y: forward.x
-  };
+  const rotorRadius = cloudQuadcopterRotorRadius(radius);
   const line = colors.bodyLine || CLOUD_MODE_COLORS.bodyLine;
   const pitch = player?.visualCloudPitch || { x: 0, y: 0 };
   const rotors = cloudQuadcopterRotorCenters(x, y, radius, angle);
@@ -13876,8 +13924,16 @@ function cloudQuadcopterVisualRadius(radius) {
   return radius + CLOUD_QUADCOPTER_VISUAL_RADIUS_BONUS;
 }
 
+// Quadcopter layout: four rotor rings tile together like a 2x2 soda-ring pack.
+// Rotor blades should leave a 1px interior gap from each ring. The core body fills
+// the cross-shaped space between rings, with the player color dot in the center.
+function cloudQuadcopterRotorRadius(radius) {
+  return Math.max(3, Math.round(Math.max(1, radius) / 2));
+}
+
 function cloudQuadcopterRotorCenters(x, y, radius, angle) {
-  const rotorRadius = Math.min(CLOUD_QUADCOPTER_ROTOR_RADIUS, Math.max(2, radius / (1 + Math.SQRT2)));
+  const rotorRadius = cloudQuadcopterRotorRadius(radius);
+  const rotorOffset = rotorRadius;
   const forward = {
     x: Math.cos(angle),
     y: Math.sin(angle)
@@ -13890,8 +13946,8 @@ function cloudQuadcopterRotorCenters(x, y, radius, angle) {
   for (const forwardSign of [-1, 1]) {
     for (const sideSign of [-1, 1]) {
       centers.push({
-        x: x + forward.x * forwardSign * rotorRadius + side.x * sideSign * rotorRadius,
-        y: y + forward.y * forwardSign * rotorRadius + side.y * sideSign * rotorRadius
+        x: x + forward.x * forwardSign * rotorOffset + side.x * sideSign * rotorOffset,
+        y: y + forward.y * forwardSign * rotorOffset + side.y * sideSign * rotorOffset
       });
     }
   }
@@ -13900,6 +13956,8 @@ function cloudQuadcopterRotorCenters(x, y, radius, angle) {
 
 function drawProjectedCloudRotorCross(ctx, cx, cy, center, pitch, shipRadius, timeSeconds = 0, player = null) {
   const spin = timeSeconds * 46 + Number(player?.number || 0) * 0.73 + (center.x + center.y) * 0.11;
+  const rotorRadius = cloudQuadcopterRotorRadius(shipRadius);
+  const bladeRadius = Math.max(1, rotorRadius - 2);
   const axisA = {
     x: Math.cos(spin),
     y: Math.sin(spin)
@@ -13915,12 +13973,18 @@ function drawProjectedCloudRotorCross(ctx, cx, cy, center, pitch, shipRadius, ti
       const point = cloudQuadcopterProjectPoint(
         cx,
         cy,
-        center.x + vector.x * sign,
-        center.y + vector.y * sign,
+        center.x + vector.x * sign * bladeRadius,
+        center.y + vector.y * sign * bladeRadius,
         pitch,
         shipRadius
       );
-      ctx.fillRect(Math.round(point.x), Math.round(point.y), 1, 1);
+      drawPixelLine(
+        ctx,
+        Math.round(rotorCenter.x),
+        Math.round(rotorCenter.y),
+        Math.round(point.x),
+        Math.round(point.y)
+      );
     }
   }
   if (Math.sin(spin * 2) > 0) {
@@ -13928,41 +13992,120 @@ function drawProjectedCloudRotorCross(ctx, cx, cy, center, pitch, shipRadius, ti
       const point = cloudQuadcopterProjectPoint(
         cx,
         cy,
-        center.x + axisA.x * sign + axisB.x * sign,
-        center.y + axisA.y * sign + axisB.y * sign,
+        center.x + (axisA.x + axisB.x) * sign * bladeRadius,
+        center.y + (axisA.y + axisB.y) * sign * bladeRadius,
         pitch,
         shipRadius
       );
-      ctx.fillRect(Math.round(point.x), Math.round(point.y), 1, 1);
+      drawPixelLine(
+        ctx,
+        Math.round(rotorCenter.x),
+        Math.round(rotorCenter.y),
+        Math.round(point.x),
+        Math.round(point.y)
+      );
     }
   } else {
     for (const sign of [-1, 1]) {
       const point = cloudQuadcopterProjectPoint(
         cx,
         cy,
-        center.x + axisA.x * sign - axisB.x * sign,
-        center.y + axisA.y * sign - axisB.y * sign,
+        center.x + (axisA.x - axisB.x) * sign * bladeRadius,
+        center.y + (axisA.y - axisB.y) * sign * bladeRadius,
         pitch,
         shipRadius
       );
-      ctx.fillRect(Math.round(point.x), Math.round(point.y), 1, 1);
+      drawPixelLine(
+        ctx,
+        Math.round(rotorCenter.x),
+        Math.round(rotorCenter.y),
+        Math.round(point.x),
+        Math.round(point.y)
+      );
     }
   }
 }
 
 function drawCloudQuadcopterCore(ctx, x, y, player, pitch, radius, lineColor) {
-  const center = cloudQuadcopterProjectPoint(x, y, x, y, pitch, radius);
-  const cx = Math.round(center.x);
-  const cy = Math.round(center.y);
-  ctx.fillStyle = lineColor;
-  drawPixelLine(ctx, cx - 2, cy - 1, cx - 2, cy + 1);
-  drawPixelLine(ctx, cx + 2, cy - 1, cx + 2, cy + 1);
-  drawPixelLine(ctx, cx - 1, cy - 2, cx + 1, cy - 2);
-  drawPixelLine(ctx, cx - 1, cy + 2, cx + 1, cy + 2);
   if (player?.alive !== false) {
     ctx.fillStyle = cloudPlayerDotColor(player);
-    drawFilledPixelDisk(ctx, cx, cy, CLOUD_DRAGONFLY_DOT_RADIUS);
+    fillProjectedCloudCoreDiamond(ctx, x, y, pitch, radius);
   }
+  ctx.fillStyle = lineColor;
+  fillProjectedCloudCoreOutline(ctx, x, y, 2, pitch, radius);
+  fillProjectedCloudCoreOuterBars(ctx, x, y, pitch, radius);
+}
+
+function fillProjectedCloudCoreOuterBars(ctx, cx, cy, pitch, radius) {
+  fillProjectedCloudCorePixel(ctx, cx, cy, 0, -3, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, 0, 3, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, -3, 0, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, 3, 0, pitch, radius);
+}
+
+function fillProjectedCloudCoreSquare(ctx, cx, cy, half, pitch, radius) {
+  const points = new Set();
+  for (let y = -half; y <= half; y += 1) {
+    for (let x = -half; x <= half; x += 1) {
+      const point = projectedCloudCorePixel(cx, cy, x, y, pitch, radius);
+      points.add(`${point.x},${point.y}`);
+    }
+  }
+  for (const point of points) {
+    const comma = point.indexOf(",");
+    ctx.fillRect(
+      Number(point.slice(0, comma)),
+      Number(point.slice(comma + 1)),
+      1,
+      1
+    );
+  }
+}
+
+function fillProjectedCloudCoreOutline(ctx, cx, cy, half, pitch, radius) {
+  const points = new Set();
+  for (let y = -half; y <= half; y += 1) {
+    for (let x = -half; x <= half; x += 1) {
+      if (Math.abs(x) !== half && Math.abs(y) !== half) {
+        continue;
+      }
+      if ((Math.abs(y) === half && x === 0) || (Math.abs(x) === half && y === 0)) {
+        continue;
+      }
+      const point = projectedCloudCorePixel(cx, cy, x, y, pitch, radius);
+      points.add(`${point.x},${point.y}`);
+    }
+  }
+  for (const point of points) {
+    const comma = point.indexOf(",");
+    ctx.fillRect(
+      Number(point.slice(0, comma)),
+      Number(point.slice(comma + 1)),
+      1,
+      1
+    );
+  }
+}
+
+function fillProjectedCloudCoreDiamond(ctx, cx, cy, pitch, radius) {
+  fillProjectedCloudCoreSquare(ctx, cx, cy, 1, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, -2, 0, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, 2, 0, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, 0, -2, pitch, radius);
+  fillProjectedCloudCorePixel(ctx, cx, cy, 0, 2, pitch, radius);
+}
+
+function fillProjectedCloudCorePixel(ctx, cx, cy, x, y, pitch, radius) {
+  const point = projectedCloudCorePixel(cx, cy, x, y, pitch, radius);
+  ctx.fillRect(point.x, point.y, 1, 1);
+}
+
+function projectedCloudCorePixel(cx, cy, x, y, pitch, radius) {
+  const point = cloudQuadcopterProjectPoint(cx, cy, cx + x, cy + y, pitch, radius);
+  return {
+    x: Math.round(point.x),
+    y: Math.round(point.y)
+  };
 }
 
 function cloudQuadcopterProjectPoint(cx, cy, px, py, pitch, radius) {
@@ -15316,7 +15459,7 @@ function drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAim 
     y: Math.sin(angle)
   };
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const rayLength = miningRayLengthForGameMode(gameMode, effects);
   const geometryScale = shipGeometryScaleForRadius(shipMainRadius(player));
   const emitterLength = MINING_RAY_EMITTER_LENGTH * geometryScale;
   const emitterRadius = Math.max(0.5, MINING_RAY_EMITTER_RADIUS * geometryScale);
@@ -17360,15 +17503,15 @@ function drawSolidSideMiningRayEmitter(ctx, to, normal, unit, length, radius, co
   }
 }
 
-function drawMiningRayBeam(ctx, from, to, direction, normal, colors, timeSeconds, hit, sideOffset = 0) {
+function drawMiningRayBeam(ctx, from, to, direction, normal, colors, timeSeconds, hit, sideOffset = 0, options = {}) {
   const radius = sideOffset === 0
     ? MINING_RAY_VISUAL_RADIUS
     : MINING_RAY_VISUAL_RADIUS * 0.5;
-  drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, colors, timeSeconds, sideOffset);
+  drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius * (options.widthScale || 1), colors, timeSeconds, sideOffset, options);
   void hit;
 }
 
-function drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, colors, timeSeconds, sideOffset = 0) {
+function drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, colors, timeSeconds, sideOffset = 0, options = {}) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const lengthSq = dx * dx + dy * dy;
@@ -17409,8 +17552,8 @@ function drawMiningRaySquareBeam(ctx, from, to, direction, normal, radius, color
 
       const signedCross = relativeX * rayNormal.x + relativeY * rayNormal.y;
       const inside = sideSign === 0
-        ? isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds)
-        : isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign);
+        ? isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, options)
+        : isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign, options);
       if (inside) {
         if (gradientPalette) {
           const gradientColor = miningRayGradientColor(gradientPalette, signedCross, radius);
@@ -17440,19 +17583,19 @@ function normalizedRayBasis(value, fallback) {
   return fallback;
 }
 
-function isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds) {
+function isInsideCenterMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, options = {}) {
   const taper = miningRayTipTaper(radius, alongDistance, length);
-  const wave = miningRaySideWave01(alongDistance, timeSeconds);
+  const wave = options.noWaves ? 0 : miningRaySideWave01(alongDistance, timeSeconds);
   const positiveRadius = quantizedMiningRaySideRadius(radius, wave) * taper;
   const negativeRadius = quantizedMiningRaySideRadius(radius, wave) * taper;
 
   return signedCross >= -negativeRadius && signedCross <= positiveRadius;
 }
 
-function isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign) {
+function isInsideSideMiningRayBeam(signedCross, radius, alongDistance, length, timeSeconds, sideSign, options = {}) {
   const taper = miningRayTipTaper(radius, alongDistance, length);
   const innerRadius = radius * taper;
-  const outerRadius = sinusoidalMiningRayOuterRadius(radius, alongDistance, timeSeconds) * taper;
+  const outerRadius = (options.noWaves ? radius : sinusoidalMiningRayOuterRadius(radius, alongDistance, timeSeconds)) * taper;
 
   return sideSign > 0
     ? signedCross >= -innerRadius && signedCross <= outerRadius
@@ -17491,9 +17634,9 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameM
     return;
   }
 
-  const rayColors = miningRayRenderColors(colors, gameMode, timeSeconds);
+  const rayColors = miningRayRenderColors(colors, gameMode, timeSeconds, player);
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const rayLength = miningRayLengthForGameMode(gameMode, effects);
   const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
   const extension = Number.isFinite(rawExtension) ? clamp(rawExtension, 0, 1) : 1;
   const angle = player.aimAngle ?? player.angle;
@@ -17543,9 +17686,16 @@ function drawMiningRay(ctx, player, camera, asteroid, timeSeconds, colors, gameM
       rayColors,
       timeSeconds * effects.raySpinMultiplier,
       Boolean(lane.hit),
-      Number(lane.offset) || 0
+      Number(lane.offset) || 0,
+      miningRayBeamOptionsForGameMode(gameMode)
     );
   }
+}
+
+function miningRayBeamOptionsForGameMode(gameMode) {
+  return gameMode === GAME_MODES.clouds
+    ? { widthScale: 0.67, noWaves: true }
+    : {};
 }
 
 function miningRayVisualStartWorld(player, lane, gameMode) {
@@ -17564,9 +17714,9 @@ function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colo
     return;
   }
 
-  const rayColors = miningRayRenderColors(colors, gameMode, timeSeconds);
+  const rayColors = miningRayRenderColors(colors, gameMode, timeSeconds, player);
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const rayLength = miningRayLengthForGameMode(gameMode, effects);
   const rawExtension = player.rayExtension ?? player.miningRay?.extension ?? 1;
   const extension = Number.isFinite(rawExtension) ? clamp(rawExtension, 0, 1) : 1;
   const angle = player.aimAngle ?? player.angle;
@@ -17581,7 +17731,7 @@ function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colo
   }
 }
 
-function miningRayRenderColors(colors, gameMode, timeSeconds) {
+function miningRayRenderColors(colors, gameMode, timeSeconds, player = null) {
   if (gameMode === GAME_MODES.subs) {
     return {
       ...colors,
@@ -17601,7 +17751,7 @@ function miningRayRenderColors(colors, gameMode, timeSeconds) {
   if (gameMode === GAME_MODES.clouds) {
     return {
       ...colors,
-      foreground: colors.beam || CLOUD_MODE_COLORS.beam
+      foreground: player ? cloudPlayerDotColor(player) : colors.beam || CLOUD_MODE_COLORS.beam
     };
   }
 

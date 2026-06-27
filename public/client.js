@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, mapTileSizeForGameMode, miningRayLengthForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -3544,7 +3544,7 @@ function updateMenuMiningRay(player, dtSeconds) {
   }
 
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const fullRayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const fullRayLength = miningRayLengthForGameMode(selectedMenuMode(), effects);
   const angle = player.aimAngle ?? player.angle;
   const sideOffset = miningSideRayOffsetForPlayer(player);
   const lanes = miningRayLanesForPlayer(player, angle, fullRayLength, sideOffset).map((baseLane) => {
@@ -9971,7 +9971,7 @@ function controllerAimTargetForPlayer(player) {
 function playerMiningRayRange(player) {
   const effects = aggregateUpgradeEffects(player?.upgrades);
   const shipRadius = Number(player?.radius ?? ENGINE.ship.radius) || 0;
-  return shipRadius + ENGINE.mining.rayLength + effects.rayLengthBonus;
+  return shipRadius + miningRayLengthForGameMode(activeGameMode(), effects);
 }
 
 function huckRockLaunchAngleForPlayer(player, targetX, targetY) {
@@ -10490,7 +10490,7 @@ function predictedMiningRayForPlayer(player, authoritativeRay = null) {
   }
 
   const effects = aggregateUpgradeEffects(player.upgrades);
-  const rayLength = ENGINE.mining.rayLength + effects.rayLengthBonus;
+  const rayLength = miningRayLengthForGameMode(activeGameMode(), effects);
   const extension = clamp(player.rayExtension ?? miningRayExtension(player.mining, player.miningHoldSeconds || 0), 0, 1);
   const angle = player.aimAngle ?? player.angle ?? 0;
   const sideOffset = miningSideRayOffsetForPlayer(player);
