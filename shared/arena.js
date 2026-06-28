@@ -374,6 +374,7 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) 
   }
 
   stepHuckRocks(arena, dtSeconds);
+  stepOctopusInkBlobs(arena, dtSeconds);
   resolvePlayerCollisions(arena);
   processMining(arena, dtSeconds);
 }
@@ -1092,11 +1093,69 @@ function bounceHuckRocks(arena, a, b) {
 }
 
 function breakHuckRock(arena, rock, reason = "break") {
+  if (normalizeGameMode(arena.mode) === GAME_MODES.octopus) {
+    spawnOctopusInkBlob(arena, rock, reason);
+    rock.destroyed = true;
+    return;
+  }
+
   if (!rock.fragment && !rock.fragmentsSpawned) {
     rock.fragmentsSpawned = true;
     spawnHuckRockFragments(arena, rock, reason);
   }
   rock.destroyed = true;
+}
+
+function spawnOctopusInkBlob(arena, rock, reason = "impact") {
+  const config = ENGINE.octopus?.ink || {};
+  const pointCount = Math.max(3, Math.floor(Number(config.pointCount || 8)));
+  const random = createSeededRandom(`${arena.seed}:${rock.id}:ink:${arena.tick}:${reason}`);
+  const baseAngle = random() * Math.PI * 2;
+  const minScale = Number(config.minPointScale || 0.68);
+  const maxScale = Number(config.maxPointScale || 1.18);
+  const points = [];
+
+  for (let index = 0; index < pointCount; index += 1) {
+    points.push({
+      angle: roundForSnapshot(baseAngle + (index / pointCount) * Math.PI * 2 + (random() - 0.5) * 0.34),
+      scale: roundForSnapshot(minScale + random() * (maxScale - minScale))
+    });
+  }
+
+  const id = `${rock.id}:ink:${arena.tick}`;
+  arena.entities.set(id, {
+    id,
+    type: "octopusInk",
+    ownerId: rock.ownerId,
+    x: roundForSnapshot(rock.x),
+    y: roundForSnapshot(rock.y),
+    radius: Number(config.radius || 30),
+    points,
+    ageSeconds: 0,
+    lifetimeSeconds: Number(config.lifetimeSeconds || 2.8),
+    shrinkSeconds: Number(config.shrinkSeconds || 1.8),
+    fadeSeconds: Number(config.fadeSeconds || 1),
+    minRadiusScale: Number(config.minRadiusScale ?? 0.5),
+    bornTick: arena.tick
+  });
+}
+
+function stepOctopusInkBlobs(arena, dtSeconds) {
+  if (normalizeGameMode(arena.mode) !== GAME_MODES.octopus) {
+    return;
+  }
+
+  for (const entity of arena.entities.values()) {
+    if (entity.type !== "octopusInk") {
+      continue;
+    }
+
+    entity.ageSeconds = roundForSnapshot((entity.ageSeconds || 0) + dtSeconds);
+    if (entity.ageSeconds >= (entity.lifetimeSeconds || ENGINE.octopus.ink.lifetimeSeconds)) {
+      entity.destroyed = true;
+      arena.entities.delete(entity.id);
+    }
+  }
 }
 
 function spawnHuckRockFragments(arena, rock, reason) {
@@ -1240,16 +1299,22 @@ function resolveHuckRockCollisions(arena, rock, previousX = rock.x, previousY = 
   }
 
   if (hit.destroy) {
+    if (normalizeGameMode(arena.mode) === GAME_MODES.octopus) {
+      spawnOctopusInkBlob(arena, rock, "wall");
+    }
     rock.destroyed = true;
     return true;
   }
 
   if (bounceHuckRock(rock, hit)) {
-    if ((rock.bounceCount || 0) >= 1) {
+    const maxBounces = normalizeGameMode(arena.mode) === GAME_MODES.octopus
+      ? Number(ENGINE.octopus?.ink?.maxBounces ?? 0)
+      : 1;
+    if ((rock.bounceCount || 0) >= maxBounces) {
       breakHuckRock(arena, rock, "wall");
       return true;
     }
-    rock.bounceCount = 1;
+    rock.bounceCount = (rock.bounceCount || 0) + 1;
   }
 
   return false;

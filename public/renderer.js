@@ -280,6 +280,7 @@ const WATER_FISH_MATCHING_FACTOR = 2.8;
 const WATER_FISH_CENTERING_FACTOR = 0.68;
 const WATER_FISH_HOME_FACTOR = 0.22;
 const WATER_FISH_DRIFT_FACTOR = 0.9;
+const OCTOPUS_INK_INSIDE_VISIBILITY_ERODE_PIXELS = 1;
 const SUB_WAVE_SIM_SIZE = 256;
 const SUB_WAVE_SIM_FPS = 30;
 const CAR_THRUSTER_HEAT_COLORS = Object.freeze([
@@ -910,6 +911,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
   let overlaySurface = null;
   let terrainSurface = null;
   let cloudWingSurface = null;
+  let lateOverlaySurface = null;
   let hudSurface = null;
   let textRenderer = null;
   const colors = {
@@ -997,6 +999,7 @@ export function createRenderer(canvas, minimapCanvas = null) {
     overlaySurface = createPixelSurface(canvasContext, size.width, size.height);
     terrainSurface = createPixelSurface(canvasContext, size.width, size.height);
     cloudWingSurface = createPixelSurface(canvasContext, size.width, size.height);
+    lateOverlaySurface = createPixelSurface(canvasContext, size.width, size.height);
     hudSurface = createPixelSurface(hudPresentContext || canvasContext, hudSize.width, hudSize.height);
     textRenderer = createPixelTextRenderer(size.width, size.height, () => currentTextColors);
     gpuStormRenderer = createGpuStormRenderer(size.width, size.height);
@@ -1430,10 +1433,19 @@ export function createRenderer(canvas, minimapCanvas = null) {
           );
         }
       }
+      lateOverlaySurface?.clear?.();
+      drawLateWorldOverlay(
+        lateOverlaySurface,
+        sharedRenderState,
+        frameOptions,
+        frameColors
+      );
       const presentStart = measurePerf ? performance.now() : 0;
-      const worldOverlays = gameMode === GAME_MODES.clouds && cloudWingSurface
-        ? [overlaySurface, cloudWingSurface]
-        : [overlaySurface];
+      const worldOverlays = [
+        overlaySurface,
+        ...(gameMode === GAME_MODES.clouds && cloudWingSurface ? [cloudWingSurface] : []),
+        lateOverlaySurface
+      ].filter(Boolean);
       surface.present(framePresenter, hudPresentCanvas ? worldOverlays : [...worldOverlays, hudSurface]);
       if (hudPresentCanvas) {
         hudSurface.present();
@@ -5276,7 +5288,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       null;
     visibility = shouldDrawWorld
       ? measureBucket("visibilityMs", () => (
-        createAsteroidVisibilityMask(ctx, options, options.asteroid, cameraPlayer, camera)
+        createAsteroidVisibilityMask(ctx, options, options.asteroid, cameraPlayer, camera, snapshot)
       ))
       : null;
     const subLightHeading = subLightHeadingForGameMode(
@@ -5458,6 +5470,12 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
 
     measureBucket("entitiesMs", () => {
       for (const entity of snapshot.entities || []) {
+        if (entity.type === "octopusInk") {
+          drawWithoutWorldMask(ctx, () => {
+            drawEntity(ctx, entity, camera, options, colors, textRenderer);
+          });
+          continue;
+        }
         drawEntity(ctx, entity, camera, options, colors, textRenderer);
       }
     });
@@ -5518,8 +5536,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         );
       }
     });
-
-    drawControllerAimCursor(ctx, localPlayer, camera, options.controllerAimCursor, colors);
 
     if (localShipDrawsAfterVisibility) {
       measureBucket("shipsMs", () => drawWithoutWorldMask(ctx, () => {
@@ -5826,6 +5842,22 @@ function endWorldViewport(ctx) {
   ctx.endClip();
 }
 
+function drawLateWorldOverlay(ctx, renderState, options, colors) {
+  if (
+    !ctx ||
+    options.playerMapLarge ||
+    !options.controllerAimCursor ||
+    !renderState?.localPlayer ||
+    !renderState?.camera
+  ) {
+    return;
+  }
+
+  beginWorldViewport(ctx, colors, false, false, true);
+  drawControllerAimCursor(ctx, renderState.localPlayer, renderState.camera, options.controllerAimCursor, colors);
+  endWorldViewport(ctx);
+}
+
 function drawWithoutWorldMask(ctx, callback) {
   if (typeof ctx.withoutWorldMask === "function") {
     return ctx.withoutWorldMask(callback);
@@ -5958,6 +5990,52 @@ function intersectSpanRows(first, second) {
       firstIndex += 2;
     } else {
       secondIndex += 2;
+    }
+  }
+
+  return result.length > 0 ? result : null;
+}
+
+function erodeSpanSet(spans, pixels = 1) {
+  let current = spans;
+  for (let index = 0; index < pixels; index += 1) {
+    current = erodeSpanSetOnce(current);
+  }
+  return current;
+}
+
+function erodeSpanSetOnce(spans) {
+  if (!spans?.rows?.length || spans.rows.length <= 2) {
+    return { offsetY: Math.floor(Number(spans?.offsetY || 0)), rows: [] };
+  }
+
+  const offsetY = Math.floor(Number(spans.offsetY || 0)) + 1;
+  const rows = Array.from({ length: Math.max(0, spans.rows.length - 2) }, () => null);
+
+  for (let rowIndex = 1; rowIndex < spans.rows.length - 1; rowIndex += 1) {
+    const previous = shrinkSpanRow(spans.rows[rowIndex - 1], 1);
+    const current = shrinkSpanRow(spans.rows[rowIndex], 1);
+    const next = shrinkSpanRow(spans.rows[rowIndex + 1], 1);
+    const row = intersectSpanRows(intersectSpanRows(previous, current), next);
+    if (row?.length > 0) {
+      rows[rowIndex - 1] = row;
+    }
+  }
+
+  return { offsetY, rows };
+}
+
+function shrinkSpanRow(row, pixels = 1) {
+  if (!Array.isArray(row)) {
+    return null;
+  }
+
+  const result = [];
+  for (let index = 0; index + 1 < row.length; index += 2) {
+    const start = row[index] + pixels;
+    const end = row[index + 1] - pixels;
+    if (start < end) {
+      result.push(start, end);
     }
   }
 
@@ -9198,7 +9276,7 @@ function drawAsteroidTiles(
   }
 }
 
-function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
+function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera, snapshot = null) {
   if (
     !ASTEROID_VISIBILITY_EXPERIMENT ||
     options.playerMapLarge ||
@@ -9245,11 +9323,39 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
     innerCorner: ROCK_INNER_CORNER_RADIUS,
     edgeOverlap: dilatePixels
   };
-  let spans = visibilitySpansFromGridNative(asteroid, player, camera, radius, bounds, visibilityOptions);
-  if (!spans) {
-    const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions);
-    spans = visibilitySpansNative(origin, radius, segments, visibilityOptions) ||
-      rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, segments), dilatePixels);
+  const inkBlobs = options.gameMode === GAME_MODES.octopus
+    ? octopusInkBlobsForVisibility(snapshot, player, radius)
+    : [];
+  let inkDrawSpans = null;
+  let spans = null;
+  if (inkBlobs.length > 0) {
+    inkDrawSpans = visibilitySpansFromGridNative(asteroid, player, camera, radius, bounds, visibilityOptions);
+    if (!inkDrawSpans) {
+      const baseSegments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions);
+      inkDrawSpans = visibilitySpansNative(origin, radius, baseSegments, visibilityOptions) ||
+        rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, baseSegments), dilatePixels);
+    }
+
+    const containingInk = octopusInkBlobContainingPoint(inkBlobs, player.x, player.y);
+    if (containingInk) {
+      const inkSpans = erodeSpanSet(
+        rasterizeAsteroidVisibilityPolygon(octopusInkVisualPolygon(containingInk, camera), 0),
+        OCTOPUS_INK_INSIDE_VISIBILITY_ERODE_PIXELS
+      );
+      spans = intersectSpanSets(inkDrawSpans, inkSpans) || inkSpans;
+    } else {
+      const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions);
+      addOctopusInkVisibilitySegments(segments, inkBlobs, camera);
+      spans = visibilitySpansNative(origin, radius, segments, visibilityOptions) ||
+        rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, segments), dilatePixels);
+    }
+  } else {
+    spans = visibilitySpansFromGridNative(asteroid, player, camera, radius, bounds, visibilityOptions);
+    if (!spans) {
+      const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions);
+      spans = visibilitySpansNative(origin, radius, segments, visibilityOptions) ||
+        rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, segments), dilatePixels);
+    }
   }
   return {
     asteroid,
@@ -9263,8 +9369,75 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera) {
     radius,
     visibleRadius,
     sourcePadding,
-    spans
+    spans,
+    inkDrawSpans
   };
+}
+
+function octopusInkBlobsForVisibility(snapshot, player, radius) {
+  if (!snapshot || !player || snapshot.mode !== GAME_MODES.octopus) {
+    return [];
+  }
+
+  return (snapshot.entities || []).filter((entity) => {
+    if (entity?.type !== "octopusInk" || octopusInkAlpha(entity) <= 0) {
+      return false;
+    }
+
+    const inkRadius = octopusInkMaxRadius(entity);
+    const dx = Number(entity.x || 0) - Number(player.x || 0);
+    const dy = Number(entity.y || 0) - Number(player.y || 0);
+    const reach = radius + inkRadius + 2;
+    return dx * dx + dy * dy <= reach * reach;
+  });
+}
+
+function addOctopusInkVisibilitySegments(segments, inkBlobs, camera) {
+  for (const blob of inkBlobs) {
+    const points = octopusInkPolygon(blob);
+    if (points.length < 3) {
+      continue;
+    }
+
+    for (let index = 0; index < points.length; index += 1) {
+      const from = points[index];
+      const to = points[(index + 1) % points.length];
+      addAsteroidVisibilitySegment(segments, from.x, from.y, to.x, to.y, camera);
+    }
+  }
+}
+
+function octopusInkBlobContainingPoint(inkBlobs, x, y) {
+  for (const blob of inkBlobs) {
+    if (pointInsidePolygon({ x, y }, octopusInkPolygon(blob))) {
+      return blob;
+    }
+  }
+
+  return null;
+}
+
+function pointInsidePolygon(point, polygon) {
+  if (!point || !Array.isArray(polygon) || polygon.length < 3) {
+    return false;
+  }
+
+  let inside = false;
+  for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index, index += 1) {
+    const current = polygon[index];
+    const previous = polygon[previousIndex];
+    const crosses = (current.y > point.y) !== (previous.y > point.y);
+    if (!crosses) {
+      continue;
+    }
+
+    const xAtY = ((previous.x - current.x) * (point.y - current.y)) / (previous.y - current.y) + current.x;
+    if (point.x < xAtY) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
 }
 
 function createLitVisibilityForGameMode(gameMode, visibility, player, headingOverride = null) {
@@ -12663,6 +12836,53 @@ function fillConvexPolygon(ctx, points, color) {
   fillConvexPolygonDither(ctx, points, () => true);
 }
 
+function fillPolygonAlpha(ctx, points, color, alpha = 1) {
+  if (!Array.isArray(points) || points.length < 3 || alpha <= 0) {
+    return;
+  }
+
+  const minY = Math.floor(points.reduce((min, point) => Math.min(min, point.y), Infinity));
+  const maxY = Math.ceil(points.reduce((max, point) => Math.max(max, point.y), -Infinity));
+  if (alpha >= 0.995 || typeof ctx.fillRectAlpha !== "function") {
+    ctx.fillStyle = color;
+  }
+
+  for (let y = minY; y <= maxY; y += 1) {
+    const intersections = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const from = points[index];
+      const to = points[(index + 1) % points.length];
+      if (from.y === to.y) {
+        continue;
+      }
+
+      const yMin = Math.min(from.y, to.y);
+      const yMax = Math.max(from.y, to.y);
+      if (y < yMin || y >= yMax) {
+        continue;
+      }
+
+      const t = (y - from.y) / (to.y - from.y);
+      intersections.push(from.x + (to.x - from.x) * t);
+    }
+
+    intersections.sort((a, b) => a - b);
+    for (let index = 0; index + 1 < intersections.length; index += 2) {
+      const x0 = Math.ceil(intersections[index]);
+      const x1 = Math.floor(intersections[index + 1]);
+      if (x1 < x0) {
+        continue;
+      }
+
+      if (alpha >= 0.995 || typeof ctx.fillRectAlpha !== "function") {
+        ctx.fillRect(x0, y, x1 - x0 + 1, 1);
+      } else {
+        ctx.fillRectAlpha(x0, y, x1 - x0 + 1, 1, color, alpha);
+      }
+    }
+  }
+}
+
 function fillConvexPolygonDither(ctx, points, paintPixel) {
   if (!Array.isArray(points) || points.length < 3) {
     return;
@@ -14085,6 +14305,11 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     return;
   }
 
+  if (entity.type === "octopusInk") {
+    drawOctopusInkEntity(ctx, entity, camera);
+    return;
+  }
+
   if (entity.type === "huckRock") {
     if (options.gameMode === GAME_MODES.cars) {
       drawCarModeHuckRockEntity(ctx, entity, camera, colors);
@@ -14098,6 +14323,12 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
         filled: true,
         fillColor: bodyColor,
         lineColor: bodyColor
+      });
+    } else if (options.gameMode === GAME_MODES.octopus) {
+      drawHuckRockEntity(ctx, entity, camera, colors, {
+        filled: true,
+        fillColor: "#000000",
+        lineColor: "#000000"
       });
     } else {
       drawHuckRockEntity(ctx, entity, camera, colors, {
@@ -14126,6 +14357,106 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     [1, 1],
     [0, 2]
   ], ENTITY_PIXEL_SIZE);
+}
+
+function drawOctopusInkEntity(ctx, entity, camera) {
+  if (octopusInkRadiusScale(entity) <= 0.001) {
+    return;
+  }
+
+  const points = octopusInkVisualPolygon(entity, camera);
+  fillConvexPolygon(ctx, points, "#000000");
+}
+
+function octopusInkAlpha(entity) {
+  const lifetime = Math.max(0.001, Number(entity?.lifetimeSeconds || ENGINE.octopus.ink.lifetimeSeconds));
+  const fadeSeconds = Math.max(0.001, Number(entity?.fadeSeconds || ENGINE.octopus.ink.fadeSeconds));
+  const age = clamp(Number(entity?.ageSeconds || 0), 0, lifetime);
+  return clamp((lifetime - age) / fadeSeconds, 0, 1);
+}
+
+function octopusInkRadiusScale(entity) {
+  const lifetime = Math.max(0.001, Number(entity?.lifetimeSeconds || ENGINE.octopus.ink.lifetimeSeconds));
+  const configuredMinScale = entity?.minRadiusScale ?? ENGINE.octopus.ink.minRadiusScale;
+  const minScale = clamp(Number(configuredMinScale), 0, 1);
+  const age = clamp(Number(entity?.ageSeconds || 0), 0, lifetime);
+  const progress = smoothstep01(clamp((age - lifetime * 0.5) / (lifetime * 0.5), 0, 1));
+  return lerp(1, minScale, progress);
+}
+
+function octopusInkMaxRadius(entity) {
+  const baseRadius = Math.max(1, Number(entity?.radius || ENGINE.octopus.ink.radius));
+  const points = Array.isArray(entity?.points) ? entity.points : [];
+  const maxPointScale = points.reduce((max, point) => Math.max(max, Number(point?.scale || 1)), 1);
+  return baseRadius * octopusInkRadiusScale(entity) * maxPointScale;
+}
+
+function octopusInkPolygon(entity, camera = null) {
+  const rawPoints = Array.isArray(entity?.points) && entity.points.length >= 3
+    ? entity.points
+    : defaultOctopusInkPoints();
+  const radius = Math.max(1, Number(entity?.radius || ENGINE.octopus.ink.radius)) * octopusInkRadiusScale(entity);
+  const centerX = Number(entity?.x || 0) - Number(camera?.x || 0);
+  const centerY = Number(entity?.y || 0) - Number(camera?.y || 0);
+  return rawPoints
+    .map((point, index) => ({
+      angle: Number.isFinite(point?.angle) ? point.angle : (index / rawPoints.length) * Math.PI * 2,
+      scale: Math.max(0.05, Number(point?.scale || 1))
+    }))
+    .sort((a, b) => a.angle - b.angle)
+    .map((point) => ({
+      x: centerX + Math.cos(point.angle) * radius * point.scale,
+      y: centerY + Math.sin(point.angle) * radius * point.scale
+    }));
+}
+
+function octopusInkVisualPolygon(entity, camera = null) {
+  const points = octopusInkPolygon(entity, camera);
+  if (points.length < 4) {
+    return points;
+  }
+
+  const smoothed = [];
+  const subdivisions = 5;
+  for (let index = 0; index < points.length; index += 1) {
+    const previous = points[(index - 1 + points.length) % points.length];
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const afterNext = points[(index + 2) % points.length];
+    for (let step = 0; step < subdivisions; step += 1) {
+      const t = step / subdivisions;
+      smoothed.push(catmullRomPoint(previous, current, next, afterNext, t));
+    }
+  }
+
+  return smoothed;
+}
+
+function catmullRomPoint(p0, p1, p2, p3, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return {
+    x: 0.5 * (
+      2 * p1.x +
+      (-p0.x + p2.x) * t +
+      (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+      (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3
+    ),
+    y: 0.5 * (
+      2 * p1.y +
+      (-p0.y + p2.y) * t +
+      (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+      (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3
+    )
+  };
+}
+
+function defaultOctopusInkPoints() {
+  const count = Math.max(3, Math.floor(Number(ENGINE.octopus.ink.pointCount || 8)));
+  return Array.from({ length: count }, (_value, index) => ({
+    angle: (index / count) * Math.PI * 2,
+    scale: 1
+  }));
 }
 
 function drawMenuHintEntity(ctx, entity, camera, colors, textRenderer) {

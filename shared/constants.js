@@ -143,7 +143,18 @@ export const ENGINE = Object.freeze({
   },
   octopus: {
     radius: 7,
-    tileSize: 16
+    tileSize: 16,
+    ink: {
+      radius: 45,
+      pointCount: 8,
+      lifetimeSeconds: 10,
+      shrinkSeconds: 2,
+      fadeSeconds: 1.25,
+      maxBounces: 0,
+      minRadiusScale: 0,
+      minPointScale: 0.68,
+      maxPointScale: 1.18
+    }
   },
   player: {
     startingHealthBars: 3,
