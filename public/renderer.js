@@ -267,6 +267,8 @@ const WATER_FISH_MAX_SCHOOL_SIZE = 54;
 const WATER_FISH_RENDER_SCALE = 2;
 const WATER_FISH_MIN_SPEED = 22;
 const WATER_FISH_MAX_SPEED = 64;
+const WATER_FISH_TURN_RATE = Math.PI * 1.8;
+const WATER_FISH_ACCELERATION = 96;
 const WATER_FISH_PERCEPTION_RADIUS = 96;
 const WATER_FISH_SEPARATION_RADIUS = 22;
 const WATER_FISH_SPATIAL_CELL_SIZE = WATER_FISH_PERCEPTION_RADIUS;
@@ -13797,9 +13799,10 @@ function nextWaterFishBoidState(entry, grid, dt) {
         }
 
         if (distSq < WATER_FISH_SEPARATION_RADIUS * WATER_FISH_SEPARATION_RADIUS) {
-          closeDx -= dx;
-          closeDy -= dy;
-          continue;
+          const dist = Math.sqrt(distSq);
+          const push = (WATER_FISH_SEPARATION_RADIUS - dist) / WATER_FISH_SEPARATION_RADIUS;
+          closeDx -= (dx / dist) * push;
+          closeDy -= (dy / dist) * push;
         }
 
         xVelocityAverage += other.vx;
@@ -13839,7 +13842,17 @@ function nextWaterFishBoidState(entry, grid, dt) {
   nextVX += (Number(school.driftVX || 0) - fish.vx) * WATER_FISH_DRIFT_FACTOR * dt;
   nextVY += (Number(school.driftVY || 0) - fish.vy) * WATER_FISH_DRIFT_FACTOR * dt;
 
-  const velocity = clampBoidSpeed(nextVX, nextVY, WATER_FISH_MIN_SPEED, maxSpeed);
+  const desiredVelocity = clampBoidSpeed(nextVX, nextVY, WATER_FISH_MIN_SPEED, maxSpeed);
+  const velocity = turnBoidVelocityToward(
+    fish.vx,
+    fish.vy,
+    desiredVelocity.x,
+    desiredVelocity.y,
+    WATER_FISH_MIN_SPEED,
+    maxSpeed,
+    WATER_FISH_TURN_RATE * dt,
+    WATER_FISH_ACCELERATION * dt
+  );
   const speed = Math.hypot(velocity.x, velocity.y);
   return {
     vx: velocity.x,
@@ -13872,6 +13885,39 @@ function clampBoidSpeed(x, y, minLength, maxLength) {
   }
 
   return { x, y };
+}
+
+function turnBoidVelocityToward(currentX, currentY, targetX, targetY, minSpeed, maxSpeed, maxTurn, maxDelta) {
+  const currentSpeed = Math.hypot(currentX, currentY);
+  const targetSpeed = Math.hypot(targetX, targetY);
+  if (currentSpeed <= 0.0001 || targetSpeed <= 0.0001) {
+    return clampBoidSpeed(targetX, targetY, minSpeed, maxSpeed);
+  }
+
+  const currentAngle = Math.atan2(currentY, currentX);
+  const targetAngle = Math.atan2(targetY, targetX);
+  const angle = currentAngle + clamp(normalizeSignedAngle(targetAngle - currentAngle), -maxTurn, maxTurn);
+  const speed = clamp(targetSpeed, minSpeed, maxSpeed);
+  const turned = {
+    x: Math.cos(angle) * speed,
+    y: Math.sin(angle) * speed
+  };
+  return moveVectorToward(currentX, currentY, turned.x, turned.y, maxDelta);
+}
+
+function moveVectorToward(currentX, currentY, targetX, targetY, maxDelta) {
+  const dx = targetX - currentX;
+  const dy = targetY - currentY;
+  const distance = Math.hypot(dx, dy);
+  if (distance <= maxDelta || distance <= 0.0001) {
+    return { x: targetX, y: targetY };
+  }
+
+  const scale = maxDelta / distance;
+  return {
+    x: currentX + dx * scale,
+    y: currentY + dy * scale
+  };
 }
 
 function drawWaterFishField(ctx, fishState, camera, visibility = null, renderMask = null, gpuCaustics = false) {
