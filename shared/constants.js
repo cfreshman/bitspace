@@ -145,7 +145,7 @@ export const ENGINE = Object.freeze({
     radius: 7,
     tileSize: 16,
     ink: {
-      radius: 45,
+      radius: 68,
       pointCount: 8,
       lifetimeSeconds: 10,
       shrinkSeconds: 2,

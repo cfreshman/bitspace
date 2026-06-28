@@ -280,6 +280,7 @@ const WATER_FISH_MATCHING_FACTOR = 2.8;
 const WATER_FISH_CENTERING_FACTOR = 0.68;
 const WATER_FISH_HOME_FACTOR = 0.22;
 const WATER_FISH_DRIFT_FACTOR = 0.9;
+const OCTOPUS_INK_ZERO_INSIDE_VISIBILITY = false;
 const OCTOPUS_INK_INSIDE_VISIBILITY_ERODE_PIXELS = 1;
 const SUB_WAVE_SIM_SIZE = 256;
 const SUB_WAVE_SIM_FPS = 30;
@@ -5971,6 +5972,78 @@ function intersectSpanSets(first, second) {
   return { offsetY, rows };
 }
 
+function unionSpanSets(first, second) {
+  if (!first?.rows) {
+    return second || null;
+  }
+  if (!second?.rows) {
+    return first || null;
+  }
+  if (first === second) {
+    return first;
+  }
+
+  const firstOffsetY = Math.floor(Number(first.offsetY || 0));
+  const secondOffsetY = Math.floor(Number(second.offsetY || 0));
+  const offsetY = Math.min(firstOffsetY, secondOffsetY);
+  const endY = Math.max(firstOffsetY + first.rows.length, secondOffsetY + second.rows.length);
+  const rows = Array.from({ length: Math.max(0, endY - offsetY) }, () => null);
+
+  for (let y = offsetY; y < endY; y += 1) {
+    const row = unionSpanRows(
+      first.rows[y - firstOffsetY],
+      second.rows[y - secondOffsetY]
+    );
+    if (row?.length > 0) {
+      rows[y - offsetY] = row;
+    }
+  }
+
+  return { offsetY, rows };
+}
+
+function unionSpanRows(first, second) {
+  const spans = [];
+  if (Array.isArray(first)) {
+    for (let index = 0; index + 1 < first.length; index += 2) {
+      spans.push([first[index], first[index + 1]]);
+    }
+  }
+  if (Array.isArray(second)) {
+    for (let index = 0; index + 1 < second.length; index += 2) {
+      spans.push([second[index], second[index + 1]]);
+    }
+  }
+  if (spans.length === 0) {
+    return null;
+  }
+
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged = [];
+  let currentStart = spans[0][0];
+  let currentEnd = spans[0][1];
+  for (let index = 1; index < spans.length; index += 1) {
+    const [start, end] = spans[index];
+    if (start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, end);
+      continue;
+    }
+
+    merged.push(currentStart, currentEnd);
+    currentStart = start;
+    currentEnd = end;
+  }
+  merged.push(currentStart, currentEnd);
+  return merged;
+}
+
+function emptySpanSetLike(spans) {
+  return {
+    offsetY: Math.floor(Number(spans?.offsetY || 0)),
+    rows: Array.from({ length: Math.max(0, spans?.rows?.length || 0) }, () => null)
+  };
+}
+
 function intersectSpanRows(first, second) {
   if (!Array.isArray(first) || !Array.isArray(second)) {
     return null;
@@ -9336,12 +9409,14 @@ function createAsteroidVisibilityMask(ctx, options, asteroid, player, camera, sn
         rasterizeAsteroidVisibilityPolygon(buildAsteroidVisibilityPolygon(origin, radius, baseSegments), dilatePixels);
     }
 
-    const containingInk = octopusInkBlobContainingPoint(inkBlobs, player.x, player.y);
-    if (containingInk) {
-      const inkSpans = erodeSpanSet(
-        rasterizeAsteroidVisibilityPolygon(octopusInkVisualPolygon(containingInk, camera), 0),
-        OCTOPUS_INK_INSIDE_VISIBILITY_ERODE_PIXELS
-      );
+    const containingInkBlobs = octopusInkConnectedComponentContainingPoint(inkBlobs, player.x, player.y);
+    if (containingInkBlobs.length > 0) {
+      const inkSpans = OCTOPUS_INK_ZERO_INSIDE_VISIBILITY
+        ? emptySpanSetLike(inkDrawSpans)
+        : erodeSpanSet(
+          octopusInkComponentSpans(containingInkBlobs, camera),
+          OCTOPUS_INK_INSIDE_VISIBILITY_ERODE_PIXELS
+        );
       spans = intersectSpanSets(inkDrawSpans, inkSpans) || inkSpans;
     } else {
       const segments = buildAsteroidVisibilitySegments(asteroid, camera, player, radius, bounds, visibilityOptions);
@@ -9407,14 +9482,68 @@ function addOctopusInkVisibilitySegments(segments, inkBlobs, camera) {
   }
 }
 
-function octopusInkBlobContainingPoint(inkBlobs, x, y) {
-  for (const blob of inkBlobs) {
-    if (pointInsidePolygon({ x, y }, octopusInkPolygon(blob))) {
-      return blob;
+function octopusInkConnectedComponentContainingPoint(inkBlobs, x, y) {
+  if (!Array.isArray(inkBlobs) || inkBlobs.length === 0) {
+    return [];
+  }
+
+  const polygons = inkBlobs.map((blob) => octopusInkVisualPolygon(blob));
+  const pending = [];
+  const visited = new Set();
+  const point = { x, y };
+
+  for (let index = 0; index < polygons.length; index += 1) {
+    if (pointInsidePolygon(point, polygons[index])) {
+      pending.push(index);
+      visited.add(index);
     }
   }
 
-  return null;
+  for (let pendingIndex = 0; pendingIndex < pending.length; pendingIndex += 1) {
+    const currentIndex = pending[pendingIndex];
+    const currentBlob = inkBlobs[currentIndex];
+    const currentPolygon = polygons[currentIndex];
+    for (let nextIndex = 0; nextIndex < inkBlobs.length; nextIndex += 1) {
+      if (visited.has(nextIndex)) {
+        continue;
+      }
+      if (!octopusInkBlobsOverlap(currentBlob, currentPolygon, inkBlobs[nextIndex], polygons[nextIndex])) {
+        continue;
+      }
+
+      visited.add(nextIndex);
+      pending.push(nextIndex);
+    }
+  }
+
+  return pending.map((index) => inkBlobs[index]);
+}
+
+function octopusInkComponentSpans(inkBlobs, camera = null) {
+  let spans = null;
+  for (const blob of inkBlobs) {
+    const blobSpans = rasterizeAsteroidVisibilityPolygon(octopusInkVisualPolygon(blob, camera), 0);
+    spans = unionSpanSets(spans, blobSpans);
+  }
+
+  return spans || { offsetY: 0, rows: [] };
+}
+
+function octopusInkBlobsOverlap(firstBlob, firstPolygon, secondBlob, secondPolygon) {
+  if (!firstBlob || !secondBlob) {
+    return false;
+  }
+
+  const firstRadius = octopusInkMaxRadius(firstBlob);
+  const secondRadius = octopusInkMaxRadius(secondBlob);
+  const dx = Number(firstBlob.x || 0) - Number(secondBlob.x || 0);
+  const dy = Number(firstBlob.y || 0) - Number(secondBlob.y || 0);
+  const reach = firstRadius + secondRadius;
+  if (dx * dx + dy * dy > reach * reach) {
+    return false;
+  }
+
+  return polygonsOverlap(firstPolygon, secondPolygon);
 }
 
 function pointInsidePolygon(point, polygon) {
@@ -9438,6 +9567,72 @@ function pointInsidePolygon(point, polygon) {
   }
 
   return inside;
+}
+
+function polygonsOverlap(first, second) {
+  if (!Array.isArray(first) || !Array.isArray(second) || first.length < 3 || second.length < 3) {
+    return false;
+  }
+
+  if (first.some((point) => pointInsidePolygon(point, second)) ||
+    second.some((point) => pointInsidePolygon(point, first))) {
+    return true;
+  }
+
+  for (let firstIndex = 0; firstIndex < first.length; firstIndex += 1) {
+    const firstA = first[firstIndex];
+    const firstB = first[(firstIndex + 1) % first.length];
+    for (let secondIndex = 0; secondIndex < second.length; secondIndex += 1) {
+      const secondA = second[secondIndex];
+      const secondB = second[(secondIndex + 1) % second.length];
+      if (segmentsIntersect(firstA, firstB, secondA, secondB)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function segmentsIntersect(a, b, c, d) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const acx = c.x - a.x;
+  const acy = c.y - a.y;
+  const adx = d.x - a.x;
+  const ady = d.y - a.y;
+  const cdx = d.x - c.x;
+  const cdy = d.y - c.y;
+  const cax = a.x - c.x;
+  const cay = a.y - c.y;
+  const cbx = b.x - c.x;
+  const cby = b.y - c.y;
+  const cross1 = abx * acy - aby * acx;
+  const cross2 = abx * ady - aby * adx;
+  const cross3 = cdx * cay - cdy * cax;
+  const cross4 = cdx * cby - cdy * cbx;
+
+  if (cross1 === 0 && pointOnSegment(c, a, b)) {
+    return true;
+  }
+  if (cross2 === 0 && pointOnSegment(d, a, b)) {
+    return true;
+  }
+  if (cross3 === 0 && pointOnSegment(a, c, d)) {
+    return true;
+  }
+  if (cross4 === 0 && pointOnSegment(b, c, d)) {
+    return true;
+  }
+
+  return (cross1 > 0) !== (cross2 > 0) && (cross3 > 0) !== (cross4 > 0);
+}
+
+function pointOnSegment(point, a, b) {
+  return point.x >= Math.min(a.x, b.x) &&
+    point.x <= Math.max(a.x, b.x) &&
+    point.y >= Math.min(a.y, b.y) &&
+    point.y <= Math.max(a.y, b.y);
 }
 
 function createLitVisibilityForGameMode(gameMode, visibility, player, headingOverride = null) {

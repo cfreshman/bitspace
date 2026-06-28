@@ -1338,7 +1338,7 @@ function huckRockPlayerHit(arena, rock, previousX = rock.x, previousY = rock.y) 
     const relativeSpeed = Math.hypot(rock.vx - player.vx, rock.vy - player.vy);
     applyHuckRockPlayerImpulse(arena, rock, player, hit);
     addShake(player, Math.max(ENGINE.collision.shakeThreshold + 10, relativeSpeed * 0.35));
-    if (arena.rules.playerDamage) {
+    if (arena.rules.playerDamage && normalizeGameMode(arena.mode) !== GAME_MODES.octopus) {
       damagePlayer(arena, player, ENGINE.huckRock.damage, arena.tick, rock.ownerId);
     }
     breakHuckRock(arena, rock, "player");
