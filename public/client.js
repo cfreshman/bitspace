@@ -61,6 +61,10 @@ import {
   nextUpgradeCost,
   UPGRADE_DEFINITIONS
 } from "/shared/upgrades.js";
+import {
+  createPlayerVisibilityRegion,
+  visibilityRegionLineOfSightClear
+} from "/shared/visibility.js";
 import { applyArenaSnapshotDelta } from "/shared/snapshot-delta.js";
 import { createGamepadControls } from "/gamepad.js";
 import { createRenderer } from "/renderer.js";
@@ -8632,6 +8636,7 @@ function voicePlayersVisible(observer, target) {
   const ny = dy / Math.max(1, distance);
   const px = -ny;
   const py = nx;
+  const visibilityRegion = createPlayerVisibilityRegion(state.snapshot, observer, visibleRadius);
   const targetPoints = [
     { x: target.x, y: target.y },
     { x: target.x + px * targetRadius, y: target.y + py * targetRadius },
@@ -8641,7 +8646,7 @@ function voicePlayersVisible(observer, target) {
   ];
 
   for (let index = 0; index < Math.min(targetPoints.length, VOICE_MAX_TARGET_CHECKS); index += 1) {
-    if (voiceLineOfSightClear(observer.x, observer.y, targetPoints[index].x, targetPoints[index].y)) {
+    if (voiceLineOfSightClear(observer.x, observer.y, targetPoints[index].x, targetPoints[index].y, visibilityRegion)) {
       return true;
     }
   }
@@ -8649,23 +8654,21 @@ function voicePlayersVisible(observer, target) {
   return false;
 }
 
-function voiceLineOfSightClear(startX, startY, endX, endY) {
+function voiceLineOfSightClear(startX, startY, endX, endY, visibilityRegion = null) {
   const dx = endX - startX;
   const dy = endY - startY;
   const distance = Math.hypot(dx, dy);
-  if (!state.asteroid || distance <= 1) {
-    return true;
-  }
-
-  const hit = raycastAsteroid(
+  return visibilityRegionLineOfSightClear(
+    visibilityRegion,
     state.asteroid,
-    startX,
-    startY,
-    Math.atan2(dy, dx),
+    { x: startX, y: startY },
+    { x: endX, y: endY },
     distance,
-    { blockNonPlayable: false }
+    {
+      blockNonPlayable: false,
+      hitMargin: 1
+    }
   );
-  return !hit?.hit || hit.distance >= distance - 1;
 }
 
 function setVoicePeerGain(peer, targetGain, options = {}) {

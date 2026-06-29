@@ -27,6 +27,10 @@ import {
   miningSideRayOffsetForPlayer,
   miningRaySideStartProbe
 } from "./mining.js";
+import {
+  createPlayerVisibilityRegion,
+  visibilityRegionLineOfSightClear
+} from "./visibility.js";
 import { findPathNative, planTrajectoryNative } from "./core/bitspace-core.js";
 import { aggregateUpgradeEffects, canAffordUpgrade, nextUpgradeCost } from "./upgrades.js";
 
@@ -975,22 +979,23 @@ function nearestVisibleEnemyImpl(arena, bot) {
 }
 
 function botEnemyVisibility(arena, bot, enemy, visibleRadius, centerDistance = distanceBetween(bot, enemy)) {
+  const visibilityRegion = createPlayerVisibilityRegion(arena, bot, visibleRadius);
   const radius = enemy.radius || ENGINE.ship.radius;
-  if (botEnemyCenterLineClear(arena, bot, enemy, centerDistance, visibleRadius)) {
+  if (botEnemyCenterLineClear(arena, bot, enemy, centerDistance, visibleRadius, visibilityRegion)) {
     return { visible: true, clear: true };
   }
 
   const wide = Math.max(1, radius * BOT_ENEMY_VISIBILITY_RADIUS_SCALE);
   const diagonal = wide * Math.SQRT1_2;
   if (
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x - diagonal, enemy.y - diagonal, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x + diagonal, enemy.y - diagonal, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x + diagonal, enemy.y + diagonal, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x - diagonal, enemy.y + diagonal, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x - wide, enemy.y, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x + wide, enemy.y, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x, enemy.y - wide, visibleRadius) ||
-    botEnemyVisibilitySampleClear(arena, bot, enemy.x, enemy.y + wide, visibleRadius)
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x - diagonal, enemy.y - diagonal, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x + diagonal, enemy.y - diagonal, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x + diagonal, enemy.y + diagonal, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x - diagonal, enemy.y + diagonal, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x - wide, enemy.y, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x + wide, enemy.y, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x, enemy.y - wide, visibleRadius, visibilityRegion) ||
+    botEnemyVisibilitySampleClear(arena, bot, enemy.x, enemy.y + wide, visibleRadius, visibilityRegion)
   ) {
     return { visible: true, clear: false };
   }
@@ -998,13 +1003,14 @@ function botEnemyVisibility(arena, bot, enemy, visibleRadius, centerDistance = d
   return { visible: false, clear: false };
 }
 
-function botEnemyCenterLineClear(arena, bot, enemy, centerDistance = distanceBetween(bot, enemy), visibleRadius = botHumanVisibleRadius()) {
+function botEnemyCenterLineClear(arena, bot, enemy, centerDistance = distanceBetween(bot, enemy), visibleRadius = botHumanVisibleRadius(), visibilityRegion = null) {
   const radius = enemy.radius || ENGINE.ship.radius;
+  const region = visibilityRegion || createPlayerVisibilityRegion(arena, bot, visibleRadius);
   return centerDistance <= visibleRadius &&
-    lineOfSight(arena, bot, enemy, Math.max(0, centerDistance - radius));
+    lineOfSight(arena, bot, enemy, Math.max(0, centerDistance - radius), { visibilityRegion: region });
 }
 
-function botEnemyVisibilitySampleClear(arena, bot, sampleX, sampleY, visibleRadius) {
+function botEnemyVisibilitySampleClear(arena, bot, sampleX, sampleY, visibleRadius, visibilityRegion = null) {
   const dx = sampleX - bot.x;
   const dy = sampleY - bot.y;
   const distanceSq = dx * dx + dy * dy;
@@ -1017,7 +1023,8 @@ function botEnemyVisibilitySampleClear(arena, bot, sampleX, sampleY, visibleRadi
     arena,
     bot,
     { x: sampleX, y: sampleY },
-    Math.max(0, distance - BOT_ENEMY_VISIBILITY_RAY_MARGIN)
+    Math.max(0, distance - BOT_ENEMY_VISIBILITY_RAY_MARGIN),
+    { visibilityRegion }
   );
 }
 
@@ -7872,17 +7879,11 @@ function tileDistanceScore(asteroid, a, b) {
   return dx * dx + dy * dy;
 }
 
-function lineOfSight(arena, from, to, maxDistance = null) {
+function lineOfSight(arena, from, to, maxDistance = null, options = {}) {
   const distance = maxDistance ?? distanceBetween(from, to);
-  if (distance <= 0) {
-    return true;
-  }
-
-  const angle = Math.atan2(to.y - from.y, to.x - from.x);
-  const hit = raycastAsteroid(arena.asteroid, from.x, from.y, angle, distance, {
+  return visibilityRegionLineOfSightClear(options.visibilityRegion || null, arena.asteroid, from, to, distance, {
     blockNonPlayable: !arena.storm
   });
-  return !hit.hit;
 }
 
 function pointAtAngle(origin, angle, distance) {
