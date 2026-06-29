@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, mapTileSizeForGameMode, miningRayLengthForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, laserTagBeamDurationSeconds, laserTagBlastMaxRange, mapTileSizeForGameMode, miningRayLengthForGameMode, playerMassScaleForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -67,7 +67,10 @@ import {
 } from "/shared/visibility.js";
 import { applyArenaSnapshotDelta } from "/shared/snapshot-delta.js";
 import { createGamepadControls } from "/gamepad.js";
+import { loadLaserTagMaps } from "/laser-tag-map-loader.js";
 import { createRenderer } from "/renderer.js";
+
+await loadLaserTagMaps().catch(() => 0);
 
 const TALK_MAX_CHARS = 36;
 const ROOM_NAME_MAX_CHARS = 24;
@@ -335,11 +338,13 @@ const audio = {
   lastDamagePlayerId: "",
   huckRockAudioPlayerId: "",
   lastHuckRockCooldownSeconds: 0,
+  lastLaserShotAtSeconds: -Infinity,
   endSoundKey: "",
   defeatSoundKey: "",
   lastDefeatAtSeconds: -Infinity,
   lastVolumePreviewAtSeconds: -Infinity,
   huckRockBuffer: null,
+  laserShotBuffer: null,
   rockThumpBuffer: null,
   music: {
     tracks: null,
@@ -456,6 +461,8 @@ const state = {
     lastSaveAtMs: 0
   },
   eliminationNotices: [],
+  laserTagEventIds: new Set(),
+  laserTagShotIds: new Set(),
   playerAliveById: new Map(),
   spectatorTargetId: null,
   lastRoomId: null,
@@ -650,6 +657,8 @@ function applyServerRoom(room) {
     state.lastRoomId = nextRoomId;
     releaseSpaceUntilKeyup();
     state.eliminationNotices = [];
+    state.laserTagEventIds.clear();
+    state.laserTagShotIds.clear();
     state.playerAliveById.clear();
     setSpectatorTarget(null);
   }
@@ -665,6 +674,8 @@ function applyServerRoom(room) {
     clearPredictedHuckRocks();
     resetEntitySmoothing();
     state.eliminationNotices = [];
+    state.laserTagEventIds.clear();
+    state.laserTagShotIds.clear();
     state.playerAliveById.clear();
     setSpectatorTarget(null);
     state.lastActiveMatchKey = null;
@@ -694,6 +705,7 @@ function applyServerRoom(room) {
   const activeMatchKey = roomActiveMatchKey(room);
   if (activeMatchKey && activeMatchKey !== state.lastActiveMatchKey) {
     resetControlStateForNewMatch();
+    state.laserTagShotIds.clear();
   }
   state.lastActiveMatchKey = activeMatchKey || (room.state === "ended" ? state.lastActiveMatchKey : null);
   if (!playerMapAllowed()) {
@@ -705,6 +717,7 @@ function applyServerRoom(room) {
     closeBuildMode();
     resetLocalDamageAudioState();
     resetEntitySmoothing();
+    state.laserTagShotIds.clear();
     state.prediction.huckRockCooldownSeconds = 0;
     clearPredictedHuckRocks();
     clearRendererParticles();
@@ -767,6 +780,7 @@ socket.on(SERVER_EVENTS.snapshot, (payload) => {
   recordEntitySnapshot(snapshot, receivedAtSeconds);
   updateLocalDamageAudio(snapshot, receivedAtSeconds);
   recordEliminations(snapshot, receivedAtSeconds);
+  recordLaserTagEvents(snapshot, receivedAtSeconds);
   state.snapshot = snapshot;
   handleRoomEndAudio(state.room, snapshot, receivedAtSeconds);
   if (state.asteroid) {
@@ -3001,6 +3015,7 @@ function createMenuState() {
     asteroid,
     huckRocks: [],
     huckRockCooldownSeconds: 0,
+    laserShotCooldownSeconds: 0,
     rayCount,
     lastStateSaveSeconds: 0,
     settingsSelectedIndex: Math.max(0, Math.floor(Number(savedMenuState?.settingsSelectedIndex) || 0)),
@@ -3030,6 +3045,9 @@ function normalizeMenuMode(mode) {
   }
   if (mode === GAME_MODES.octopus) {
     return GAME_MODES.octopus;
+  }
+  if (mode === GAME_MODES.laserTag) {
+    return GAME_MODES.laserTag;
   }
   return GAME_MODES.bitspace;
 }
@@ -3085,6 +3103,13 @@ function menuModeEnabledByUrl(mode) {
       params.get("octo") === "1" ||
       params.get("octos") === "1";
   }
+  if (mode === GAME_MODES.laserTag) {
+    return requestedMode === "laser" ||
+      requestedMode === "lasertag" ||
+      requestedMode === "laser-tag" ||
+      params.get("laser") === "1" ||
+      params.get("lasertag") === "1";
+  }
   return true;
 }
 
@@ -3093,6 +3118,7 @@ function menuModeCanLoad(mode) {
   return normalized === GAME_MODES.bitspace ||
     normalized === GAME_MODES.bugs ||
     normalized === GAME_MODES.octopus ||
+    normalized === GAME_MODES.laserTag ||
     menuModeEnabledByUrl(normalized);
 }
 
@@ -3113,6 +3139,9 @@ function menuModeFromUrl() {
   }
   if (mode === "octopus" || mode === "octo" || mode === "octos") {
     return GAME_MODES.octopus;
+  }
+  if (mode === "laser" || mode === "lasertag" || mode === "laser-tag") {
+    return GAME_MODES.laserTag;
   }
   return null;
 }
@@ -3221,6 +3250,7 @@ function toggleMenuMode() {
 }
 
 function setMenuMode(mode) {
+  resetMenuFireState();
   state.menu.mode = normalizeMenuMode(mode);
   saveMenuMode(state.menu.mode);
   updateDocumentTitleForMenuMode();
@@ -3228,6 +3258,18 @@ function setMenuMode(mode) {
   rebuildMenuArena();
   saveMenuState();
   requestMechanicalBeep();
+}
+
+function resetMenuFireState() {
+  cancelMiningRay();
+  releaseSpaceUntilKeyup();
+  clearMobileHuckRockQueue();
+  clearRendererParticles();
+  state.menu.huckRocks = [];
+  state.menu.huckRockCooldownSeconds = 0;
+  state.menu.laserShotCooldownSeconds = 0;
+  state.menu.activeTargetId = null;
+  resetMenuButtonTarget();
 }
 
 function menuTitleLabelForMode(mode = selectedMenuMode()) {
@@ -3246,6 +3288,9 @@ function menuTitleLabelForMode(mode = selectedMenuMode()) {
   }
   if (normalized === GAME_MODES.octopus) {
     return "BITSPACE: OCTOS";
+  }
+  if (normalized === GAME_MODES.laserTag) {
+    return "BITSPACE: LASER TAG";
   }
   return "BITSPACE";
 }
@@ -3479,6 +3524,7 @@ function enterMenuRoom(room, options = {}) {
   state.menu.asteroid = state.menu.asteroids[room];
   state.menu.huckRocks = [];
   state.menu.huckRockCooldownSeconds = 0;
+  state.menu.laserShotCooldownSeconds = 0;
   const center = menuCenter(state.menu.asteroid);
   state.menu.activeTargetId = null;
   resetMenuButtonTarget();
@@ -3543,7 +3589,7 @@ function updateMenuSimulation(timeSeconds) {
     player.vy = 0;
     player.moveX = 0;
     player.moveY = 0;
-    setMenuPlayerInput(0, 0, false);
+    setMenuPlayerInput(0, 0, false, false);
     player.thrusting = false;
     player.mining = false;
     player.miningRay = null;
@@ -3582,9 +3628,14 @@ function updateMenuSimulation(timeSeconds) {
     }
   }
 
-  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.octopus ? false : canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs ||
+    gameMode === GAME_MODES.clouds ||
+    gameMode === GAME_MODES.octopus ||
+    gameMode === GAME_MODES.laserTag
+    ? false
+    : canThrust;
   player.mining = physicalMiningInputActive() && !state.chat.active;
-  setMenuPlayerInput(move.x, move.y, player.mining);
+  setMenuPlayerInput(move.x, move.y, player.mining, gameMode === GAME_MODES.laserTag && huckRockPhysicalInputActive());
   if (player.mining) {
     player.miningHoldSeconds += dtSeconds;
   } else {
@@ -3604,7 +3655,7 @@ function updateMenuSimulation(timeSeconds) {
   saveMenuStateThrottled(timeSeconds);
 }
 
-function setMenuPlayerInput(moveX, moveY, mining) {
+function setMenuPlayerInput(moveX, moveY, mining, huckRock = false) {
   if (!state.menu?.arena || !state.menu.player) {
     return;
   }
@@ -3613,7 +3664,8 @@ function setMenuPlayerInput(moveX, moveY, mining) {
     moveX,
     moveY,
     aimAngle: state.menu.player.aimAngle,
-    mining
+    mining,
+    huckRock
   });
 }
 
@@ -3780,6 +3832,11 @@ function stripMenuMiningLaneHits(miningRay) {
 }
 
 function updateMenuHuckRocks(player, dtSeconds) {
+  if (selectedMenuMode() === GAME_MODES.laserTag) {
+    updateMenuLaserBlasts(player, dtSeconds);
+    return;
+  }
+
   state.menu.huckRockCooldownSeconds = Math.max(0, state.menu.huckRockCooldownSeconds - dtSeconds);
 
   const movedRocks = [];
@@ -3859,6 +3916,142 @@ function updateMenuHuckRocks(player, dtSeconds) {
       clearMobileHuckRockQueue();
     }
   }
+}
+
+function updateMenuLaserBlasts(player, dtSeconds) {
+  state.menu.huckRockCooldownSeconds = 0;
+  state.menu.laserShotCooldownSeconds = Math.max(0, (state.menu.laserShotCooldownSeconds || 0) - dtSeconds);
+
+  const blasts = [];
+  for (const blast of state.menu.huckRocks) {
+    if (blast.type !== "laserBlast") {
+      continue;
+    }
+    blast.ageSeconds = (blast.ageSeconds || 0) + dtSeconds;
+    if (blast.ageSeconds <= (blast.beamLerpSeconds || laserTagBeamDurationSeconds())) {
+      blasts.push(blast);
+    }
+  }
+  state.menu.huckRocks = blasts;
+
+  const firing = menuLaserInputActive();
+  if (!firing || state.menu.laserShotCooldownSeconds > 0) {
+    return;
+  }
+
+  spawnMenuLaserBlast(player);
+  state.menu.laserShotCooldownSeconds = ENGINE.laserTag.fireIntervalSeconds;
+  if (mobileHuckRockQueued()) {
+    clearMobileHuckRockQueue();
+  }
+}
+
+function menuLaserInputActive() {
+  if (
+    state.chat.active ||
+    state.upgrades.active ||
+    state.build.active
+  ) {
+    return false;
+  }
+  return physicalMiningInputActive() || huckRockPhysicalInputActive();
+}
+
+function spawnMenuLaserBlast(player) {
+  const config = ENGINE.laserTag;
+  const angle = menuLaserFireAngle(player);
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const startOffset = player.radius || config.radius;
+  const startX = player.x + direction.x * startOffset;
+  const startY = player.y + direction.y * startOffset;
+  const maxDistance = laserTagBlastMaxRange();
+  const hit = menuLaserBlastHit(startX, startY, direction, maxDistance);
+  const rayDistance = hit
+    ? clamp(Number(hit.distance) || 0, 0, maxDistance)
+    : maxDistance;
+  const endX = startX + direction.x * rayDistance;
+  const endY = startY + direction.y * rayDistance;
+  const beamLerpSeconds = laserTagBeamDurationSeconds();
+  const id = `menu-laser-blast:${state.menu.tick}:${Math.random().toString(36).slice(2)}`;
+
+  state.menu.huckRocks.push({
+    id,
+    type: "laserBlast",
+    ownerId: MENU_PLAYER_ID,
+    team: "red",
+    x: endX,
+    y: endY,
+    spawnX: startX,
+    spawnY: startY,
+    previousX: startX,
+    previousY: startY,
+    fullEndX: endX,
+    fullEndY: endY,
+    hit: Boolean(hit),
+    hitX: endX,
+    hitY: endY,
+    angle,
+    radius: config.blastRadius,
+    maxDistance,
+    targetDistance: rayDistance,
+    retractFromDistance: rayDistance,
+    retractToDistance: rayDistance,
+    beamLerpSeconds,
+    ageSeconds: 0,
+    bornTick: state.menu.tick
+  });
+  if (hit?.entity) {
+    state.menu.activeTargetId = hit.entity.id;
+    activateMenuEntity(hit.entity);
+  }
+  requestLaserTagShotSound();
+}
+
+function menuLaserFireAngle(player) {
+  const target = huckRockTargetForPlayer(player);
+  if (target && Number.isFinite(target.x) && Number.isFinite(target.y)) {
+    return Math.atan2(target.y - player.y, target.x - player.x);
+  }
+  return player.aimAngle ?? player.angle;
+}
+
+function menuLaserBlastHit(startX, startY, direction, maxDistance) {
+  let nearest = null;
+  const asteroidHit = raycastAsteroid(state.menu.asteroid, startX, startY, Math.atan2(direction.y, direction.x), maxDistance, {
+    blockNonPlayable: false
+  });
+  if (asteroidHit?.hit) {
+    nearest = {
+      type: "asteroid",
+      x: asteroidHit.x,
+      y: asteroidHit.y,
+      distance: asteroidHit.distance
+    };
+  }
+
+  for (const entity of menuEntities()) {
+    if (!entity.action) {
+      continue;
+    }
+    const hit = entity.type === "themeSwatch"
+      ? rayCircleIntersection({ x: startX, y: startY }, direction, entity, maxDistance)
+      : rayRectIntersection({ x: startX, y: startY }, direction, entity, maxDistance);
+    if (!hit || (nearest && hit.distance >= nearest.distance)) {
+      continue;
+    }
+    nearest = {
+      type: "entity",
+      entity,
+      x: hit.x,
+      y: hit.y,
+      distance: hit.distance
+    };
+  }
+
+  return nearest;
 }
 
 function resolveMenuHuckRockContacts(rocks, spawnedFragments) {
@@ -4512,6 +4705,8 @@ function startLocalBotLobby(mode = selectedMenuMode()) {
   state.prediction.huckRockCooldownSeconds = 0;
   clearPredictedHuckRocks();
   state.eliminationNotices = [];
+  state.laserTagEventIds.clear();
+  state.laserTagShotIds.clear();
   state.playerAliveById.clear();
   setSpectatorTarget(null);
   setClientAsteroid(snapshotAsteroid(arena));
@@ -4525,7 +4720,8 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = 
     seed: `${seed}:theme-lobby`,
     tileSize,
     createLobbyPockets: true,
-    playerCount: ENGINE.maxPlayers
+    playerCount: ENGINE.maxPlayers,
+    seedResources: false
   });
   const arena = createArena({
     id: `${LOCAL_BOT_ROOM_ID}:waiting`,
@@ -4662,6 +4858,8 @@ function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFA
   state.prediction.huckRockCooldownSeconds = 0;
   clearPredictedHuckRocks();
   state.eliminationNotices = [];
+  state.laserTagEventIds.clear();
+  state.laserTagShotIds.clear();
   state.playerAliveById.clear();
   setSpectatorTarget(null);
   setClientAsteroid(snapshotAsteroid(arena));
@@ -4764,6 +4962,8 @@ function leaveLocalBotGame() {
   clearPredictedHuckRocks();
   resetEntitySmoothing();
   state.eliminationNotices = [];
+  state.laserTagEventIds.clear();
+  state.laserTagShotIds.clear();
   state.playerAliveById.clear();
   setSpectatorTarget(null);
   state.lastActiveMatchKey = null;
@@ -4970,23 +5170,45 @@ function readLocalPlayerInput() {
 
   const move = readMoveVector();
   const huckRock = readHuckRockInput();
-  const huckRockTarget = huckRock ? huckRockTargetForPlayer(player) : null;
+  const mining = activeRoomMiningInputAllowed();
+  const laserTagShot = activeGameMode() === GAME_MODES.laserTag && mining;
+  const huckRockTarget = huckRock || laserTagShot ? huckRockTargetForPlayer(player) : null;
   if (huckRock && mobileHuckRockQueued()) {
     clearMobileHuckRockQueue();
   }
-  return normalizeInput({
+  const input = normalizeInput({
     sessionId: inputSessionId,
     seq: state.localGame.inputSeq,
     moveX: move.x,
     moveY: move.y,
     aimAngle,
-    mining: activeRoomMiningInputAllowed(),
+    mining,
     huckRock,
     huckRockTargetX: huckRockTarget?.x ?? null,
     huckRockTargetY: huckRockTarget?.y ?? null,
     interact: false,
     build: false
   });
+  maybeRequestLocalLaserTagShotSound(
+    state.localGame.arena?.players?.get(LOCAL_BOT_PLAYER_ID) || player,
+    input
+  );
+  return input;
+}
+
+function maybeRequestLocalLaserTagShotSound(player, input, timeSeconds = performance.now() / 1000) {
+  if (
+    audioGameMode() !== GAME_MODES.laserTag ||
+    !player ||
+    state.room?.state !== "waiting" && state.room?.state !== "active" ||
+    input?.mining !== true && input?.huckRock !== true ||
+    player.laserTagGhost === true ||
+    Number(player.laserTagCooldownSeconds || 0) > 1 / ENGINE.tickRate
+  ) {
+    return;
+  }
+
+  requestLaserTagShotSound(timeSeconds);
 }
 
 function syncLocalArenaSnapshot(timeSeconds, options = {}) {
@@ -5003,6 +5225,7 @@ function syncLocalArenaSnapshot(timeSeconds, options = {}) {
     primePlayerAliveState(snapshot);
   } else {
     recordEliminations(snapshot, timeSeconds);
+    recordLaserTagEvents(snapshot, timeSeconds);
   }
   state.snapshot = snapshot;
   if (!options.skipEliminations) {
@@ -5023,6 +5246,27 @@ function primePlayerAliveState(snapshot) {
 
 function updateLocalRoomEndState(arena) {
   if (state.room?.state !== "active") {
+    return;
+  }
+
+  if (normalizeMenuMode(arena.mode) === GAME_MODES.laserTag) {
+    if (arena.laserTag?.ended !== true) {
+      return;
+    }
+
+    const winnerTeam = arena.laserTag.winnerTeam || null;
+    const winner = Array.from(arena.players.values())
+      .filter((player) => player.team === winnerTeam)
+      .sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
+    state.room = localBotRoomFromArena(arena, {
+      state: "ended",
+      winnerId: winner?.id ?? null,
+      winnerName: winnerTeam ? `${winnerTeam.toUpperCase()} TEAM` : winner?.name ?? null,
+      endReason: "score"
+    });
+    cancelMiningRay();
+    releaseSpaceUntilKeyup();
+    saveLocalBotGame({ force: true });
     return;
   }
 
@@ -5117,9 +5361,29 @@ function createLocalBotSave() {
       .map(serializeLocalBotPlayer),
     bots: Array.from(state.localGame.bots.values()).map(snapshotPilotBotBrain),
     bugFootsteps: Array.from(state.localGame.arena.bugFootsteps?.values?.() || []),
+    laserTag: serializeLocalBotLaserTag(arena.laserTag),
     entities: Array.from(arena.entities.values())
       .filter((entity) => entity.destroyed !== true)
       .map((entity) => ({ ...entity }))
+  };
+}
+
+function serializeLocalBotLaserTag(laserTag) {
+  if (!laserTag) {
+    return null;
+  }
+  return {
+    startedTick: Math.max(0, Math.floor(Number(laserTag.startedTick || 0))),
+    ended: laserTag.ended === true,
+    winnerTeam: laserTag.winnerTeam || null,
+    teamScores: {
+      red: Math.max(0, Math.floor(Number(laserTag.teamScores?.red || 0))),
+      blue: Math.max(0, Math.floor(Number(laserTag.teamScores?.blue || 0)))
+    },
+    nextDiamondSpawnTick: Math.max(0, Math.floor(Number(laserTag.nextDiamondSpawnTick || 0))),
+    events: Array.isArray(laserTag.events)
+      ? laserTag.events.slice(-12).map((event) => ({ ...event }))
+      : []
   };
 }
 
@@ -5185,6 +5449,8 @@ function serializeLocalBotPlayer(player) {
     health: player.health,
     maxHealth: player.maxHealth,
     kills: player.kills || 0,
+    score: player.score || 0,
+    laserTagGhost: player.laserTagGhost === true,
     lastKillDropAmount: player.lastKillDropAmount || 0,
     lastKillDropTick: player.lastKillDropTick,
     lastHit: player.lastHitTargetId
@@ -5233,6 +5499,9 @@ function restoreLocalBotGame() {
   const roomState = localBotSaveRoomState(save.roomState);
   const botCount = clampLocalBotCount(save.botCount ?? Math.max(0, (save.players || []).length - 1));
   const waitingRoom = roomState === "waiting";
+  if (waitingRoom) {
+    stripAsteroidResources(asteroid);
+  }
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed: save.seed,
@@ -5251,6 +5520,7 @@ function restoreLocalBotGame() {
   arena.effects = [];
   arena.huckRockButtonHits = [];
   arena.bugFootsteps = new Map();
+  restoreLocalBotLaserTag(arena, save.laserTag);
 
   for (const savedPlayer of save.players.slice().sort((a, b) => numberOr(a.number, 0) - numberOr(b.number, 0))) {
     addPlayer(arena, {
@@ -5318,6 +5588,8 @@ function restoreLocalBotGame() {
   state.prediction.huckRockCooldownSeconds = 0;
   clearPredictedHuckRocks();
   state.eliminationNotices = [];
+  state.laserTagEventIds.clear();
+  state.laserTagShotIds.clear();
   state.playerAliveById.clear();
   setClientAsteroid(snapshotAsteroid(arena));
   syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
@@ -5392,9 +5664,11 @@ function hydrateLocalBotAsteroid(savedAsteroid) {
           tileY: numberOr(pocket.tileY, 0),
           radius: numberOr(pocket.radius, 0),
           spawnX: numberOr(pocket.spawnX, 0),
-          spawnY: numberOr(pocket.spawnY, 0)
+          spawnY: numberOr(pocket.spawnY, 0),
+          angle: numberOr(pocket.angle, 0)
         }))
-      : []
+      : [],
+    laserTag: savedAsteroid.laserTag || null
   };
 }
 
@@ -5413,6 +5687,39 @@ function restoreLocalBotBugFootsteps(arena, footsteps) {
     const id = `${x}:${y}`;
     arena.bugFootsteps.set(id, { id, x, y });
   }
+}
+
+function stripAsteroidResources(asteroid) {
+  if (!asteroid?.tiles || !asteroid?.amounts) {
+    return asteroid;
+  }
+  for (let index = 0; index < asteroid.tiles.length; index += 1) {
+    if (asteroid.tiles[index] === ASTEROID_TILE.ore || asteroid.tiles[index] === ASTEROID_TILE.diamond) {
+      asteroid.tiles[index] = ASTEROID_TILE.rock;
+      asteroid.amounts[index] = 0;
+    }
+  }
+  return asteroid;
+}
+
+function restoreLocalBotLaserTag(arena, savedLaserTag) {
+  if (!arena?.laserTag || !savedLaserTag) {
+    return;
+  }
+  arena.laserTag.startedTick = Math.max(0, Math.floor(Number(savedLaserTag.startedTick || arena.laserTag.startedTick || 0)));
+  arena.laserTag.ended = savedLaserTag.ended === true;
+  arena.laserTag.winnerTeam = savedLaserTag.winnerTeam || null;
+  arena.laserTag.teamScores = {
+    red: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.red || 0))),
+    blue: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.blue || 0)))
+  };
+  arena.laserTag.nextDiamondSpawnTick = Math.max(
+    arena.tick,
+    Math.floor(Number(savedLaserTag.nextDiamondSpawnTick || arena.laserTag.nextDiamondSpawnTick || arena.tick))
+  );
+  arena.laserTag.events = Array.isArray(savedLaserTag.events)
+    ? savedLaserTag.events.slice(-12).map((event) => ({ ...event }))
+    : [];
 }
 
 function restoreLocalBotPlayer(player, savedPlayer) {
@@ -5456,6 +5763,7 @@ function restoreLocalBotPlayer(player, savedPlayer) {
     "health",
     "maxHealth",
     "kills",
+    "score",
     "lastKillDropAmount",
     "lastKillDropTick",
     "lastDamageTick",
@@ -5487,6 +5795,7 @@ function restoreLocalBotPlayer(player, savedPlayer) {
   player.buttonTargetActivated = savedPlayer.buttonTargetActivated === true;
   player.miningPhase = savedPlayer.miningPhase ?? null;
   player.thrusting = savedPlayer.thrusting === true;
+  player.laserTagGhost = savedPlayer.laserTagGhost === true;
   player.subReverseActive = savedPlayer.subReverseActive === true;
   player.bugLegs = cloneBugLegs(savedPlayer.bugLegs);
   ensureBugLegCenter(player);
@@ -5620,6 +5929,10 @@ function localBotRoomFromArena(arena, options = {}) {
     countdownSeconds: ENGINE.lobby.countdownSeconds,
     autoStartAtMs: null,
     winnerId: roomState === "ended" ? options.winnerId ?? null : null,
+    winnerName: roomState === "ended" ? options.winnerName ?? null : null,
+    endedAtMs: roomState === "ended" ? options.endedAtMs ?? Date.now() : null,
+    endReason: roomState === "ended" ? options.endReason ?? null : null,
+    resetToLobbyAtMs: null,
     players
   };
 }
@@ -5754,6 +6067,9 @@ function menuEntities() {
   const modeButtons = menuModeButtons(currentMode);
   const modeRowWidth = modeButtons.length * buttonWidth + Math.max(0, modeButtons.length - 1) * modeButtonGap;
   const modeButtonX = center.x - modeRowWidth / 2;
+  const laserTagButtonWidth = Math.max(buttonWidth * 2 + modeButtonGap, 96);
+  const laserTagY = carsY + MENU_BUTTON_HEIGHT + 8;
+  const laserTagSelected = currentMode === GAME_MODES.laserTag;
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
@@ -5772,6 +6088,15 @@ function menuEntities() {
       buttonWidth,
       { targetMode: modeButton.targetMode }
     )),
+    menuButton(
+      "menu-mode-laser-tag",
+      "set-mode",
+      laserTagSelected ? "SHIPS" : "LASER TAG",
+      center.x - laserTagButtonWidth / 2,
+      laserTagY,
+      laserTagButtonWidth,
+      { targetMode: laserTagSelected ? GAME_MODES.bitspace : GAME_MODES.laserTag }
+    ),
     menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth, {
@@ -5813,12 +6138,19 @@ function menuModeLabel(mode) {
   if (mode === GAME_MODES.octopus) {
     return "OCTOS";
   }
+  if (mode === GAME_MODES.laserTag) {
+    return "LASER";
+  }
   return "SHIPS";
 }
 
 function menuControlHintRows() {
+  const laserTag = selectedMenuMode() === GAME_MODES.laserTag;
   if (mobileControlsActive()) {
-    return [
+    return laserTag ? [
+      { input: "LEFT JOYSTICK", action: "MOVE" },
+      { input: "RIGHT JOYSTICK", action: "LASER BLAST" }
+    ] : [
       { input: "LEFT JOYSTICK", action: "MOVE" },
       { input: "RIGHT JOYSTICK", action: "MINING RAY" },
       { input: "TAP", action: "HUCK ROCK" }
@@ -5826,7 +6158,11 @@ function menuControlHintRows() {
   }
 
   if (state.controller.connected) {
-    return [
+    return laserTag ? [
+      { input: "L STICK", action: "MOVE" },
+      { input: "R STICK", action: "AIM" },
+      { input: "R TRIGGER", action: "LASER BLAST" }
+    ] : [
       { input: "L STICK", action: "MOVE" },
       { input: "R STICK", action: "AIM" },
       { input: "R TRIGGER", action: "MINING RAY" },
@@ -5834,7 +6170,11 @@ function menuControlHintRows() {
     ];
   }
 
-  return [
+  return laserTag ? [
+    { input: "WASD", action: "MOVE" },
+    { input: "MOUSE", action: "AIM" },
+    { input: "CLICK", action: "LASER BLAST" }
+  ] : [
     { input: "WASD", action: "MOVE" },
     { input: "CLICK + HOLD", action: "MINING RAY" },
     { input: "SPACE", action: "HUCK ROCK" }
@@ -7705,7 +8045,7 @@ function currentTalkText() {
 }
 
 function activateUpgrades(options = {}) {
-  if (isInputBlocked() || state.room?.state !== "active") {
+  if (isInputBlocked() || state.room?.state !== "active" || activeGameMode() === GAME_MODES.laserTag) {
     return;
   }
 
@@ -9555,6 +9895,60 @@ function playHuckRockThunk(context) {
   strike.stop(start + 0.1);
 }
 
+function requestLaserTagShotSound(timeSeconds = null) {
+  const nowSeconds = Number.isFinite(timeSeconds) ? timeSeconds : performance.now() / 1000;
+  if (nowSeconds - audio.lastLaserShotAtSeconds < 0.12) {
+    return;
+  }
+  audio.lastLaserShotAtSeconds = nowSeconds;
+
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    context.resume()
+      .then(() => playLaserTagShotSound(context))
+      .catch(() => {});
+    return;
+  }
+
+  playLaserTagShotSound(context);
+}
+
+function playLaserTagShotSound(context) {
+  const start = context.currentTime + 0.003;
+  const carrier = context.createOscillator();
+  const harmonic = context.createOscillator();
+  const carrierGain = context.createGain();
+  const harmonicGain = context.createGain();
+
+  carrier.type = "square";
+  carrier.frequency.setValueAtTime(1550, start);
+  carrier.frequency.exponentialRampToValueAtTime(620, start + 0.075);
+  carrierGain.gain.setValueAtTime(0.0001, start);
+  carrierGain.gain.exponentialRampToValueAtTime(effectGain(0.006), start + 0.006);
+  carrierGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.105);
+
+  harmonic.type = "sine";
+  harmonic.frequency.setValueAtTime(2450, start);
+  harmonic.frequency.exponentialRampToValueAtTime(980, start + 0.06);
+  harmonicGain.gain.setValueAtTime(0.0001, start);
+  harmonicGain.gain.exponentialRampToValueAtTime(effectGain(0.002), start + 0.004);
+  harmonicGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.08);
+
+  carrier.connect(carrierGain);
+  harmonic.connect(harmonicGain);
+  carrierGain.connect(audioOutputNode(context));
+  harmonicGain.connect(audioOutputNode(context));
+  carrier.start(start);
+  carrier.stop(start + 0.11);
+  harmonic.start(start);
+  harmonic.stop(start + 0.085);
+}
+
 function updateLocalShipAudio(player, timeSeconds) {
   const context = audio.context;
   if (!audio.unlocked || !context || context.state !== "running") {
@@ -9563,14 +9957,24 @@ function updateLocalShipAudio(player, timeSeconds) {
 
   ensureShipAudio(context);
   const alive = player && player.alive !== false;
-  const inputLevel = alive && audioGameMode() !== GAME_MODES.bugs && audioGameMode() !== GAME_MODES.clouds && audioGameMode() !== GAME_MODES.octopus
+  const gameMode = audioGameMode();
+  const inputLevel = alive &&
+    gameMode !== GAME_MODES.bugs &&
+    gameMode !== GAME_MODES.clouds &&
+    gameMode !== GAME_MODES.octopus &&
+    gameMode !== GAME_MODES.laserTag
     ? playerThrustInputLevel(player)
     : 0;
-  const miningActive = state.room?.state !== "ended" && alive && playerMiningAudioActive(player);
+  const miningActive = gameMode !== GAME_MODES.laserTag &&
+    state.room?.state !== "ended" &&
+    alive &&
+    playerMiningAudioActive(player);
 
   updateEngineAudio(context, inputLevel, timeSeconds);
   updateMiningAudio(context, miningActive, timeSeconds);
-  updateFocusedHuckRockAudio(player, timeSeconds);
+  if (gameMode !== GAME_MODES.laserTag) {
+    updateFocusedHuckRockAudio(player, timeSeconds);
+  }
   flushPendingDamageClunk(timeSeconds);
 }
 
@@ -9924,7 +10328,9 @@ function readInput() {
 
   const move = readMoveVector();
   const huckRock = readHuckRockInput();
-  const huckRockTarget = huckRock
+  const mining = activeRoomMiningInputAllowed();
+  const laserTagShot = activeGameMode() === GAME_MODES.laserTag && mining;
+  const huckRockTarget = huckRock || laserTagShot
     ? huckRockTargetForPlayer(player)
     : null;
   if (huckRock && mobileHuckRockQueued()) {
@@ -9937,7 +10343,7 @@ function readInput() {
     moveX: move.x,
     moveY: move.y,
     aimAngle,
-    mining: activeRoomMiningInputAllowed(),
+    mining,
     huckRock,
     huckRockTargetX: huckRockTarget?.x ?? null,
     huckRockTargetY: huckRockTarget?.y ?? null,
@@ -9947,6 +10353,7 @@ function readInput() {
 }
 
 function readHuckRockInput() {
+  const laserTag = audioGameMode() === GAME_MODES.laserTag;
   const huckRockActive = huckRockPhysicalInputActive();
   if (!huckRockActive) {
     state.huckRockNeedRockFlashArmed = true;
@@ -9971,7 +10378,7 @@ function readHuckRockInput() {
   }
 
   state.huckRockNeedRockFlashArmed = false;
-  if (now >= state.nextHuckRockThunkAtSeconds) {
+  if (!laserTag && now >= state.nextHuckRockThunkAtSeconds) {
     requestHuckRockThunk();
     state.nextHuckRockThunkAtSeconds = now + ENGINE.huckRock.fireIntervalSeconds;
   }
@@ -9986,12 +10393,13 @@ function huckRockPhysicalInputActive() {
 }
 
 function huckRockInputAllowed() {
+  const laserTag = audioGameMode() === GAME_MODES.laserTag;
   const roomState = state.room?.state;
   const controllerHuck = state.controller.connected && state.controller.huckRock;
   const mobileHuck = mobileHuckRockQueued();
   if (
     !huckRockPhysicalInputActive() ||
-    (!controllerHuck && !mobileHuck && !hasMousePointer()) ||
+    (!laserTag && !controllerHuck && !mobileHuck && !hasMousePointer()) ||
     (roomState !== "waiting" && roomState !== "active") ||
     state.upgrades.active ||
     state.build.active
@@ -10022,6 +10430,9 @@ function huckRockBlockedForRockCost() {
 }
 
 function huckRockCostsRockInCurrentRoom() {
+  if (audioGameMode() === GAME_MODES.laserTag) {
+    return false;
+  }
   return state.room?.state === "waiting" || state.room?.state === "active";
 }
 
@@ -10564,7 +10975,12 @@ function updatePrediction(timeSeconds) {
     predicted.miningHoldSeconds = 0;
   }
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
-  predicted.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.octopus ? false : canThrust;
+  predicted.thrusting = gameMode === GAME_MODES.bugs ||
+    gameMode === GAME_MODES.clouds ||
+    gameMode === GAME_MODES.octopus ||
+    gameMode === GAME_MODES.laserTag
+    ? false
+    : canThrust;
 
   applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds);
   predicted.x += predicted.vx * dtSeconds;
@@ -10768,6 +11184,11 @@ function predictedMiningRayPlayerHit(attacker, start, direction, maxDistance) {
 }
 
 function applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds) {
+  if (activeGameMode() === GAME_MODES.laserTag) {
+    applyPredictedLaserTagBlast(predicted, dtSeconds, timeSeconds);
+    return;
+  }
+
   state.prediction.huckRockCooldownSeconds = Math.max(
     0,
     state.prediction.huckRockCooldownSeconds - dtSeconds
@@ -10787,6 +11208,53 @@ function applyPredictedHuckRockRecoil(predicted, dtSeconds, timeSeconds) {
   applyHuckRockRecoil(predicted, direction);
   predicted.huckRockEngineCutoutSeconds = 0;
   state.prediction.huckRockCooldownSeconds = ENGINE.huckRock.fireIntervalSeconds;
+}
+
+function applyPredictedLaserTagBlast(player, dtSeconds, timeSeconds) {
+  state.prediction.huckRockCooldownSeconds = Math.max(
+    0,
+    state.prediction.huckRockCooldownSeconds - dtSeconds
+  );
+
+  if (!laserTagPredictedFireAllowed() || state.prediction.huckRockCooldownSeconds > 0) {
+    return;
+  }
+
+  const angle = laserTagPredictedFireAngle(player);
+  spawnPredictedLaserTagBlast(player, angle, timeSeconds);
+  state.prediction.huckRockCooldownSeconds = ENGINE.laserTag.fireIntervalSeconds;
+}
+
+function laserTagPredictedFireAllowed() {
+  if (
+    state.chat.active ||
+    state.upgrades.active ||
+    state.build.active ||
+    (state.room?.state !== "waiting" && state.room?.state !== "active")
+  ) {
+    return false;
+  }
+
+  if (state.room?.state === "active" && !localPlayerCanUseCombat()) {
+    return false;
+  }
+
+  return (activeRoomMiningInputAllowed() && physicalMiningInputActive()) ||
+    huckRockInputAllowed();
+}
+
+function laserTagPredictedFireAngle(player) {
+  if (huckRockPhysicalInputActive()) {
+    const target = huckRockTargetForPlayer(player);
+    if (target && Number.isFinite(target.x) && Number.isFinite(target.y)) {
+      return Math.atan2(target.y - player.y, target.x - player.x);
+    }
+  }
+  return player.aimAngle ?? player.angle;
+}
+
+function spawnPredictedLaserTagBlast(player, angle, timeSeconds) {
+  requestLaserTagShotSound(timeSeconds);
 }
 
 function spawnPredictedHuckRock(player, direction, timeSeconds) {
@@ -10826,18 +11294,35 @@ function renderSnapshot(timeSeconds) {
 
   updateEntitySmoothing(timeSeconds);
   updatePredictedHuckRocks(timeSeconds);
-  const sourceEntities = Array.isArray(state.snapshot.entities) ? state.snapshot.entities : [];
+  const sourceEntities = snapshotRenderableEntities(state.snapshot);
   const entities = [];
+  const renderedEntityIds = new Set();
   for (const entity of sourceEntities) {
+    if (
+      entity?.type === "laserBlast" &&
+      state.laserTagShotIds.has(entity.id) &&
+      !state.entitySmoothing.byId.has(entity.id)
+    ) {
+      continue;
+    }
     const tracked = state.entitySmoothing.byId.get(entity.id);
     if (!tracked) {
       entities.push(entity);
+      renderedEntityIds.add(entity.id);
       continue;
     }
 
     if (!tracked.hidden) {
       entities.push(renderEntityForFrame(entity, tracked.render));
+      renderedEntityIds.add(entity.id);
     }
+  }
+
+  for (const [id, tracked] of state.entitySmoothing.byId.entries()) {
+    if (renderedEntityIds.has(id) || tracked.hidden || tracked.type !== "laserBlast") {
+      continue;
+    }
+    entities.push(renderEntityForFrame(tracked.target || tracked.render, tracked.render));
   }
 
   for (const rock of state.prediction.huckRocks) {
@@ -10864,9 +11349,13 @@ function updatePredictedHuckRocks(timeSeconds) {
     rock.lastTimeSeconds = timeSeconds;
     if (dtSeconds > 0) {
       advanceRenderEntity(rock, dtSeconds);
-      const tracked = { render: rock, hidden: false };
-      resolveRenderHuckRockTerrain(tracked);
-      rock.hidden = tracked.hidden;
+      if (rock.type === "laserBlast") {
+        rock.hidden = (rock.ageSeconds || 0) > (rock.beamLerpSeconds || laserTagBeamDurationSeconds());
+      } else {
+        const tracked = { render: rock, hidden: false };
+        resolveRenderHuckRockTerrain(tracked);
+        rock.hidden = tracked.hidden;
+      }
     }
 
     if (!rock.hidden) {
@@ -10878,10 +11367,12 @@ function updatePredictedHuckRocks(timeSeconds) {
 }
 
 function takePredictedHuckRockForEntity(entity, timeSeconds) {
+  const localPlayer = localPlayerFromSnapshot();
+  const localOwner = localPlayer?.id || state.playerId;
   if (
     entity?.type !== "huckRock" ||
     entity.fragment ||
-    entity.ownerId !== state.playerId ||
+    (entity.ownerId !== state.playerId && entity.ownerId !== localOwner) ||
     state.prediction.huckRocks.length === 0
   ) {
     return null;
@@ -10891,6 +11382,12 @@ function takePredictedHuckRockForEntity(entity, timeSeconds) {
   let bestDistance = Number.POSITIVE_INFINITY;
   for (let index = 0; index < state.prediction.huckRocks.length; index += 1) {
     const rock = state.prediction.huckRocks[index];
+    if (rock.type !== entity.type) {
+      continue;
+    }
+    if (entity.ownerId !== rock.ownerId) {
+      continue;
+    }
     const ageDelta = Math.abs((Number(entity.ageSeconds) || 0) - (rock.ageSeconds || 0));
     if (rock.hidden || timeSeconds - rock.createdAtSeconds > 0.9 || ageDelta > 0.45) {
       continue;
@@ -10903,11 +11400,25 @@ function takePredictedHuckRockForEntity(entity, timeSeconds) {
     }
   }
 
-  if (bestIndex < 0 || bestDistance > 96) {
+  const maxMatchDistance = 96;
+  if (bestIndex < 0 || bestDistance > maxMatchDistance) {
     return null;
   }
 
   const [rock] = state.prediction.huckRocks.splice(bestIndex, 1);
+  if (entity.type === "laserBlast") {
+    return cloneRenderEntity({
+      ...entity,
+      x: rock.x,
+      y: rock.y,
+      previousX: rock.previousX,
+      previousY: rock.previousY,
+      vx: rock.vx,
+      vy: rock.vy,
+      ageSeconds: rock.ageSeconds
+    });
+  }
+
   return cloneRenderEntity({
     ...entity,
     x: rock.x,
@@ -10929,11 +11440,19 @@ function clearPredictedHuckRocks() {
 }
 
 function recordEntitySnapshot(snapshot, timeSeconds) {
-  const entities = Array.isArray(snapshot.entities) ? snapshot.entities : [];
+  const entities = snapshotRenderableEntities(snapshot);
   const seen = new Set();
 
   for (const entity of entities) {
     if (!entity?.id || !shouldSmoothEntity(entity)) {
+      continue;
+    }
+
+    if (
+      entity.type === "laserBlast" &&
+      state.laserTagShotIds.has(entity.id) &&
+      !state.entitySmoothing.byId.has(entity.id)
+    ) {
       continue;
     }
 
@@ -10950,8 +11469,18 @@ function recordEntitySnapshot(snapshot, timeSeconds) {
         target,
         lastRenderTimeSeconds: timeSeconds,
         targetReceivedAtSeconds: timeSeconds,
+        laserBornAtSeconds: entity.type === "laserBlast"
+          ? timeSeconds
+          : null,
         hidden: false
       });
+      if (entity.type === "laserBlast") {
+        rememberLaserTagShotId(entity.id);
+      }
+      continue;
+    }
+
+    if (tracked.type === "laserBlast") {
       continue;
     }
 
@@ -10969,8 +11498,45 @@ function recordEntitySnapshot(snapshot, timeSeconds) {
 
   for (const id of state.entitySmoothing.byId.keys()) {
     if (!seen.has(id)) {
+      const tracked = state.entitySmoothing.byId.get(id);
+      if (tracked?.type === "laserBlast") {
+        const durationSeconds = Number.isFinite(tracked.target?.beamLerpSeconds)
+          ? tracked.target.beamLerpSeconds
+          : laserTagBeamDurationSeconds();
+        const bornAtSeconds = Number.isFinite(tracked.laserBornAtSeconds)
+          ? tracked.laserBornAtSeconds
+          : timeSeconds;
+        if (timeSeconds - bornAtSeconds <= durationSeconds) {
+          continue;
+        }
+      }
       state.entitySmoothing.byId.delete(id);
     }
+  }
+}
+
+function snapshotRenderableEntities(snapshot) {
+  const entities = Array.isArray(snapshot?.entities) ? snapshot.entities.slice() : [];
+  const shots = Array.isArray(snapshot?.laserTag?.shots) ? snapshot.laserTag.shots : [];
+  for (const shot of shots) {
+    if (!shot?.id) {
+      continue;
+    }
+    entities.push({
+      ...shot,
+      type: "laserBlast"
+    });
+  }
+  return entities;
+}
+
+function rememberLaserTagShotId(id) {
+  if (!id) {
+    return;
+  }
+  state.laserTagShotIds.add(id);
+  if (state.laserTagShotIds.size > 128) {
+    state.laserTagShotIds = new Set(Array.from(state.laserTagShotIds).slice(-64));
   }
 }
 
@@ -10978,6 +11544,15 @@ function updateEntitySmoothing(timeSeconds) {
   for (const tracked of state.entitySmoothing.byId.values()) {
     const dtSeconds = clamp(timeSeconds - tracked.lastRenderTimeSeconds, 0, 1 / 15);
     tracked.lastRenderTimeSeconds = timeSeconds;
+    if (tracked.render.type === "laserBlast") {
+      const render = updateLaserTagBlastRender(tracked, timeSeconds, dtSeconds);
+      tracked.hidden = !render;
+      if (render) {
+        tracked.render = render;
+      }
+      continue;
+    }
+
     if (dtSeconds > 0) {
       advanceRenderEntity(tracked.render, dtSeconds);
     }
@@ -10988,6 +11563,73 @@ function updateEntitySmoothing(timeSeconds) {
       resolveRenderHuckRockTerrain(tracked);
     }
   }
+}
+
+function updateLaserTagBlastRender(tracked, timeSeconds, dtSeconds) {
+  const target = tracked.target || tracked.render;
+  const render = cloneRenderEntity(tracked.render || target);
+  const bornAtSeconds = Number.isFinite(tracked.laserBornAtSeconds)
+    ? tracked.laserBornAtSeconds
+    : timeSeconds - Math.max(0, Number(target.ageSeconds) || 0);
+  const durationSeconds = Number.isFinite(target.beamLerpSeconds)
+    ? target.beamLerpSeconds
+    : laserTagBeamDurationSeconds();
+  const rawAgeSeconds = Math.max(0, timeSeconds - bornAtSeconds);
+  if (rawAgeSeconds > durationSeconds) {
+    return null;
+  }
+  const angle = Number.isFinite(target.angle) ? target.angle : Math.atan2(target.vy || 0, target.vx || 0);
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const spawnX = Number.isFinite(target.spawnX) ? target.spawnX : render.spawnX;
+  const spawnY = Number.isFinite(target.spawnY) ? target.spawnY : render.spawnY;
+  const maxDistance = Number.isFinite(target.maxDistance) ? target.maxDistance : laserTagBlastMaxRange();
+  const beamEndDistance = Number.isFinite(target.retractFromDistance)
+    ? clamp(target.retractFromDistance, 0, maxDistance)
+    : maxDistance;
+  const targetDistance = laserTagTargetDistance(target, spawnX, spawnY, direction, maxDistance);
+  const t = clamp(rawAgeSeconds / durationSeconds, 0, 1);
+  const visibleStartDistance = beamEndDistance * t;
+
+  render.x = spawnX + direction.x * beamEndDistance;
+  render.y = spawnY + direction.y * beamEndDistance;
+  render.previousX = spawnX + direction.x * visibleStartDistance;
+  render.previousY = spawnY + direction.y * visibleStartDistance;
+  render.ageSeconds = rawAgeSeconds;
+  render.beamLerpSeconds = durationSeconds;
+  render.maxDistance = maxDistance;
+  render.targetDistance = targetDistance;
+  render.retractFromDistance = beamEndDistance;
+  render.retractToDistance = beamEndDistance;
+  render.visibleDistance = beamEndDistance;
+  render.visibleStartDistance = visibleStartDistance;
+  render.spawnX = spawnX;
+  render.spawnY = spawnY;
+  void dtSeconds;
+  return render;
+}
+
+function laserTagTargetDistance(entity, spawnX, spawnY, direction, maxDistance) {
+  if (Number.isFinite(entity?.targetDistance)) {
+    return clamp(entity.targetDistance, 0, maxDistance);
+  }
+  if (Number.isFinite(entity?.hitX) && Number.isFinite(entity?.hitY)) {
+    return clamp(
+      (entity.hitX - spawnX) * direction.x + (entity.hitY - spawnY) * direction.y,
+      0,
+      maxDistance
+    );
+  }
+  if (Number.isFinite(entity?.x) && Number.isFinite(entity?.y)) {
+    return clamp(
+      (entity.x - spawnX) * direction.x + (entity.y - spawnY) * direction.y,
+      0,
+      maxDistance
+    );
+  }
+  return maxDistance;
 }
 
 function advanceRenderEntity(entity, dtSeconds) {
@@ -11167,13 +11809,24 @@ function renderEntityForFrame(authoritative, render) {
     spinX: render.spinX,
     spinY: render.spinY,
     spinZ: render.spinZ,
-    ageSeconds: render.ageSeconds
+    ageSeconds: render.ageSeconds,
+    visibleDistance: render.visibleDistance,
+    visibleStartDistance: render.visibleStartDistance,
+    targetDistance: render.targetDistance,
+    retractFromDistance: render.retractFromDistance,
+    retractToDistance: render.retractToDistance,
+    maxDistance: render.maxDistance,
+    beamLerpSeconds: render.beamLerpSeconds
   };
 }
 
 function shouldSmoothEntity(entity) {
   if (!Number.isFinite(entity.x) || !Number.isFinite(entity.y)) {
     return false;
+  }
+
+  if (entity.type === "laserBlast") {
+    return true;
   }
 
   return Number.isFinite(entity.vx) ||
@@ -11210,6 +11863,7 @@ function frameAlpha(perTickAlpha, dtSeconds) {
 
 function resetEntitySmoothing() {
   state.entitySmoothing.byId.clear();
+  state.laserTagShotIds.clear();
 }
 
 function clearRendererParticles() {
@@ -11544,6 +12198,36 @@ function recordEliminations(snapshot, timeSeconds) {
   }
 }
 
+function recordLaserTagEvents(snapshot, timeSeconds) {
+  if (snapshot?.mode !== GAME_MODES.laserTag || !snapshot.laserTag?.events?.length) {
+    return;
+  }
+
+  const localTeam = (snapshot.players || []).find((player) => player.id === state.playerId)?.team || "";
+  for (const event of snapshot.laserTag.events) {
+    const id = String(event.id || `${event.tick}:${event.text}`);
+    if (state.laserTagEventIds.has(id)) {
+      continue;
+    }
+    if (event.team && event.team !== localTeam) {
+      continue;
+    }
+
+    state.laserTagEventIds.add(id);
+    state.eliminationNotices.push({
+      id,
+      text: String(event.text || "").toUpperCase(),
+      createdAt: timeSeconds,
+      expiresAt: timeSeconds + ELIMINATION_NOTICE_SECONDS
+    });
+  }
+
+  state.eliminationNotices = state.eliminationNotices.slice(-ELIMINATION_NOTICE_MAX);
+  if (state.laserTagEventIds.size > 64) {
+    state.laserTagEventIds = new Set(Array.from(state.laserTagEventIds).slice(-32));
+  }
+}
+
 function handleRoomEndAudio(room, snapshot, timeSeconds = performance.now() / 1000) {
   if (room?.state !== "ended") {
     return;
@@ -11562,6 +12246,15 @@ function handleRoomEndAudio(room, snapshot, timeSeconds = performance.now() / 10
   }
 
   const localPlayer = localEndAudioPlayer(snapshot);
+  if (snapshot?.mode === GAME_MODES.laserTag) {
+    const winnerTeam = snapshot.laserTag?.winnerTeam || null;
+    if (localPlayer && winnerTeam && localPlayer.team !== winnerTeam) {
+      return;
+    }
+    requestEndFanfare(key);
+    return;
+  }
+
   if (localPlayer && localPlayer.alive !== false && room.winnerId && room.winnerId !== localPlayer.id) {
     return;
   }
@@ -12554,7 +13247,8 @@ function localPlayerFromSnapshot() {
 }
 
 function roomAllowsBuilding() {
-  return state.room?.state === "active" || state.room?.state === "waiting";
+  return (state.room?.state === "active" || state.room?.state === "waiting") &&
+    activeGameMode() !== GAME_MODES.laserTag;
 }
 
 function audioPlayerForRender(snapshot, cameraPlayerId) {

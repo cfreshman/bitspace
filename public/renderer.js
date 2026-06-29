@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, isWaterThemedGameMode, miningRayLengthForGameMode } from "/shared/constants.js";
+import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, isWaterThemedGameMode, laserTagBeamDurationSeconds, laserTagBlastMaxRange, miningRayLengthForGameMode } from "/shared/constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin } from "/shared/build.js";
 import {
   ASTEROID_TILE,
@@ -91,6 +91,22 @@ const BUG_MODE_COLORS = Object.freeze({
   bugRay: "#ff4cff",
   health: "#ff2f2f"
 });
+const LASER_TAG_MODE_COLORS = Object.freeze({
+  foreground: "#e8f4ff",
+  background: "#16172c",
+  backgroundDark: "#101124",
+  backing: "#050510",
+  rockFill: "#202248",
+  rockLine: "#6d75ff",
+  wallFill: "#202248",
+  wallLine: "#6d75ff",
+  bodyOuterLine: "#3238a7",
+  ore: "#e8f4ff",
+  diamond: "#a4ceff",
+  red: "#ff314f",
+  blue: "#3a8cff",
+  health: "#ffffff"
+});
 const CLOUD_MODE_COLORS = Object.freeze({
   foreground: "#080808",
   background: "#f8f8f8",
@@ -132,6 +148,19 @@ const CLOUD_QUADCOPTER_FRAME_RADIUS = 2;
 const CLOUD_QUADCOPTER_PITCH_SCALE = 0.16;
 const CLOUD_QUADCOPTER_ROTOR_RADIUS = 3;
 const CLOUD_QUADCOPTER_VISUAL_RADIUS_BONUS = 1;
+const LASER_TAG_CARPET_URL = "/backgrounds/carpet-fixed.png";
+const LASER_TAG_CARPET_SOURCE_SCALE = 1.5;
+const LASER_TAG_CARPET_ROTATION = -Math.PI / 12;
+const LASER_TAG_CARPET_BRIGHTNESS = 0.42;
+const LASER_TAG_CARPET_CONTRAST = 0.9;
+const LASER_TAG_CARPET_SATURATION = 0.85;
+const LASER_TAG_CARPET_UV_TINT_COLOR = "#3923ff";
+const LASER_TAG_CARPET_UV_TINT_AMOUNT = 0.2;
+const LASER_TAG_SHADOW_MASK_COLOR = "#030201";
+const LASER_TAG_SHADOW_TINT_COLOR = "#0d0b10";
+const LASER_TAG_SHADOW_ALPHA = 0.7;
+const LASER_TAG_PLAYER_BODY_FILL = "#060029";
+const LASER_TAG_PLAYER_BODY_STROKE = "#000000";
 const BUG_HUCK_ROCK_WEB_LIGHT = "#ffffff";
 const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
 const SUB_SHADOW_MASK_COLOR = "#010203";
@@ -334,6 +363,13 @@ function colorsForGameMode(colors, gameMode, params = {}) {
     return {
       ...colors,
       ...BUG_MODE_COLORS
+    };
+  }
+
+  if (gameMode === GAME_MODES.laserTag) {
+    return {
+      ...colors,
+      ...LASER_TAG_MODE_COLORS
     };
   }
 
@@ -1370,6 +1406,22 @@ export function createRenderer(canvas, minimapCanvas = null) {
           baseFrameColors.background
         ]);
       }
+      if (gameMode === GAME_MODES.laserTag && terrainSurface && sharedRenderState.camera) {
+        drawLaserTagCarpetCompositeBase(
+          terrainSurface,
+          sharedRenderState.camera,
+          frameColors
+        );
+        surface.restoreColorsFromSurface(terrainSurface, [
+          frameColors.background,
+          baseFrameColors.background
+        ]);
+        surface.restoreColorFromSurface(terrainSurface, null, {
+          keyColor: LASER_TAG_SHADOW_MASK_COLOR,
+          color: LASER_TAG_SHADOW_TINT_COLOR,
+          alpha: LASER_TAG_SHADOW_ALPHA
+        });
+      }
       const worldBuckets = worldFrameOptions.perfBuckets || null;
       overlaySurface?.clear?.();
       const overlayFrameOptions = {
@@ -2387,6 +2439,102 @@ function createPixelSurface(canvasContext, width, height) {
         }
       }
     },
+    drawWorldTextureLayer(texture, textureWidth, textureHeight, camera = {}, options = {}) {
+      if (!texture || textureWidth <= 0 || textureHeight <= 0) {
+        return;
+      }
+
+      const cameraX = Number(camera?.x || 0);
+      const cameraY = Number(camera?.y || 0);
+      const sourceScale = Math.max(0.001, Number(options.sourceScale || 1));
+      const invScale = 1 / sourceScale;
+      const rotation = Number(options.rotation || 0);
+      const cos = Math.cos(rotation);
+      const sin = Math.sin(rotation);
+      const stepU = invScale * cos;
+      const stepV = invScale * sin;
+
+      function sampleColorAt(screenX, screenY) {
+        const worldX = (cameraX + screenX) * invScale;
+        const worldY = (cameraY + screenY) * invScale;
+        let textureX = Math.floor(worldX * cos - worldY * sin) % textureWidth;
+        let textureY = Math.floor(worldX * sin + worldY * cos) % textureHeight;
+        if (textureX < 0) textureX += textureWidth;
+        if (textureY < 0) textureY += textureHeight;
+        return texture[textureY * textureWidth + textureX];
+      }
+
+      function drawProjectedRange(py, start, end) {
+        const worldY = (cameraY + py) * invScale;
+        const startWorldX = (cameraX + start) * invScale;
+        let textureU = startWorldX * cos - worldY * sin;
+        let textureV = startWorldX * sin + worldY * cos;
+        for (let px = start; px < end; px += 1) {
+          let textureX = Math.floor(textureU) % textureWidth;
+          let textureY = Math.floor(textureV) % textureHeight;
+          if (textureX < 0) textureX += textureWidth;
+          if (textureY < 0) textureY += textureHeight;
+          writeMappedProjectedPoint(
+            activeLens,
+            lensProjectionIndex(activeLens, px, py),
+            texture[textureY * textureWidth + textureX]
+          );
+          textureU += stepU;
+          textureV += stepV;
+        }
+      }
+
+      if (activeLens) {
+        const sourcePadding = activeLens.sourcePadding || 0;
+        const x0 = -sourcePadding;
+        const y0 = -sourcePadding;
+        const x1 = width + sourcePadding;
+        const y1 = height + sourcePadding;
+        for (let py = y0; py < y1; py += 1) {
+          if (forWorldMaskRanges(py, x0, x1, (rangeStart, rangeEnd) => {
+            drawProjectedRange(py, rangeStart, rangeEnd);
+          })) {
+            continue;
+          }
+
+          for (let px = x0; px < x1; px += 1) {
+            if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
+              continue;
+            }
+            writeMappedProjectedPoint(activeLens, lensProjectionIndex(activeLens, px, py), sampleColorAt(px, py));
+          }
+        }
+        return;
+      }
+
+      const x0 = 0;
+      const y0 = 0;
+      const x1 = width;
+      const y1 = height;
+      for (let py = y0; py < y1; py += 1) {
+        if (activeClip && (activeClip.starts[py] >= activeClip.ends[py])) {
+          continue;
+        }
+        const clipStart = activeClip ? activeClip.starts[py] : x0;
+        const clipEnd = activeClip ? activeClip.ends[py] : x1;
+        if (forWorldMaskRanges(py, clipStart, clipEnd, (rangeStart, rangeEnd) => {
+          const row = py * width;
+          for (let px = rangeStart; px < rangeEnd; px += 1) {
+            pixels[row + px] = sampleColorAt(px, py);
+          }
+        })) {
+          continue;
+        }
+
+        const row = py * width;
+        for (let px = clipStart; px < clipEnd; px += 1) {
+          if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
+            continue;
+          }
+          pixels[row + px] = sampleColorAt(px, py);
+        }
+      }
+    },
     drawRgbaLayer(rgba, layerWidth, layerHeight, options = {}) {
       if (!rgba || layerWidth !== width || layerHeight !== height) {
         return;
@@ -2581,6 +2729,15 @@ function drawCloudTerrainCompositeBase(ctx, camera, colors, timeSeconds = 0) {
   ctx.clear();
   beginWorldViewport(ctx, colors, false, false, true);
   drawCloudGroundBackground(ctx, camera, colors, timeSeconds);
+  endWorldViewport(ctx);
+}
+
+function drawLaserTagCarpetCompositeBase(ctx, camera, colors) {
+  ctx.clear();
+  beginWorldViewport(ctx, colors, false, false, true);
+  drawLaserTagCarpetBackground(ctx, camera, {
+    sourcePadding: worldLensSourcePadding(ctx.width, ctx.height)
+  }, colors);
   endWorldViewport(ctx);
 }
 
@@ -5106,7 +5263,22 @@ function packColor(hex) {
   const red = Number.parseInt(normalized.slice(0, 2), 16);
   const green = Number.parseInt(normalized.slice(2, 4), 16);
   const blue = Number.parseInt(normalized.slice(4, 6), 16);
-  return (255 << 24) | (blue << 16) | (green << 8) | red;
+  return packRgb(red, green, blue);
+}
+
+function packRgb(red, green, blue) {
+  return (255 << 24) |
+    (clamp(Math.round(blue), 0, 255) << 16) |
+    (clamp(Math.round(green), 0, 255) << 8) |
+    clamp(Math.round(red), 0, 255);
+}
+
+function unpackCssColor(packed) {
+  const color = Number(packed || 0) >>> 0;
+  const red = color & 0xff;
+  const green = (color >>> 8) & 0xff;
+  const blue = (color >>> 16) & 0xff;
+  return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
 }
 
 function rgbFloatsForHex(hex) {
@@ -5308,8 +5480,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     renderMask = createRenderMaskForGameMode(options.gameMode, ctx, options.asteroid, cameraPlayer, camera, subLightHeading);
     const visualVisibility = litVisibility || visibility;
     worldRenderPlayers = visualVisibility
-      ? renderPlayers.filter((player) => !player.hidden && playerTouchesAsteroidVisibility(visualVisibility, player))
-      : renderPlayers.filter((player) => !player.hidden);
+      ? renderPlayers.filter((player) => shouldDrawWorldPlayer(player, options) && playerTouchesAsteroidVisibility(visualVisibility, player))
+      : renderPlayers.filter((player) => shouldDrawWorldPlayer(player, options));
     localShipDrawsAfterVisibility = Boolean(visualVisibility && localPlayer?.alive && !localPlayer.hidden);
 
     if (sharedState) {
@@ -5454,11 +5626,11 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           emitTireTrackParticles(particleState, renderPlayer, options.dtSeconds);
         }
 
-        if (renderPlayer.thrusting) {
+        if (options.gameMode !== GAME_MODES.laserTag && renderPlayer.thrusting) {
           emitThrusterParticles(particleState, renderPlayer, options.dtSeconds, options.gameMode, camera);
         }
 
-        if (renderPlayer.mining && miningRayHasHit(renderPlayer.miningRay)) {
+        if (options.gameMode !== GAME_MODES.laserTag && renderPlayer.mining && miningRayHasHit(renderPlayer.miningRay)) {
           emitMiningParticles(particleState, renderPlayer, options.dtSeconds);
         }
       }
@@ -5488,6 +5660,10 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     });
 
     measureBucket("particlesMs", () => {
+      if (options.gameMode === GAME_MODES.laserTag) {
+        return;
+      }
+
       if (isWaterThemedGameMode(options.gameMode)) {
         drawWithoutWorldMask(ctx, () => {
           drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
@@ -5513,6 +5689,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       for (const renderPlayer of worldRenderPlayers) {
         if (
           options.gameMode !== GAME_MODES.cars &&
+          options.gameMode !== GAME_MODES.laserTag &&
           !isWaterThemedGameMode(options.gameMode) &&
           renderPlayer.mining
         ) {
@@ -5562,13 +5739,15 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
       }));
     }
 
-    measureBucket("particlesMs", () => drawWithoutWorldMask(ctx, () => {
-      drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
-    }));
+    if (options.gameMode !== GAME_MODES.laserTag) {
+      measureBucket("particlesMs", () => drawWithoutWorldMask(ctx, () => {
+        drawParticles(ctx, particleState.miningParticles, camera, colors, options.timeSeconds);
+      }));
+    }
 
     measureBucket("raysMs", () => {
       for (const renderPlayer of worldRenderPlayers) {
-        if (renderPlayer.mining) {
+        if (options.gameMode !== GAME_MODES.laserTag && renderPlayer.mining) {
           drawWithoutWorldMask(ctx, () => {
             drawMiningRayHitpoints(ctx, renderPlayer, camera, options.asteroid, options.timeSeconds ?? snapshot.tick / 60, colors, options.gameMode);
           });
@@ -5600,19 +5779,26 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         drawSpectatorHud(ctx, options, localPlayer, cameraPlayer, colors, textRenderer, snapshot);
       } else {
         const playersLeft = (snapshot.players || []).filter((player) => player.alive === true).length;
-        const playerHudPanel = drawPlayerHud(
-          ctx,
-          localPlayer,
-          colors,
-          textRenderer,
-          options.hudFlash,
-          options.timeSeconds,
-          playersLeft,
-          mobilePlayerHudLayout(ctx, options)
-        );
+	        const playerHudPanel = drawPlayerHud(
+	          ctx,
+	          localPlayer,
+	          colors,
+	          textRenderer,
+	          options.hudFlash,
+	          options.timeSeconds,
+	          playersLeft,
+	          {
+	            ...mobilePlayerHudLayout(ctx, options),
+	            gameMode: options.gameMode,
+	            laserTag: snapshot.laserTag,
+	            tick: snapshot.tick
+	          }
+	        );
         const controlBasePanel = drawCarsEnemyHitHud(ctx, localPlayer, snapshot, options, colors, textRenderer, playerHudPanel) || playerHudPanel;
-        drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
-        drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
+        if (options.gameMode !== GAME_MODES.laserTag) {
+          drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
+          drawBuildHud(ctx, localPlayer, options.build, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
+        }
         drawMapHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, options.mobileActive, options.playerMapFeatureEnabled, options.settings, controlBasePanel);
         drawMobileLeaveHud(ctx, localPlayer, options, colors, textRenderer);
       }
@@ -5800,7 +5986,6 @@ function drawInsideSpanRows(ctx, spans, minX, maxX, minY, maxY) {
 }
 
 function drawVisibleBackground(ctx, asteroid, camera, visibility, colors, gameMode = GAME_MODES.bitspace, timeSeconds = 0) {
-  void gameMode;
   void timeSeconds;
   ctx.fillStyle = colors.background;
   if (!visibility || !asteroid?.storm) {
@@ -5834,6 +6019,140 @@ function drawVisibleBackground(ctx, asteroid, camera, visibility, colors, gameMo
         );
         runStartTileX = null;
       }
+    }
+  }
+}
+
+const laserTagCarpetTexture = {
+  state: "idle",
+  width: 0,
+  height: 0,
+  pixels: null
+};
+
+function laserTagCarpetPixels() {
+  if (laserTagCarpetTexture.state === "ready" || laserTagCarpetTexture.state === "failed") {
+    return laserTagCarpetTexture;
+  }
+  if (laserTagCarpetTexture.state === "loading" || typeof Image === "undefined" || typeof document === "undefined") {
+    return laserTagCarpetTexture;
+  }
+
+  laserTagCarpetTexture.state = "loading";
+  const image = new Image();
+  image.onload = () => {
+    const width = Math.max(1, image.naturalWidth || image.width || 1);
+    const height = Math.max(1, image.naturalHeight || image.height || 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const imageContext = canvas.getContext("2d", { alpha: false });
+    if (!imageContext) {
+      laserTagCarpetTexture.state = "failed";
+      return;
+    }
+
+    imageContext.imageSmoothingEnabled = true;
+    imageContext.imageSmoothingQuality = "high";
+    imageContext.drawImage(image, 0, 0, width, height);
+    laserTagCarpetTexture.width = width;
+    laserTagCarpetTexture.height = height;
+    laserTagCarpetTexture.pixels = laserTagCarpetPixelSamples(imageContext.getImageData(0, 0, width, height).data, {
+      brightness: LASER_TAG_CARPET_BRIGHTNESS,
+      contrast: LASER_TAG_CARPET_CONTRAST,
+      saturation: LASER_TAG_CARPET_SATURATION,
+      uvTintColor: LASER_TAG_CARPET_UV_TINT_COLOR,
+      uvTintAmount: LASER_TAG_CARPET_UV_TINT_AMOUNT
+    });
+    laserTagCarpetTexture.state = "ready";
+  };
+  image.onerror = () => {
+    laserTagCarpetTexture.state = "failed";
+  };
+  image.src = LASER_TAG_CARPET_URL;
+  return laserTagCarpetTexture;
+}
+
+function laserTagCarpetPixelSamples(imageData, processing = null) {
+  const samples = new Uint32Array(Math.floor(imageData.length / 4));
+  for (let index = 0, sampleIndex = 0; index < imageData.length; index += 4, sampleIndex += 1) {
+    const processed = processLaserTagCarpetColor(
+      imageData[index],
+      imageData[index + 1],
+      imageData[index + 2],
+      processing
+    );
+    samples[sampleIndex] = packRgb(processed.red, processed.green, processed.blue);
+  }
+  return samples;
+}
+
+function processLaserTagCarpetColor(red, green, blue, processing = null) {
+  if (!processing) {
+    return { red, green, blue };
+  }
+
+  const saturation = Number(processing.saturation ?? 1);
+  const contrast = Number(processing.contrast ?? 1);
+  const brightness = Number(processing.brightness ?? 1);
+  const luma = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+  let nextRed = luma + (red - luma) * saturation;
+  let nextGreen = luma + (green - luma) * saturation;
+  let nextBlue = luma + (blue - luma) * saturation;
+  nextRed = 128 + (nextRed - 128) * contrast;
+  nextGreen = 128 + (nextGreen - 128) * contrast;
+  nextBlue = 128 + (nextBlue - 128) * contrast;
+  nextRed *= brightness;
+  nextGreen *= brightness;
+  nextBlue *= brightness;
+  const tintAmount = clamp(Number(processing.uvTintAmount ?? 0), 0, 1);
+  if (tintAmount > 0) {
+    const tint = String(processing.uvTintColor || "#000000").replace("#", "").padEnd(6, "0");
+    nextRed = lerp(nextRed, Number.parseInt(tint.slice(0, 2), 16), tintAmount);
+    nextGreen = lerp(nextGreen, Number.parseInt(tint.slice(2, 4), 16), tintAmount);
+    nextBlue = lerp(nextBlue, Number.parseInt(tint.slice(4, 6), 16), tintAmount);
+  }
+  return {
+    red: clamp(Math.round(nextRed), 0, 255),
+    green: clamp(Math.round(nextGreen), 0, 255),
+    blue: clamp(Math.round(nextBlue), 0, 255)
+  };
+}
+
+function drawLaserTagCarpetBackground(ctx, camera, visibility, colors) {
+  const padding = visibility?.sourcePadding || 0;
+  const minX = -padding;
+  const minY = -padding;
+  const maxX = ctx.width + padding;
+  const maxY = ctx.height + padding;
+  const texture = laserTagCarpetPixels();
+
+  if (texture.state !== "ready" || !texture.pixels || texture.width <= 0 || texture.height <= 0) {
+    ctx.fillStyle = colors.background || LASER_TAG_MODE_COLORS.background;
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+    return;
+  }
+
+  if (typeof ctx.drawWorldTextureLayer === "function") {
+    ctx.drawWorldTextureLayer(texture.pixels, texture.width, texture.height, camera, {
+      sourceScale: LASER_TAG_CARPET_SOURCE_SCALE,
+      rotation: LASER_TAG_CARPET_ROTATION,
+      sourcePadding: padding
+    });
+    return;
+  }
+
+  const cos = Math.cos(LASER_TAG_CARPET_ROTATION);
+  const sin = Math.sin(LASER_TAG_CARPET_ROTATION);
+  const sourceScale = Math.max(0.001, LASER_TAG_CARPET_SOURCE_SCALE);
+  for (let y = minY; y < maxY; y += 1) {
+    for (let x = minX; x < maxX; x += 1) {
+      const worldX = (camera.x + x) / sourceScale;
+      const worldY = (camera.y + y) / sourceScale;
+      const textureX = positiveModulo(Math.floor(worldX * cos - worldY * sin), texture.width);
+      const textureY = positiveModulo(Math.floor(worldX * sin + worldY * cos), texture.height);
+      ctx.fillStyle = unpackCssColor(texture.pixels[textureY * texture.width + textureX]);
+      ctx.fillRect(x, y, 1, 1);
     }
   }
 }
@@ -6171,7 +6490,10 @@ function drawMenuPreviewHud(ctx, options, localPlayer, colors, textRenderer) {
     options.hudFlash,
     options.timeSeconds,
     0,
-    mobilePlayerHudLayout(ctx, options)
+    {
+      ...mobilePlayerHudLayout(ctx, options),
+      gameMode: options.gameMode
+    }
   );
   drawMenuLeaveHud(ctx, options, colors, textRenderer, playerHudPanel);
 }
@@ -6436,7 +6758,10 @@ function drawWaitingOverlay(ctx, room, options, colors, textRenderer, localPlaye
   }
 
   const playerHudPanel = localPlayer
-    ? drawPlayerHud(ctx, localPlayer, colors, textRenderer, options.hudFlash, options.timeSeconds, count, mobilePlayerHudLayout(ctx, options))
+    ? drawPlayerHud(ctx, localPlayer, colors, textRenderer, options.hudFlash, options.timeSeconds, count, {
+        ...mobilePlayerHudLayout(ctx, options),
+        gameMode: options.gameMode
+      })
     : null;
   drawWaitingTerminalHud(ctx, room, count, maxPlayers, status, options, colors, textRenderer, playerHudPanel);
 }
@@ -6664,20 +6989,23 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
 
   if (spectatedPlayer && spectatedPlayer.id !== localPlayer?.id) {
     const header = spectatorHeaderForPlayer(spectatedPlayer);
-    const spectatedHeight = playerHudPanelHeight(header, options.settings, options.voiceHudActive);
-    stackPanel = drawPlayerHud(
-      ctx,
-      spectatedPlayer,
-      colors,
-      textRenderer,
-      {},
-      options.timeSeconds,
-      playersLeft,
-      {
-        header,
-        settings: options.settings,
-        voiceHudActive: options.voiceHudActive,
-        y: stackPanel
+    const spectatedHeight = playerHudPanelHeight(header, options.settings, options.voiceHudActive, options.gameMode);
+	    stackPanel = drawPlayerHud(
+	      ctx,
+	      spectatedPlayer,
+	      colors,
+	      textRenderer,
+	      {},
+	      options.timeSeconds,
+	      playersLeft,
+	      {
+	        header,
+	        gameMode: options.gameMode,
+	        laserTag: snapshot.laserTag,
+	        tick: snapshot.tick,
+	        settings: options.settings,
+	        voiceHudActive: options.voiceHudActive,
+	        y: stackPanel
           ? options.mobileActive || hudStacksUp(options.settings)
             ? Math.max(HUD_EDGE_INSET, stackPanel.y - spectatedHeight - 6)
             : stackPanel.y + stackPanel.height + 6
@@ -8091,6 +8419,11 @@ function drawDebugCross(ctx, centerX, centerY, color) {
 }
 
 function drawEndedHud(ctx, room, options, colors, textRenderer) {
+  if (options.gameMode === GAME_MODES.laserTag || options.snapshot?.mode === GAME_MODES.laserTag) {
+    drawLaserTagEndedHud(ctx, room, options, colors, textRenderer);
+    return;
+  }
+
   const won = room.winnerId && room.winnerId === options.playerId;
   const title = won ? "YOU WON!" : "GAME OVER";
   const results = endGameResults(room, options.snapshot);
@@ -8161,6 +8494,61 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
   if (resetSeconds !== null) {
     const countdownY = panel.y + endedHudCountdownY(rowCount);
     textRenderer.draw(ctx, `LOBBY ${formatClock(resetSeconds)}`, placeX, countdownY, {
+      ...textOptions,
+      width: panel.width - padding * 2
+    });
+  }
+  const actionPosition = hudPanelActionPosition(ctx, panel, 0, 1, options.settings, terminalActionLineStep(options));
+  drawTerminalLeaveAction(ctx, actionPosition.x, actionPosition.y, options, colors, textRenderer);
+}
+
+function drawLaserTagEndedHud(ctx, room, options, colors, textRenderer) {
+  const laserTag = options.snapshot?.laserTag || {};
+  const scores = laserTag.teamScores || {};
+  const redScore = Math.max(0, Math.floor(Number(scores.red || 0)));
+  const blueScore = Math.max(0, Math.floor(Number(scores.blue || 0)));
+  const winnerTeam = laserTag.winnerTeam || (blueScore > redScore ? "blue" : "red");
+  const localPlayer = (options.snapshot?.players || []).find((player) => player.id === options.playerId);
+  const won = Boolean(localPlayer?.team) && localPlayer.team === winnerTeam;
+  const title = won ? "YOU WON!" : "GAME OVER";
+  const rows = [
+    `${winnerTeam.toUpperCase()} TEAM WON`,
+    `RED ${redScore}`,
+    `BLUE ${blueScore}`,
+    `WIN ${Math.max(1, Math.floor(Number(laserTag.scoreLimit || ENGINE.laserTag.scoreLimit)))}`
+  ];
+  const resetSeconds = Number.isFinite(room.resetToLobbyAtMs)
+    ? Math.max(0, Math.ceil((room.resetToLobbyAtMs - Date.now()) / 1000))
+    : null;
+  const panel = mainHudPanelRect(
+    ctx,
+    ENDED_HUD_LAYOUT.width,
+    endedHudPanelHeight(rows.length, resetSeconds !== null),
+    options.settings
+  );
+  const textOptions = {
+    fontSize: 8,
+    color: colors.foreground
+  };
+  const padding = HUD_PANEL_PADDING;
+  const textX = panel.x + padding;
+
+  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  textRenderer.draw(ctx, title, textX, panel.y + ENDED_HUD_LAYOUT.titleY, {
+    ...textOptions,
+    width: panel.width - padding * 2
+  });
+
+  rows.forEach((row, index) => {
+    textRenderer.draw(ctx, row, textX, panel.y + ENDED_HUD_LAYOUT.rowStartY + index * ENDED_HUD_LAYOUT.rowStep, {
+      ...textOptions,
+      width: panel.width - padding * 2
+    });
+  });
+
+  if (resetSeconds !== null) {
+    const countdownY = panel.y + endedHudCountdownY(rows.length);
+    textRenderer.draw(ctx, `LOBBY ${formatClock(resetSeconds)}`, textX, countdownY, {
       ...textOptions,
       width: panel.width - padding * 2
     });
@@ -9285,9 +9673,11 @@ function drawAsteroidTiles(
     const coloredResources = gameMode === GAME_MODES.cars ||
       isWaterThemedGameMode(gameMode) ||
       gameMode === GAME_MODES.bugs ||
-      gameMode === GAME_MODES.clouds;
+      gameMode === GAME_MODES.clouds ||
+      gameMode === GAME_MODES.laserTag;
     const hullOnly = gameMode === GAME_MODES.bugs
-      || gameMode === GAME_MODES.octopus;
+      || gameMode === GAME_MODES.octopus
+      || gameMode === GAME_MODES.laserTag;
     const cloudResources = gameMode === GAME_MODES.clouds;
     const oreFillColor = colors.ore || colors.foreground;
     const diamondFillColor = colors.diamond || colors.foreground;
@@ -9846,19 +10236,26 @@ function drawAsteroidVisibilityGhostMap(
     viewMaxTileY
   );
   let gpuCheckerQueued = false;
+  const laserTagShadow = gameMode === GAME_MODES.laserTag;
   const solidShadow = isWaterThemedGameMode(gameMode);
   const cloudCheckerFallthrough = gameMode === GAME_MODES.clouds;
-  const checkerColor = solidShadow
+  const checkerColor = laserTagShadow
+    ? LASER_TAG_SHADOW_MASK_COLOR
+    : solidShadow
     ? SUB_SHADOW_MASK_COLOR
     : cloudCheckerFallthrough
       ? colors.backing || "#000000"
       : visibilityCheckerColor(colors);
-  const shadowColors = solidShadow
+  const shadowColors = laserTagShadow
+    ? { ...colors, checker: LASER_TAG_SHADOW_MASK_COLOR, solidShadow: true }
+    : solidShadow
     ? { ...colors, checker: SUB_SHADOW_MASK_COLOR, solidShadow: true }
     : cloudCheckerFallthrough
       ? { ...colors, checker: colors.backing || "#000000" }
       : colors;
-  const shadowLineColors = solidShadow
+  const shadowLineColors = laserTagShadow
+    ? { ...colors, checker: LASER_TAG_SHADOW_MASK_COLOR, solidShadow: true }
+    : solidShadow
     ? { ...colors, checker: colors.backing || "#000000", solidShadow: true }
     : cloudCheckerFallthrough
       ? { ...colors, checker: colors.backing || "#000000" }
@@ -9866,6 +10263,7 @@ function drawAsteroidVisibilityGhostMap(
 
   measureGhostBucket("ghostCheckerMs", () => {
     const queuedGpuChecker = !solidShadow &&
+      !laserTagShadow &&
       !cloudCheckerFallthrough &&
       gpuFrameCheckerReady &&
       typeof ctx.queueGpuCheckerLayer === "function" &&
@@ -9887,7 +10285,7 @@ function drawAsteroidVisibilityGhostMap(
       return;
     }
 
-    const nativeCheckerLayer = !solidShadow && !cloudCheckerFallthrough && typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
+    const nativeCheckerLayer = !solidShadow && !laserTagShadow && !cloudCheckerFallthrough && typeof ctx.drawCodeLayer === "function" && !ctx.isLensActive?.()
       ? visibilityCheckerLayerNative(asteroid, camera, ctx.width, ctx.height, {
         sourcePadding: padding,
         lensEdgeScale: WORLD_LENS_EDGE_SCALE,
@@ -10385,6 +10783,7 @@ function drawAsteroidVisibilityCheckerRockArcPixel(ctx, drawn, x, y, camera, col
   }
 
   drawn.add(key);
+  ctx.fillStyle = visibilityCheckerColor(colors);
   ctx.fillRect(px, py, 1, 1);
 }
 
@@ -13573,6 +13972,10 @@ function drawWorldAmbient(
     return;
   }
 
+  if (gameMode === GAME_MODES.laserTag) {
+    return;
+  }
+
   drawStars(ctx, snapshot, camera, visibility);
 }
 
@@ -14349,7 +14752,21 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     return;
   }
 
+  if (entity.type === "laserBlast") {
+    drawLaserBlastEntity(ctx, entity, camera, colors);
+    return;
+  }
+
+  if (entity.type === "laserGate") {
+    drawLaserBaseEntity(ctx, entity, camera, colors, textRenderer);
+    return;
+  }
+
   if (entity.type === "huckRock") {
+    if (options.gameMode === GAME_MODES.laserTag) {
+      return;
+    }
+
     if (options.gameMode === GAME_MODES.cars) {
       drawCarModeHuckRockEntity(ctx, entity, camera, colors);
     } else if (options.gameMode === GAME_MODES.bugs) {
@@ -14396,6 +14813,135 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
     [1, 1],
     [0, 2]
   ], ENTITY_PIXEL_SIZE);
+}
+
+function shouldDrawWorldPlayer(player, options) {
+  if (!player || player.hidden) {
+    return false;
+  }
+
+  if (
+    options.gameMode === GAME_MODES.laserTag &&
+    player.laserTagGhost === true &&
+    player.id !== options.playerId
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function drawLaserBlastEntity(ctx, entity, camera, colors) {
+  const angle = Number.isFinite(entity.angle) ? entity.angle : Math.atan2(entity.vy || 0, entity.vx || 0);
+  const teamColor = laserTagTeamColor(entity.team, colors);
+  const spawnX = Number.isFinite(entity.spawnX) ? entity.spawnX : entity.x;
+  const spawnY = Number.isFinite(entity.spawnY) ? entity.spawnY : entity.y;
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const normal = {
+    x: -direction.y,
+    y: direction.x
+  };
+  const maxDistance = Number.isFinite(entity.maxDistance) ? entity.maxDistance : laserTagBlastMaxRange();
+  const durationSeconds = Number.isFinite(entity.beamLerpSeconds)
+    ? entity.beamLerpSeconds
+    : laserTagBeamDurationSeconds();
+  const t = clamp((Number(entity.ageSeconds) || 0) / durationSeconds, 0, 1);
+  const beamEndDistance = Number.isFinite(entity.retractFromDistance)
+    ? clamp(entity.retractFromDistance, 0, maxDistance)
+    : maxDistance;
+  const visibleStartDistance = Number.isFinite(entity.visibleStartDistance)
+    ? clamp(entity.visibleStartDistance, 0, beamEndDistance)
+    : beamEndDistance * t;
+  if (beamEndDistance - visibleStartDistance <= 0.001) {
+    return;
+  }
+
+  const start = worldToScreenExact({
+    x: spawnX + direction.x * visibleStartDistance,
+    y: spawnY + direction.y * visibleStartDistance
+  }, camera);
+  const end = worldToScreenExact({
+    x: spawnX + direction.x * beamEndDistance,
+    y: spawnY + direction.y * beamEndDistance
+  }, camera);
+  drawMiningRaySquareBeam(
+    ctx,
+    start,
+    end,
+    direction,
+    normal,
+    Math.max(1, Number(entity.radius) || ENGINE.laserTag.blastRadius || 1),
+    { ...colors, foreground: teamColor, miningRayGradient: null },
+    0,
+    0,
+    { noWaves: true }
+  );
+  if (entity.hit === true) {
+    drawMiningRayHitFlare(ctx, end, { ...colors, foreground: teamColor });
+  }
+}
+
+function drawLaserBaseEntity(ctx, entity, camera, colors, textRenderer) {
+  const screen = worldToScreen(entity, camera);
+  const x = Math.round(screen.x);
+  const y = Math.round(screen.y);
+  const width = Math.round(entity.width || 24);
+  const height = Math.round(entity.height || 24);
+  const teamColor = laserTagTeamColor(entity.team, colors);
+  ctx.fillStyle = colors.background;
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = teamColor;
+  drawLaserTagRectOutline(ctx, x, y, width, height, 2);
+  drawThickPixelLine(ctx, x + 4, y + Math.floor(height / 2), x + width - 5, y + Math.floor(height / 2), 1);
+  drawThickPixelLine(ctx, x + Math.floor(width / 2), y + 4, x + Math.floor(width / 2), y + height - 5, 1);
+  if (textRenderer && entity.label) {
+    textRenderer.draw(ctx, String(entity.label).split(" ")[0], x - 2, y - 10, {
+      fontSize: 8,
+      color: teamColor,
+      width: Math.max(36, width + 8)
+    });
+  }
+}
+
+function drawLaserTagRectOutline(ctx, x, y, width, height, thickness = 1) {
+  for (let inset = 0; inset < thickness; inset += 1) {
+    ctx.fillRect(x + inset, y + inset, width - inset * 2, 1);
+    ctx.fillRect(x + inset, y + height - 1 - inset, width - inset * 2, 1);
+    ctx.fillRect(x + inset, y + inset, 1, height - inset * 2);
+    ctx.fillRect(x + width - 1 - inset, y + inset, 1, height - inset * 2);
+  }
+}
+
+function drawThickPixelLine(ctx, x0, y0, x1, y1, thickness = 1) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0 || thickness <= 1) {
+    drawPixelLine(ctx, x0, y0, x1, y1);
+    return;
+  }
+
+  const nx = -dy / length;
+  const ny = dx / length;
+  const radius = Math.floor(thickness / 2);
+  for (let offset = -radius; offset <= radius; offset += 1) {
+    drawPixelLine(
+      ctx,
+      Math.round(x0 + nx * offset),
+      Math.round(y0 + ny * offset),
+      Math.round(x1 + nx * offset),
+      Math.round(y1 + ny * offset)
+    );
+  }
+}
+
+function laserTagTeamColor(team, colors) {
+  return team === "blue"
+    ? colors.blue || LASER_TAG_MODE_COLORS.blue
+    : colors.red || LASER_TAG_MODE_COLORS.red;
 }
 
 function drawOctopusInkEntity(ctx, entity, camera) {
@@ -14878,6 +15424,12 @@ function drawShip(
     radius: mainRadius
   };
 
+  if (gameMode === GAME_MODES.laserTag) {
+    drawLaserTagShip(ctx, x, y, player, mainRadius, bodyAngle, colors);
+    drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+    return;
+  }
+
   if (gameMode === GAME_MODES.cars) {
     drawCarBody(ctx, x, y, player, mainRadius, carBodyAngle(player), colors, timeSeconds, () => {
       if (player.mining) {
@@ -14970,6 +15522,102 @@ function drawShip(
 
   drawShipHealthIndicator(ctx, x, y, player, colors);
   drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+}
+
+function drawLaserTagShip(ctx, x, y, player, radius, angle, colors) {
+  const teamColor = laserTagTeamColor(player.team, colors);
+  const uvColor = colors.rockLine || LASER_TAG_MODE_COLORS.rockLine;
+  const uvDarkColor = LASER_TAG_MODE_COLORS.bodyOuterLine || colors.rockLine || LASER_TAG_MODE_COLORS.rockLine;
+  const bodyColor = LASER_TAG_PLAYER_BODY_STROKE;
+  const bodyFill = LASER_TAG_PLAYER_BODY_FILL;
+  const lightsActive = player.laserTagGhost !== true && Number(player.health || 0) > 0;
+  const rayAngle = Number.isFinite(player?.aimAngle) ? player.aimAngle : angle;
+  const direction = {
+    x: Math.cos(rayAngle),
+    y: Math.sin(rayAngle)
+  };
+  const tubeFront = {
+    x: x + direction.x * radius,
+    y: y + direction.y * radius
+  };
+  const tubeBack = {
+    x: x - direction.x,
+    y: y - direction.y
+  };
+
+  ctx.fillStyle = bodyFill;
+  fillSolidDisk(ctx, x, y, radius);
+  ctx.fillStyle = bodyColor;
+  fillLaserTagTube(ctx, tubeBack, tubeFront, direction, 3, bodyColor);
+  if (lightsActive && Number(player.laserTagCooldownSeconds || 0) <= 0) {
+    fillLaserTagTube(ctx, tubeBack, tubeFront, direction, 1, teamColor);
+  }
+
+  ctx.fillStyle = bodyColor;
+  drawLaserTagCircleRing(ctx, x, y, radius, 2, bodyColor);
+  drawLaserTagSideArc(ctx, x, y, radius, rayAngle + Math.PI / 2, bodyColor, teamColor, lightsActive);
+  drawLaserTagSideArc(ctx, x, y, radius, rayAngle - Math.PI / 2, bodyColor, teamColor, lightsActive);
+  drawLaserTagSideArc(ctx, x, y, radius, rayAngle - Math.PI, bodyColor, teamColor, lightsActive);
+  // drawLaserTagCircleRing(ctx, x, y, radius, 1, bodyColor);
+  // drawLaserTagCircleRing(ctx, x, y, radius + 1, 1, bodyColor);
+  // drawLaserTagCircleRing(ctx, x, y, radius + 2, 2, bodyColor);
+  // drawLaserTagCircleRing(ctx, x, y, radius + 3, 1, uvColor);
+  // drawLaserTagCircleRing(ctx, x, y, radius + 4, 1, bodyColor);
+}
+
+function drawLaserTagCircleRing(ctx, x, y, radius, thickness, color) {
+  ctx.fillStyle = color;
+  const count = Math.max(1, Math.floor(thickness));
+  for (let offset = 0; offset < count; offset += 1) {
+    drawCircle(ctx, x, y, Math.max(0, radius - offset));
+  }
+}
+
+function drawLaserTagSideArc(ctx, x, y, radius, centerAngle, outlineColor, innerColor, lit = true) {
+  // drawLaserTagArcBand(ctx, x, y, radius - 5, radius + 1, centerAngle, 0.35, outlineColor);
+  if (lit) {
+    drawLaserTagArcBand(ctx, x, y, 3, radius - 2, centerAngle, Math.PI / 6, innerColor);
+  }
+  // drawLaserTagArcBand(ctx, x, y, radius - 1, radius + 1, centerAngle, 0.22, innerColor);
+}
+
+function drawLaserTagArcBand(ctx, x, y, innerRadius, outerRadius, centerAngle, halfAngle, color) {
+  const minX = Math.floor(x - outerRadius);
+  const maxX = Math.ceil(x + outerRadius);
+  const minY = Math.floor(y - outerRadius);
+  const maxY = Math.ceil(y + outerRadius);
+  const innerSq = Math.max(0, innerRadius * innerRadius);
+  const outerSq = Math.max(innerSq, outerRadius * outerRadius);
+
+  ctx.fillStyle = color;
+  for (let py = minY; py <= maxY; py += 1) {
+    for (let px = minX; px <= maxX; px += 1) {
+      const dx = px - x;
+      const dy = py - y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < innerSq || distSq > outerSq) {
+        continue;
+      }
+      if (Math.abs(normalizeSignedAngle(Math.atan2(dy, dx) - centerAngle)) > halfAngle) {
+        continue;
+      }
+      drawPoint(ctx, px, py);
+    }
+  }
+}
+
+function fillLaserTagTube(ctx, start, end, direction, width, color) {
+  const normal = {
+    x: -direction.y,
+    y: direction.x
+  };
+  const half = Math.max(0.5, width / 2);
+  fillConvexPolygon(ctx, [
+    { x: start.x + normal.x * half, y: start.y + normal.y * half },
+    { x: end.x + normal.x * half, y: end.y + normal.y * half },
+    { x: end.x - normal.x * half, y: end.y - normal.y * half },
+    { x: start.x - normal.x * half, y: start.y - normal.y * half }
+  ], color);
 }
 
 function drawCloudShipWings(ctx, player, camera, colors, timeSeconds) {
@@ -17455,7 +18103,11 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
   const width = HUD_PANEL_MIN_WIDTH;
   const voiceRow = voiceHudEnabled(layout.settings, layout.voiceHudActive);
-  const height = playerHudPanelHeight(header, layout.settings, layout.voiceHudActive);
+  const laserTag = layout.gameMode === GAME_MODES.laserTag;
+  const laserTagRows = laserTag ? laserTagHudRows(player, layout, voiceRow) : null;
+  const height = laserTag
+    ? hudPanelHeightForRows((header ? 1 : 0) + laserTagRows.length)
+    : playerHudPanelHeight(header, layout.settings, layout.voiceHudActive, layout.gameMode);
   const panel = mainHudPanelRect(ctx, width, height, layout.settings);
   if (Number.isFinite(layout.x)) {
     panel.x = Math.round(layout.x);
@@ -17494,6 +18146,14 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     });
   }
 
+  if (laserTag) {
+    const firstRowY = y + padding + headerOffset;
+    laserTagRows.forEach((row, index) => {
+      drawHudMessage(ctx, row, contentX, firstRowY + rowStep * index, textRenderer, colors);
+    });
+    return panel;
+  }
+
   textRenderer.draw(ctx, "HP", contentX, hpY, {
     fontSize: 8,
     color: colors.foreground
@@ -17524,6 +18184,34 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors);
   }
   return panel;
+}
+
+function laserTagHudRows(player, layout = {}, voiceRow = false) {
+  const laserTag = layout.laserTag || {};
+  const scores = laserTag.teamScores || {};
+  const redScore = Math.max(0, Math.floor(Number(scores.red || 0)));
+  const blueScore = Math.max(0, Math.floor(Number(scores.blue || 0)));
+  const scoreLimit = Math.max(1, Math.floor(Number(laserTag.scoreLimit || ENGINE.laserTag.scoreLimit)));
+  const matchSeconds = Math.max(1, Number(laserTag.matchSeconds || ENGINE.laserTag.matchSeconds));
+  const tick = Number.isFinite(layout.tick) ? layout.tick : Number(laserTag.startedTick || 0);
+  const startedTick = Math.max(0, Math.floor(Number(laserTag.startedTick || 0)));
+  const elapsedSeconds = Math.max(0, (tick - startedTick) / ENGINE.tickRate);
+  const remainingSeconds = Math.max(0, matchSeconds - elapsedSeconds);
+  const ownScore = Math.min(9999, Math.max(0, Math.floor(Number(player.score || 0))));
+  const ghost = player.laserTagGhost === true ||
+    (Number(player.health || 0) <= 0 && Number(player.laserTagOutUntilTick || 0) > 0);
+  const rows = [
+    `TEAM ${String(player.team || "-").toUpperCase()}`,
+    `YOU ${ownScore}`,
+    `RED ${redScore} / BLUE ${blueScore}`,
+    `WIN ${scoreLimit}`,
+    `TIME ${formatClock(remainingSeconds)}`,
+    ghost ? "RETREAT" : "ACTIVE"
+  ];
+  if (voiceRow) {
+    rows.push("VOICE ON");
+  }
+  return rows;
 }
 
 function drawCarsEnemyHitHud(ctx, player, snapshot, options, colors, textRenderer, previousPanel) {
@@ -17697,7 +18385,14 @@ function mobileArenaActionKinds(mapFeatureEnabled = true, leaveVisible = true) {
   return kinds;
 }
 
-function playerHudPanelHeight(header = "", settings = {}, voiceHudActive = false) {
+function playerHudPanelHeight(header = "", settings = {}, voiceHudActive = false, gameMode = GAME_MODES.bitspace) {
+  if (gameMode === GAME_MODES.laserTag) {
+    return hudPanelHeightForRows(
+      (String(header || "").trim() ? 1 : 0) +
+      6 +
+      (voiceHudEnabled(settings, voiceHudActive) ? 1 : 0)
+    );
+  }
   return 58 +
     (String(header || "").trim() ? HUD_PANEL_ROW_STEP : 0) +
     (voiceHudEnabled(settings, voiceHudActive) ? HUD_PANEL_ROW_STEP : 0);

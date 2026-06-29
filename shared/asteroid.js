@@ -1,5 +1,9 @@
 import { ENGINE, RENDER } from "./constants.js";
 import {
+  getLaserTagMap,
+  LASER_TAG_MAP_CHARS
+} from "./laser-tag-maps.js";
+import {
   createSeededRandom,
   createSimplexNoise3D
 } from "./math.js";
@@ -356,6 +360,363 @@ export function createThemeAsteroid(options = {}) {
   return asteroid;
 }
 
+export function createLaserTagAsteroid(options = {}) {
+  const map = getLaserTagMap(options.variant || options.mapId);
+  if (map) {
+    return createLaserTagAsteroidFromMap(map, options);
+  }
+
+  const seed = options.seed || "bitspace-laser-tag";
+  const tileSize = Math.max(1, Math.floor(Number(options.tileSize) || RENDER.tileSize));
+  const widthTiles = options.widthTiles || 72;
+  const heightTiles = options.heightTiles || 56;
+  const tiles = new Array(widthTiles * heightTiles).fill(ASTEROID_TILE.empty);
+  const amounts = new Uint8Array(widthTiles * heightTiles);
+  const playable = new Array(widthTiles * heightTiles).fill(true);
+  const random = createSeededRandom(`${seed}:layout`);
+  const variants = ["waldo", "odlaw", "wenda", "wizard"];
+  const requestedVariant = String(options.variant || "").toLowerCase();
+  const variant = variants.includes(requestedVariant)
+    ? requestedVariant
+    : variants[Math.floor(random() * variants.length) % variants.length];
+
+  fillLaserTagBorder(tiles, widthTiles, heightTiles);
+  carveLaserTagLayout(tiles, widthTiles, heightTiles, variant);
+
+  const redBase = {
+    id: "laser-base-red",
+    team: "red",
+    label: "RED BASE",
+    x: 3 * tileSize,
+    y: Math.floor(heightTiles / 2) * tileSize
+  };
+  const blueBase = {
+    id: "laser-base-blue",
+    team: "blue",
+    label: "BLUE BASE",
+    x: (widthTiles - 4) * tileSize,
+    y: Math.floor(heightTiles / 2) * tileSize
+  };
+  const redGate = {
+    id: "laser-gate-red",
+    team: "red",
+    label: "WEST GATE",
+    x: 9 * tileSize,
+    y: Math.floor(heightTiles / 2) * tileSize
+  };
+  const blueGate = {
+    id: "laser-gate-blue",
+    team: "blue",
+    label: "EAST GATE",
+    x: (widthTiles - 10) * tileSize,
+    y: Math.floor(heightTiles / 2) * tileSize
+  };
+  const centerY = (heightTiles * tileSize) / 2;
+  const redSpawnX = 4 * tileSize;
+  const blueSpawnX = (widthTiles - 5) * tileSize;
+  const spawnSpread = tileSize * 4;
+  const pockets = Array.from({ length: ENGINE.maxPlayers }, (_unused, index) => {
+    const red = index % 2 === 0;
+    const teamIndex = Math.floor(index / 2);
+    const row = teamIndex - 1.5;
+    return {
+      playerNumber: index + 1,
+      tileX: red ? 10 : widthTiles - 10,
+      tileY: Math.floor(heightTiles / 2 + row * 4),
+      radius: 0,
+      spawnX: red ? redSpawnX : blueSpawnX,
+      spawnY: centerY + row * spawnSpread,
+      angle: red ? 0 : Math.PI
+    };
+  });
+
+  return {
+    seed,
+    widthTiles,
+    heightTiles,
+    tileSize,
+    generation: {
+      mode: "laser-tag",
+      variant
+    },
+    tiles,
+    amounts,
+    playable,
+    pockets,
+    laserTag: {
+      variant,
+      spawns: {
+        red: pockets.filter((_pocket, index) => index % 2 === 0),
+        blue: pockets.filter((_pocket, index) => index % 2 === 1)
+      },
+      bases: [redBase, blueBase],
+      gates: [redGate, blueGate]
+    }
+  };
+}
+
+function createLaserTagAsteroidFromMap(map, options = {}) {
+  const seed = options.seed || `bitspace-laser-tag:${map.id}`;
+  const tileSize = Math.max(1, Math.floor(Number(options.tileSize) || RENDER.tileSize));
+  const widthTiles = map.widthTiles;
+  const heightTiles = map.heightTiles;
+  const tiles = new Array(widthTiles * heightTiles).fill(ASTEROID_TILE.empty);
+  const amounts = new Uint8Array(widthTiles * heightTiles);
+  const playable = new Array(widthTiles * heightTiles).fill(true);
+  const markers = {
+    redSpawn: [],
+    blueSpawn: [],
+    redGate: [],
+    blueGate: []
+  };
+
+  for (let tileY = 0; tileY < heightTiles; tileY += 1) {
+    const row = map.rows[tileY];
+    for (let tileX = 0; tileX < widthTiles; tileX += 1) {
+      const char = row[tileX];
+      const index = tileY * widthTiles + tileX;
+      if (char === LASER_TAG_MAP_CHARS.rock) {
+        tiles[index] = ASTEROID_TILE.rock;
+      } else if (char === LASER_TAG_MAP_CHARS.diamond) {
+        tiles[index] = ASTEROID_TILE.rock;
+      } else if (char === LASER_TAG_MAP_CHARS.redSpawn) {
+        markers.redSpawn.push({ tileX, tileY });
+      } else if (char === LASER_TAG_MAP_CHARS.blueSpawn) {
+        markers.blueSpawn.push({ tileX, tileY });
+      } else if (char === LASER_TAG_MAP_CHARS.redGate) {
+        markers.redGate.push({ tileX, tileY });
+      } else if (char === LASER_TAG_MAP_CHARS.blueGate) {
+        markers.blueGate.push({ tileX, tileY });
+      }
+    }
+  }
+
+  const redSpawns = laserTagSpawnPointsFromMarkers(markers.redSpawn, tileSize, "red");
+  const blueSpawns = laserTagSpawnPointsFromMarkers(markers.blueSpawn, tileSize, "blue");
+  const pockets = Array.from({ length: ENGINE.maxPlayers }, (_unused, index) => {
+    const red = index % 2 === 0;
+    const spawns = red ? redSpawns : blueSpawns;
+    const spawn = spawns[Math.floor(index / 2) % Math.max(1, spawns.length)] ||
+      fallbackLaserTagSpawn(widthTiles, heightTiles, tileSize, red ? "red" : "blue");
+    return {
+      playerNumber: index + 1,
+      tileX: Math.floor(spawn.x / tileSize),
+      tileY: Math.floor(spawn.y / tileSize),
+      radius: 0,
+      spawnX: spawn.x,
+      spawnY: spawn.y,
+      angle: spawn.angle
+    };
+  });
+  const redBase = laserTagBaseFromSpawns(redSpawns, widthTiles, heightTiles, tileSize, "red");
+  const blueBase = laserTagBaseFromSpawns(blueSpawns, widthTiles, heightTiles, tileSize, "blue");
+
+  return {
+    seed,
+    widthTiles,
+    heightTiles,
+    tileSize,
+    generation: {
+      mode: "laser-tag",
+      variant: map.id,
+      source: "png"
+    },
+    tiles,
+    amounts,
+    playable,
+    pockets,
+    laserTag: {
+      variant: map.id,
+      spawns: {
+        red: pockets.filter((_pocket, index) => index % 2 === 0),
+        blue: pockets.filter((_pocket, index) => index % 2 === 1)
+      },
+      bases: [redBase, blueBase],
+      gates: [
+        ...laserTagGateTargetsFromMarkers(markers.redGate, tileSize, "red"),
+        ...laserTagGateTargetsFromMarkers(markers.blueGate, tileSize, "blue")
+      ]
+    }
+  };
+}
+
+function laserTagSpawnPointsFromMarkers(markers, tileSize, team) {
+  const angle = team === "red" ? 0 : Math.PI;
+  return markers.map((marker) => ({
+    x: (marker.tileX + 0.5) * tileSize,
+    y: (marker.tileY + 0.5) * tileSize,
+    angle
+  }));
+}
+
+function fallbackLaserTagSpawn(widthTiles, heightTiles, tileSize, team) {
+  const red = team === "red";
+  return {
+    x: (red ? 2.5 : widthTiles - 2.5) * tileSize,
+    y: heightTiles * tileSize * 0.5,
+    angle: red ? 0 : Math.PI
+  };
+}
+
+function laserTagBaseFromSpawns(spawns, widthTiles, heightTiles, tileSize, team) {
+  const fallback = fallbackLaserTagSpawn(widthTiles, heightTiles, tileSize, team);
+  const center = averagePoints(spawns.length ? spawns : [fallback]);
+  return {
+    id: `laser-base-${team}`,
+    team,
+    label: `${team.toUpperCase()} BASE`,
+    x: center.x,
+    y: center.y
+  };
+}
+
+function laserTagGateTargetsFromMarkers(markers, tileSize, team) {
+  const components = connectedMarkerComponents(markers);
+  components.sort((a, b) => averageTileY(a) - averageTileY(b));
+  return components.map((component, index) => {
+    const center = averageMarkerCenter(component, tileSize);
+    const gateName = index === 0 ? "NORTH GATE" : index === 1 ? "SOUTH GATE" : `GATE ${index + 1}`;
+    return {
+      id: `laser-gate-${team}-${index + 1}`,
+      team,
+      label: gateName,
+      x: center.x,
+      y: center.y
+    };
+  });
+}
+
+function connectedMarkerComponents(markers) {
+  const remaining = new Map(markers.map((marker) => [`${marker.tileX}:${marker.tileY}`, marker]));
+  const components = [];
+  for (const marker of markers) {
+    const key = `${marker.tileX}:${marker.tileY}`;
+    if (!remaining.has(key)) {
+      continue;
+    }
+
+    remaining.delete(key);
+    const component = [];
+    const stack = [marker];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      component.push(current);
+      for (const neighbor of markerNeighbors(current)) {
+        const neighborKey = `${neighbor.tileX}:${neighbor.tileY}`;
+        const next = remaining.get(neighborKey);
+        if (!next) {
+          continue;
+        }
+        remaining.delete(neighborKey);
+        stack.push(next);
+      }
+    }
+    components.push(component);
+  }
+  return components;
+}
+
+function markerNeighbors(marker) {
+  return [
+    { tileX: marker.tileX + 1, tileY: marker.tileY },
+    { tileX: marker.tileX - 1, tileY: marker.tileY },
+    { tileX: marker.tileX, tileY: marker.tileY + 1 },
+    { tileX: marker.tileX, tileY: marker.tileY - 1 }
+  ];
+}
+
+function averageMarkerCenter(markers, tileSize) {
+  const average = averagePoints(markers.map((marker) => ({
+    x: (marker.tileX + 0.5) * tileSize,
+    y: (marker.tileY + 0.5) * tileSize
+  })));
+  return average;
+}
+
+function averagePoints(points) {
+  let x = 0;
+  let y = 0;
+  for (const point of points) {
+    x += point.x;
+    y += point.y;
+  }
+  const count = Math.max(1, points.length);
+  return {
+    x: x / count,
+    y: y / count
+  };
+}
+
+function averageTileY(markers) {
+  return markers.reduce((sum, marker) => sum + marker.tileY, 0) / Math.max(1, markers.length);
+}
+
+function fillLaserTagBorder(tiles, widthTiles, heightTiles) {
+  for (let tileX = 0; tileX < widthTiles; tileX += 1) {
+    setLaserTagWallTile(tiles, widthTiles, tileX, 0);
+    setLaserTagWallTile(tiles, widthTiles, tileX, heightTiles - 1);
+  }
+  for (let tileY = 0; tileY < heightTiles; tileY += 1) {
+    setLaserTagWallTile(tiles, widthTiles, 0, tileY);
+    setLaserTagWallTile(tiles, widthTiles, widthTiles - 1, tileY);
+  }
+}
+
+function carveLaserTagLayout(tiles, widthTiles, heightTiles, variant) {
+  const midX = Math.floor(widthTiles / 2);
+  const midY = Math.floor(heightTiles / 2);
+  const layouts = {
+    waldo: [
+      [midX - 2, 6, 4, 15], [midX - 2, heightTiles - 21, 4, 15],
+      [16, 12, 4, 12], [16, heightTiles - 24, 4, 12],
+      [widthTiles - 20, 12, 4, 12], [widthTiles - 20, heightTiles - 24, 4, 12],
+      [24, midY - 2, 10, 4], [widthTiles - 34, midY - 2, 10, 4],
+      [midX - 12, midY - 10, 6, 4], [midX + 6, midY + 6, 6, 4]
+    ],
+    odlaw: [
+      [midX - 10, 9, 4, 16], [midX + 6, heightTiles - 25, 4, 16],
+      [10, midY - 9, 16, 4], [widthTiles - 26, midY + 5, 16, 4],
+      [24, 12, 10, 4], [widthTiles - 34, heightTiles - 16, 10, 4],
+      [midX - 2, midY - 2, 4, 4], [midX - 18, midY + 10, 8, 4], [midX + 10, midY - 14, 8, 4]
+    ],
+    wenda: [
+      [midX - 18, 8, 4, 14], [midX + 14, 8, 4, 14],
+      [midX - 18, heightTiles - 22, 4, 14], [midX + 14, heightTiles - 22, 4, 14],
+      [18, midY - 8, 14, 4], [widthTiles - 32, midY - 8, 14, 4],
+      [18, midY + 4, 14, 4], [widthTiles - 32, midY + 4, 14, 4],
+      [midX - 4, midY - 12, 8, 4], [midX - 4, midY + 8, 8, 4]
+    ],
+    wizard: [
+      [midX - 2, 7, 4, 11], [midX - 2, heightTiles - 18, 4, 11],
+      [midX - 12, midY - 2, 24, 4],
+      [12, 12, 4, 12], [widthTiles - 16, 12, 4, 12],
+      [12, heightTiles - 24, 4, 12], [widthTiles - 16, heightTiles - 24, 4, 12],
+      [25, 18, 7, 4], [widthTiles - 32, 18, 7, 4],
+      [25, heightTiles - 22, 7, 4], [widthTiles - 32, heightTiles - 22, 7, 4]
+    ]
+  };
+
+  for (const rect of layouts[variant] || layouts.waldo) {
+    fillLaserTagWallRect(tiles, widthTiles, heightTiles, ...rect);
+  }
+}
+
+function fillLaserTagWallRect(tiles, widthTiles, heightTiles, x, y, width, height) {
+  const minX = Math.max(1, Math.floor(x));
+  const minY = Math.max(1, Math.floor(y));
+  const maxX = Math.min(widthTiles - 2, Math.floor(x + width - 1));
+  const maxY = Math.min(heightTiles - 2, Math.floor(y + height - 1));
+  for (let tileY = minY; tileY <= maxY; tileY += 1) {
+    for (let tileX = minX; tileX <= maxX; tileX += 1) {
+      setLaserTagWallTile(tiles, widthTiles, tileX, tileY);
+    }
+  }
+}
+
+function setLaserTagWallTile(tiles, widthTiles, tileX, tileY) {
+  tiles[tileY * widthTiles + tileX] = ASTEROID_TILE.rock;
+}
+
 const THEME_ASTEROID_GENERATION = Object.freeze({
   edgeMargin: 5,
   noiseScale: 0.09,
@@ -422,8 +783,10 @@ export function serializeAsteroid(asteroid) {
       tileY: pocket.tileY,
       radius: pocket.radius,
       spawnX: pocket.spawnX,
-      spawnY: pocket.spawnY
-    }))
+      spawnY: pocket.spawnY,
+      angle: pocket.angle
+    })),
+    laserTag: asteroid.laserTag || null
   };
 }
 

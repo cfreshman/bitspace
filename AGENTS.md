@@ -51,6 +51,7 @@ LLM instructions
   > "what? no. bro. im saying the site has padding (which we added later) AND the HUD has padding"
   if you notice, you OVERCOMPENSATE - i say one thing and you go fucking somewhere else. stop doing this
 - implement things in a way that will stand the test of time. dont name functions based on their current implementation, unless that is why the function exists. dont make mistakes
+- YOU CANNOT DRAW A CYLINDER BY DRAWING PARALLEL LINES. THEY WILL NOT DRAW ON THE DIAGONAL
 
 ## LLM ERRATA
 

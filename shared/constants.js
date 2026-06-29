@@ -9,7 +9,8 @@ export const GAME_MODES = Object.freeze({
   subs2: "subs2",
   bugs: "bugs",
   clouds: "clouds",
-  octopus: "octopus"
+  octopus: "octopus",
+  laserTag: "laserTag"
 });
 
 export const RENDER = Object.freeze({
@@ -156,6 +157,22 @@ export const ENGINE = Object.freeze({
       maxPointScale: 1.18
     }
   },
+  laserTag: {
+    radius: 7,
+    tileSize: 16,
+    speedMultiplier: 1.5,
+    health: 1,
+    fireIntervalSeconds: 0.65,
+    blastRadius: 2,
+    maxRangeVisualRadiusScale: 1.3,
+    beamLerpSeconds: 0.25,
+    matchSeconds: 8 * 60,
+    scoreLimit: 800,
+    hitPoints: 16,
+    diamondPoints: 16,
+    gatePoints: 1,
+    diamondSpawnSeconds: 6
+  },
   player: {
     startingHealthBars: 3,
     maxHealthBars: 8,
@@ -234,6 +251,9 @@ export function shipThrustForGameMode(gameMode) {
   if (isSubThemedGameMode(gameMode)) {
     return ENGINE.ship.thrust * ENGINE.subs.thrustMultiplier;
   }
+  if (gameMode === GAME_MODES.laserTag) {
+    return ENGINE.ship.thrust * ENGINE.laserTag.speedMultiplier;
+  }
   return ENGINE.ship.thrust;
 }
 
@@ -261,7 +281,19 @@ export function mapTileSizeForGameMode(gameMode) {
   if (gameMode === GAME_MODES.octopus) {
     return ENGINE.octopus.tileSize;
   }
+  if (gameMode === GAME_MODES.laserTag) {
+    return ENGINE.laserTag.tileSize;
+  }
   return RENDER.tileSize;
+}
+
+export function laserTagBlastMaxRange() {
+  const visualRadius = Math.min(RENDER.width, RENDER.height) / 2;
+  return Math.max(1, visualRadius * ENGINE.laserTag.maxRangeVisualRadiusScale);
+}
+
+export function laserTagBeamDurationSeconds() {
+  return Math.max(0.01, ENGINE.laserTag.beamLerpSeconds || 0.25);
 }
 
 export function playerRadiusForGameMode(gameMode) {
@@ -273,6 +305,9 @@ export function playerRadiusForGameMode(gameMode) {
   }
   if (gameMode === GAME_MODES.octopus) {
     return ENGINE.octopus.radius;
+  }
+  if (gameMode === GAME_MODES.laserTag) {
+    return ENGINE.laserTag.radius;
   }
   return ENGINE.ship.radius;
 }
@@ -301,4 +336,8 @@ export function isSubThemedGameMode(gameMode) {
 
 export function isWaterThemedGameMode(gameMode) {
   return isSubThemedGameMode(gameMode) || gameMode === GAME_MODES.octopus;
+}
+
+export function isLaserTagGameMode(gameMode) {
+  return gameMode === GAME_MODES.laserTag;
 }

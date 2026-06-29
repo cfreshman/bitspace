@@ -27,6 +27,9 @@ export function diffArenaSnapshot(previous, next) {
   if (!sameJson(previous.effects, next.effects)) {
     delta.effects = next.effects;
   }
+  if (!sameJson(previous.laserTag, next.laserTag)) {
+    delta.laserTag = next.laserTag;
+  }
 
   return delta;
 }
@@ -50,7 +53,10 @@ export function applyArenaSnapshotDelta(base, payload) {
     entities: Array.isArray(payload.entities) ? payload.entities : base.entities,
     effects: Object.prototype.hasOwnProperty.call(payload, "effects")
       ? payload.effects
-      : base.effects
+      : base.effects,
+    laserTag: Object.prototype.hasOwnProperty.call(payload, "laserTag")
+      ? payload.laserTag
+      : base.laserTag
   };
 }
 

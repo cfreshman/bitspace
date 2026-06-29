@@ -685,6 +685,26 @@ export function createRoomManager(options = {}) {
       return false;
     }
 
+    if (normalizeGameMode(room.mode) === GAME_MODES.laserTag) {
+      if (room.arena.laserTag?.ended !== true) {
+        return false;
+      }
+
+      const winnerTeam = room.arena.laserTag.winnerTeam;
+      const winner = Array.from(room.arena.players.values())
+        .filter((player) => player.team === winnerTeam)
+        .sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
+      room.state = ROOM_STATES.ended;
+      room.endedAtMs = now();
+      room.endReason = reason === "last_alive" ? "score" : reason;
+      room.winnerId = winner?.id ?? null;
+      room.winnerName = winnerTeam ? `${winnerTeam.toUpperCase()} TEAM` : winner?.name ?? null;
+      room.resetToLobbyAtMs = room.kind === ROOM_KIND.named
+        ? now() + NAMED_ROOM_RESET_DELAY_MS
+        : null;
+      return true;
+    }
+
     const alivePlayers = Array.from(room.arena.players.values()).filter((player) => player.alive);
     if (alivePlayers.length > 1) {
       return false;
@@ -1035,7 +1055,8 @@ function createLobbyArena(id, seed, mode = GAME_MODES.bitspace, params = {}) {
     seed: `${seed}:theme-lobby`,
     tileSize,
     createLobbyPockets: true,
-    playerCount: ENGINE.maxPlayers
+    playerCount: ENGINE.maxPlayers,
+    seedResources: false
   });
   return createArena({
     id,
@@ -1065,6 +1086,9 @@ function normalizeGameMode(mode) {
   }
   if (mode === GAME_MODES.octopus) {
     return GAME_MODES.octopus;
+  }
+  if (mode === GAME_MODES.laserTag) {
+    return GAME_MODES.laserTag;
   }
   return GAME_MODES.bitspace;
 }

@@ -25,14 +25,20 @@ import {
   createRoomManager,
   ROOM_STATES
 } from "./rooms.js";
+import {
+  laserTagMapFiles,
+  loadLaserTagMapsFromDirectory
+} from "./laser-tag-map-loader.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
 const sharedDir = path.join(rootDir, "shared");
+const laserTagMapDir = path.join(publicDir, "maps", "laser-tag");
 const port = Number(process.env.PORT || process.env.BITSPACE_PORT || 7024);
 const baseSeed = process.env.BITSPACE_SEED || createArenaSeed();
+const loadedLaserTagMaps = loadLaserTagMapsFromDirectory(laserTagMapDir);
 const roomManager = createRoomManager({
   seedFactory(roomNumber) {
     return `${baseSeed}:${roomNumber}`;
@@ -47,6 +53,9 @@ const io = new Server(server, {
 
 app.disable("x-powered-by");
 app.use("/shared", express.static(sharedDir));
+app.get("/maps/laser-tag/index.json", (_request, response) => {
+  response.json(laserTagMapFiles(laserTagMapDir));
+});
 app.use(express.static(publicDir, { extensions: ["html"] }));
 
 app.get("/health", (_request, response) => {
@@ -55,6 +64,7 @@ app.get("/health", (_request, response) => {
     ok: true,
     name: "BITSPACE",
     seed: baseSeed,
+    laserTagMaps: loadedLaserTagMaps,
     rooms: rooms.map((room) => ({
       id: room.id,
       state: room.state,

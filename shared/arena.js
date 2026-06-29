@@ -1,4 +1,4 @@
-import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, mapTileSizeForGameMode, miningRayLengthForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
+import { ENGINE, GAME_MODES, RENDER, isSubThemedGameMode, laserTagBeamDurationSeconds, laserTagBlastMaxRange, mapTileSizeForGameMode, miningRayLengthForGameMode, miningSecondsForGameMode, playerMassScaleForGameMode, playerRadiusForGameMode, shipFrictionForGameMode, shipThrustForGameMode } from "./constants.js";
 import { buildClosestTileRing, buildTileVisibleFromOrigin, closestBuildTileByCenterAngle } from "./build.js";
 import {
   ASTEROID_TILE,
@@ -7,6 +7,7 @@ import {
   blockingTilesNearCircle,
   circleBlockerOverlap,
   createAsteroid,
+  createLaserTagAsteroid,
   isAsteroidRockTile,
   raycastAsteroid,
   serializeAsteroid,
@@ -45,6 +46,10 @@ import {
   miningSideRayOffsetForPlayer,
   miningRayLanesForPlayer
 } from "./mining.js";
+import {
+  laserTagMapIds,
+  sanitizeLaserTagMapId
+} from "./laser-tag-maps.js";
 
 const DEFAULT_ARENA_ID = "main";
 const INITIAL_SPAWN_ANGLE = Math.PI / 4;
@@ -52,6 +57,8 @@ const KILL_DROP_SINGLE_DIAMOND_CHANCE = 2 / 3;
 const KILL_DROP_NOTICE_TICKS = ENGINE.tickRate * 3;
 const LAST_HIT_NOTICE_TICKS = ENGINE.tickRate * 5;
 const RANDOM_DIAMOND_SPAWN_TICKS = ENGINE.tickRate * 15;
+const LASER_TAG_GHOST_RETURN_SECONDS = 5;
+const LASER_TAG_TEAMS = Object.freeze(["red", "blue"]);
 const CAR_GROUND_VARIANTS = Object.freeze({
   desert: "desert",
   grass: "grass"
@@ -61,16 +68,24 @@ export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
   const mode = normalizeGameMode(options.mode);
   const params = createArenaParams(mode, seed, options.params);
-  const asteroid = options.asteroid ?? createAsteroid({
-    seed: `${seed}:asteroid`,
-    playerCount: options.playerCount,
-    tileSize: mapTileSizeForGameMode(mode)
-  });
+  const laserTag = mode === GAME_MODES.laserTag;
+  const asteroid = options.asteroid ?? (laserTag
+    ? createLaserTagAsteroid({
+        seed: `${seed}:laser-tag`,
+        playerCount: options.playerCount,
+        tileSize: mapTileSizeForGameMode(mode),
+        variant: params.laserTagMap
+      })
+    : createAsteroid({
+        seed: `${seed}:asteroid`,
+        playerCount: options.playerCount,
+        tileSize: mapTileSizeForGameMode(mode)
+      }));
   const playerDamage = options.playerDamage ?? true;
-  const asteroidMining = options.asteroidMining ?? true;
-  const stormEnabled = options.storm ?? playerDamage;
+  const asteroidMining = options.asteroidMining ?? !laserTag;
+  const stormEnabled = options.storm ?? (playerDamage && !laserTag);
 
-  return {
+  const arena = {
     id: options.id ?? DEFAULT_ARENA_ID,
     mode,
     params,
@@ -92,6 +107,12 @@ export function createArena(options = {}) {
     huckRockButtonHits: [],
     effects: []
   };
+
+  if (laserTag) {
+    initializeLaserTagArena(arena);
+  }
+
+  return arena;
 }
 
 export function addPlayer(arena, playerOptions) {
@@ -101,9 +122,15 @@ export function addPlayer(arena, playerOptions) {
 
   const number = nextPlayerNumber(arena);
   const spawnNumber = playerOptions.spawnNumber ?? number;
-  const spawn = spawnForPlayerNumber(spawnNumber, arena.asteroid);
+  const laserTag = normalizeGameMode(arena.mode) === GAME_MODES.laserTag;
+  const team = laserTagTeamForPlayerNumber(number);
+  const spawn = laserTag
+    ? laserTagSpawnForPlayer(arena, team, number)
+    : spawnForPlayerNumber(spawnNumber, arena.asteroid);
   const startingResources = playerOptions.resources || {};
   const gameMode = normalizeGameMode(arena.mode);
+  const healthBars = laserTag ? 1 : ENGINE.player.startingHealthBars;
+  const maxHealth = laserTag ? ENGINE.laserTag.health : playerMaxHealth(healthBars, gameMode);
   const player = {
     id: playerOptions.id,
     number,
@@ -145,6 +172,7 @@ export function addPlayer(arena, playerOptions) {
     buttonTargetActivated: false,
     huckRockCooldownSeconds: 0,
     huckRockEngineCutoutSeconds: 0,
+    laserTagCooldownSeconds: 0,
     miningTargetIndex: null,
     miningPhase: null,
     miningProgress: 0,
@@ -152,9 +180,15 @@ export function addPlayer(arena, playerOptions) {
     shake: 0,
     radius: playerRadiusForGameMode(arena.mode),
     upgrades: createUpgradeState(),
-    healthBars: ENGINE.player.startingHealthBars,
-    health: playerMaxHealth(ENGINE.player.startingHealthBars, gameMode),
-    maxHealth: playerMaxHealth(ENGINE.player.startingHealthBars, gameMode),
+    healthBars,
+    health: maxHealth,
+    maxHealth,
+    team: laserTag ? team : null,
+    score: 0,
+    laserTagGhost: false,
+    laserTagGhostReturn: null,
+    laserTagOutUntilTick: 0,
+    laserTagLastEvent: null,
     kills: 0,
     lastKillDropAmount: 0,
     lastKillDropTick: Number.NEGATIVE_INFINITY,
@@ -273,6 +307,10 @@ export function setPlayerTalk(arena, playerId, text) {
 }
 
 export function purchasePlayerUpgrade(arena, playerId, upgradeId) {
+  if (normalizeGameMode(arena?.mode) === GAME_MODES.laserTag) {
+    return { ok: false, reason: "upgrades_disabled" };
+  }
+
   const player = arena.players.get(playerId);
   if (!player || !player.alive) {
     return { ok: false, reason: "player_unavailable" };
@@ -305,6 +343,10 @@ export function purchasePlayerUpgrade(arena, playerId, upgradeId) {
 }
 
 export function buildPlayerWall(arena, playerId, payload = {}) {
+  if (normalizeGameMode(arena?.mode) === GAME_MODES.laserTag) {
+    return { ok: false, reason: "building_disabled" };
+  }
+
   const player = arena.players.get(playerId);
   if (!player || !player.alive) {
     return { ok: false, reason: "player_unavailable" };
@@ -360,9 +402,14 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
 
 export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) {
   arena.tick += 1;
+  const gameMode = normalizeGameMode(arena.mode);
+  if (gameMode === GAME_MODES.laserTag) {
+    stepLaserTagArena(arena, dtSeconds, options);
+    return;
+  }
+
   stepStorm(arena);
   spawnRandomDiamond(arena);
-  const gameMode = normalizeGameMode(arena.mode);
 
   for (const player of arena.players.values()) {
     if (player.alive) {
@@ -379,6 +426,809 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) 
   processMining(arena, dtSeconds);
 }
 
+function initializeLaserTagArena(arena) {
+  const config = ENGINE.laserTag;
+  arena.laserTag = {
+    startedTick: arena.tick,
+    ended: false,
+    winnerTeam: null,
+    teamScores: { red: 0, blue: 0 },
+    nextDiamondSpawnTick: arena.tick,
+    shots: [],
+    events: []
+  };
+
+  for (const gate of arena.asteroid?.laserTag?.gates || []) {
+    arena.entities.set(gate.id, createLaserTagTargetEntity(arena, gate, "laserGate"));
+  }
+
+  arena.laserTag.nextDiamondSpawnTick = arena.tick + Math.round(config.diamondSpawnSeconds * ENGINE.tickRate);
+}
+
+function createLaserTagTargetEntity(arena, target, type) {
+  return {
+    id: target.id,
+    type,
+    team: target.team,
+    label: target.label,
+    x: Math.round(target.x - arena.asteroid.tileSize),
+    y: Math.round(target.y - arena.asteroid.tileSize),
+    width: arena.asteroid.tileSize * 2,
+    height: arena.asteroid.tileSize * 2
+  };
+}
+
+function stepLaserTagArena(arena, dtSeconds, options = {}) {
+  spawnScheduledLaserTagDiamond(arena);
+
+  for (const player of arena.players.values()) {
+    player.alive = true;
+    if (laserTagPlayerIsOut(player)) {
+      stepLaserTagGhostReturn(arena, player, dtSeconds);
+      continue;
+    } else if (player.health <= 0) {
+      respawnLaserTagPlayer(arena, player);
+    }
+    stepPlayer(arena, player, dtSeconds, options);
+  }
+
+  stepLaserTagBlasts(arena, dtSeconds);
+  resolvePlayerCollisions(arena);
+  updateLaserTagEndState(arena);
+}
+
+function spawnScheduledLaserTagDiamond(arena) {
+  if (!arena.laserTag || arena.tick < arena.laserTag.nextDiamondSpawnTick) {
+    return false;
+  }
+
+  const spawned = spawnRandomLaserTagDiamond(arena, `${arena.seed}:laser-tag:diamond:${arena.tick}`);
+  arena.laserTag.nextDiamondSpawnTick = arena.tick + Math.round(ENGINE.laserTag.diamondSpawnSeconds * ENGINE.tickRate);
+  return spawned;
+}
+
+function spawnRandomLaserTagDiamond(arena, seed) {
+  const asteroid = arena.asteroid;
+  if (!asteroid) {
+    return false;
+  }
+
+  const random = createSeededRandom(seed);
+  let selectedIndex = null;
+  let candidateCount = 0;
+  for (let index = 0; index < asteroid.tiles.length; index += 1) {
+    if (!laserTagDiamondCandidate(asteroid, index)) {
+      continue;
+    }
+    candidateCount += 1;
+    if (random() < 1 / candidateCount) {
+      selectedIndex = index;
+    }
+  }
+
+  if (selectedIndex === null) {
+    return false;
+  }
+
+  clearMiningProgress(arena, selectedIndex);
+  setAsteroidTile(arena, selectedIndex, ASTEROID_TILE.diamond, 1);
+  return true;
+}
+
+function laserTagDiamondCandidate(asteroid, index) {
+  if (asteroid.tiles[index] !== ASTEROID_TILE.rock) {
+    return false;
+  }
+
+  const tileX = index % asteroid.widthTiles;
+  const tileY = Math.floor(index / asteroid.widthTiles);
+  return laserTagTileIsOpen(asteroid, tileX + 1, tileY) ||
+    laserTagTileIsOpen(asteroid, tileX - 1, tileY) ||
+    laserTagTileIsOpen(asteroid, tileX, tileY + 1) ||
+    laserTagTileIsOpen(asteroid, tileX, tileY - 1);
+}
+
+function laserTagTileIsOpen(asteroid, tileX, tileY) {
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return false;
+  }
+  return asteroid.tiles[tileY * asteroid.widthTiles + tileX] === ASTEROID_TILE.empty;
+}
+
+function processLaserTagInput(arena, player, dtSeconds) {
+  player.laserTagCooldownSeconds = Math.max(0, (player.laserTagCooldownSeconds || 0) - dtSeconds);
+  const firing = player.input.mining || player.input.huckRock;
+  if (
+    !firing ||
+    !arena.asteroid ||
+    player.laserTagCooldownSeconds > 0 ||
+    laserTagPlayerIsOut(player)
+  ) {
+    return;
+  }
+
+  const config = ENGINE.laserTag;
+  const angle = laserTagFireAngle(player);
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  const startOffset = player.radius || config.radius;
+  const startX = player.x + direction.x * startOffset;
+  const startY = player.y + direction.y * startOffset;
+  const maxDistance = laserTagBlastMaxRange();
+  const team = player.team || laserTagTeamForPlayerNumber(player.number);
+  const id = `laser-blast:${player.id}:${arena.tick}`;
+  const probe = {
+    id,
+    type: "laserBlast",
+    ownerId: player.id,
+    team
+  };
+  const hit = laserTagBlastHit(arena, probe, startX, startY, angle, maxDistance);
+  const rayDistance = hit
+    ? Math.max(0, Math.min(maxDistance, Number(hit.distance) || 0))
+    : maxDistance;
+  const endX = startX + direction.x * rayDistance;
+  const endY = startY + direction.y * rayDistance;
+  const beam = {
+    id,
+    type: "laserBlast",
+    ownerId: player.id,
+    team,
+    x: roundForSnapshot(endX),
+    y: roundForSnapshot(endY),
+    spawnX: roundForSnapshot(startX),
+    spawnY: roundForSnapshot(startY),
+    previousX: roundForSnapshot(startX),
+    previousY: roundForSnapshot(startY),
+    fullEndX: roundForSnapshot(endX),
+    fullEndY: roundForSnapshot(endY),
+    hit: Boolean(hit),
+    hitX: roundForSnapshot(endX),
+    hitY: roundForSnapshot(endY),
+    angle: roundForSnapshot(angle),
+    radius: config.blastRadius,
+    maxDistance: roundForSnapshot(maxDistance),
+    targetDistance: roundForSnapshot(rayDistance),
+    retractFromDistance: roundForSnapshot(rayDistance),
+    retractToDistance: roundForSnapshot(rayDistance),
+    beamLerpSeconds: roundForSnapshot(laserTagBeamDurationSeconds()),
+    ageSeconds: 0,
+    bornTick: arena.tick
+  };
+  if (hit) {
+    handleLaserTagBlastHit(arena, beam, hit);
+  }
+  addLaserTagShot(arena, beam);
+  player.laserTagCooldownSeconds = config.fireIntervalSeconds;
+}
+
+function addLaserTagShot(arena, beam) {
+  if (!arena?.laserTag || !beam) {
+    return;
+  }
+
+  arena.laserTag.shots = (arena.laserTag.shots || []).concat({
+    ...beam,
+    shotTick: arena.tick
+  }).slice(-32);
+}
+
+function laserTagFireAngle(player) {
+  const targetX = player.input?.huckRockTargetX;
+  const targetY = player.input?.huckRockTargetY;
+  if ((player.input?.huckRock || player.input?.mining) && Number.isFinite(targetX) && Number.isFinite(targetY)) {
+    return Math.atan2(targetY - player.y, targetX - player.x);
+  }
+  return player.aimAngle ?? player.angle;
+}
+
+function stepLaserTagBlasts(arena, dtSeconds) {
+  pruneLaserTagShots(arena);
+  const blasts = Array.from(arena.entities.values()).filter((entity) => entity.type === "laserBlast");
+
+  for (const entity of blasts) {
+    entity.ageSeconds = (entity.ageSeconds || 0) + dtSeconds;
+    if (entity.ageSeconds > 1 / ENGINE.tickRate) {
+      arena.entities.delete(entity.id);
+    }
+  }
+}
+
+function pruneLaserTagShots(arena) {
+  if (!arena?.laserTag?.shots?.length) {
+    return;
+  }
+
+  const retainTicks = Math.max(
+    1,
+    Math.ceil(Math.max(0.75, laserTagBeamDurationSeconds() * 2) * ENGINE.tickRate)
+  );
+  arena.laserTag.shots = arena.laserTag.shots.filter((shot) => {
+    const shotTick = Number.isFinite(shot.shotTick) ? shot.shotTick : arena.tick;
+    return arena.tick - shotTick <= retainTicks;
+  });
+}
+
+function laserTagBlastHit(arena, entity, startX, startY, angle, distance) {
+  if (distance <= 0.000001) {
+    return null;
+  }
+
+  const start = { x: startX, y: startY };
+  let nearest = null;
+
+  const asteroidHit = raycastAsteroid(arena.asteroid, startX, startY, angle, distance, {
+    blockNonPlayable: true
+  });
+  if (asteroidHit?.hit) {
+    nearest = {
+      type: "asteroid",
+      distance: asteroidHit.distance,
+      hit: asteroidHit
+    };
+  }
+
+  const targetHit = laserTagBlastTargetHit(arena, entity, start, angle, distance);
+  if (targetHit && (!nearest || targetHit.distance < nearest.distance)) {
+    nearest = targetHit;
+  }
+
+  const playerHit = laserTagBlastPlayerHit(arena, entity, start, angle, distance);
+  if (playerHit && (!nearest || playerHit.distance < nearest.distance)) {
+    nearest = playerHit;
+  }
+
+  return nearest;
+}
+
+function laserTagBlastTargetHit(arena, entity, start, angle, maxDistance) {
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  let nearest = null;
+  for (const target of arena.entities.values()) {
+    if (target.type !== "laserGate") {
+      continue;
+    }
+    if (entity.team && target.team && entity.team === target.team) {
+      continue;
+    }
+    const hit = rayRectIntersection(start, direction, target, maxDistance);
+    if (!hit || (nearest && hit.distance >= nearest.distance)) {
+      continue;
+    }
+    nearest = {
+      type: "laserTarget",
+      distance: hit.distance,
+      hit,
+      target
+    };
+  }
+  return nearest;
+}
+
+function laserTagBlastPlayerHit(arena, entity, start, angle, maxDistance) {
+  const direction = {
+    x: Math.cos(angle),
+    y: Math.sin(angle)
+  };
+  let nearest = null;
+  for (const target of arena.players.values()) {
+    if (
+      target.id === entity.ownerId ||
+      target.alive === false ||
+      laserTagPlayerIsOut(target)
+    ) {
+      continue;
+    }
+    const hit = rayCircleIntersection(start, direction, target, target.radius, maxDistance);
+    if (!hit || (nearest && hit.distance >= nearest.distance)) {
+      continue;
+    }
+    nearest = {
+      type: "player",
+      distance: hit.distance,
+      hit,
+      target
+    };
+  }
+  return nearest;
+}
+
+function handleLaserTagBlastHit(arena, entity, hit) {
+  if (hit.type === "player") {
+    tagLaserTagPlayer(arena, entity, hit.target);
+    return;
+  }
+
+  if (hit.type === "laserTarget") {
+    tagLaserTagTarget(arena, entity, hit.target);
+    return;
+  }
+
+  if (hit.type !== "asteroid") {
+    return;
+  }
+
+  const tileHit = hit.hit;
+  if (tileHit.index >= 0 && tileHit.tile === ASTEROID_TILE.diamond) {
+    const shooter = arena.players.get(entity.ownerId);
+    addLaserTagScore(arena, shooter, ENGINE.laserTag.diamondPoints, "DIAMOND BLASTED");
+    setAsteroidTile(arena, tileHit.index, ASTEROID_TILE.rock, 0);
+  }
+}
+
+function tagLaserTagPlayer(arena, entity, target) {
+  const shooter = arena.players.get(entity.ownerId);
+  if (!shooter || !target) {
+    return;
+  }
+
+  if (!laserTagBaseForTeam(arena, target.team)) {
+    return;
+  }
+
+  if (shooter.team && target.team && shooter.team === target.team) {
+    return;
+  }
+
+  addLaserTagScore(arena, shooter, ENGINE.laserTag.hitPoints, "OPPONENT HIT");
+  shooter.kills = Math.max(0, Math.floor(Number(shooter.kills || 0))) + 1;
+  startLaserTagGhostReturn(arena, target);
+  target.health = 0;
+  target.laserTagOutUntilTick = 0;
+  target.mining = false;
+  target.miningRay = null;
+  target.rayExtension = 0;
+  target.lastDamageTick = arena.tick;
+  target.killedById = shooter.id;
+  target.eliminatedAtTick = arena.tick;
+  shooter.lastHitTargetId = target.id;
+  shooter.lastHitTick = arena.tick;
+  shooter.lastHitHealth = 0;
+  shooter.lastHitMaxHealth = target.maxHealth;
+  shooter.lastHitHealthBars = target.healthBars;
+}
+
+function tagLaserTagTarget(arena, entity, target) {
+  const shooter = arena.players.get(entity.ownerId);
+  if (!shooter || !target || shooter.team === target.team) {
+    return;
+  }
+
+  addLaserTagScore(arena, shooter, ENGINE.laserTag.gatePoints, `${target.label} HIT`);
+  pushLaserTagEvent(arena, `${target.label} UNDER ATTACK`, target.team);
+}
+
+function addLaserTagScore(arena, player, amount, reason = "") {
+  if (!arena?.laserTag || !player) {
+    return;
+  }
+  const delta = Math.round(Number(amount) || 0);
+  player.score = Math.max(0, Math.floor(Number(player.score || 0)) + delta);
+  const team = player.team || laserTagTeamForPlayerNumber(player.number);
+  arena.laserTag.teamScores[team] = Math.max(0, Math.floor(Number(arena.laserTag.teamScores[team] || 0)) + delta);
+  if (reason) {
+    player.laserTagLastEvent = {
+      tick: arena.tick,
+      reason,
+      delta
+    };
+  }
+}
+
+function pushLaserTagEvent(arena, text, team = "") {
+  if (!arena?.laserTag) {
+    return;
+  }
+  arena.laserTag.events.push({
+    id: `${arena.tick}:${arena.laserTag.events.length}:${text}`,
+    tick: arena.tick,
+    text,
+    team
+  });
+  arena.laserTag.events = arena.laserTag.events.slice(-12);
+}
+
+function respawnLaserTagPlayer(arena, player) {
+  const spawn = laserTagSpawnForPlayer(arena, player.team, player.number);
+  player.x = spawn.x;
+  player.y = spawn.y;
+  player.vx = 0;
+  player.vy = 0;
+  player.angle = spawn.angle;
+  player.carHeading = spawn.angle;
+  player.aimAngle = spawn.angle;
+  player.health = player.maxHealth || ENGINE.laserTag.health;
+  player.laserTagGhost = false;
+  player.laserTagGhostReturn = null;
+  player.laserTagOutUntilTick = 0;
+  player.mining = false;
+  player.miningRay = null;
+  player.rayExtension = 0;
+}
+
+function restoreLaserTagPlayerAtBase(player) {
+  player.health = player.maxHealth || ENGINE.laserTag.health;
+  player.laserTagGhost = false;
+  player.laserTagGhostReturn = null;
+  player.laserTagOutUntilTick = 0;
+  player.mining = false;
+  player.miningRay = null;
+  player.rayExtension = 0;
+}
+
+function laserTagPlayerIsOut(player) {
+  return player?.laserTagGhost === true;
+}
+
+function startLaserTagGhostReturn(arena, player) {
+  player.laserTagGhost = true;
+  player.laserTagGhostReturn = createLaserTagGhostReturn(arena, player);
+}
+
+function createLaserTagGhostReturn(arena, player) {
+  const base = laserTagBaseForTeam(arena, player?.team);
+  const points = laserTagBaseReturnPoints(arena, player, base);
+  return {
+    elapsedSeconds: 0,
+    durationSeconds: LASER_TAG_GHOST_RETURN_SECONDS,
+    distance: 0,
+    totalDistance: pathPointDistance(points),
+    points
+  };
+}
+
+function stepLaserTagGhostReturn(arena, player, dtSeconds) {
+  player.health = 0;
+  player.vx = 0;
+  player.vy = 0;
+  player.thrusting = false;
+  player.mining = false;
+  player.miningRay = null;
+  player.rayExtension = 0;
+  player.miningHoldSeconds = 0;
+  player.huckRockCooldownSeconds = 0;
+  player.laserTagCooldownSeconds = Math.max(0, (player.laserTagCooldownSeconds || 0) - dtSeconds);
+
+  if (!player.laserTagGhostReturn?.points?.length) {
+    player.laserTagGhostReturn = createLaserTagGhostReturn(arena, player);
+  }
+
+  const route = player.laserTagGhostReturn;
+  if (!route?.points?.length || route.totalDistance <= 0) {
+    const base = laserTagBaseForTeam(arena, player?.team);
+    if (base) {
+      player.x = base.x + base.width / 2;
+      player.y = base.y + base.height / 2;
+    }
+    restoreLaserTagPlayerAtBase(player);
+    return;
+  }
+
+  route.elapsedSeconds = Math.min(
+    route.durationSeconds,
+    Math.max(0, route.elapsedSeconds + dtSeconds)
+  );
+  const progress = clamp(route.elapsedSeconds / Math.max(0.001, route.durationSeconds), 0, 1);
+  const targetDistance = route.totalDistance * progress;
+  const beforeX = player.x;
+  const beforeY = player.y;
+  const point = pointAlongPath(route.points, targetDistance);
+  player.x = point.x;
+  player.y = point.y;
+  const dx = player.x - beforeX;
+  const dy = player.y - beforeY;
+  if (dx !== 0 || dy !== 0) {
+    player.angle = Math.atan2(dy, dx);
+    player.aimAngle = player.angle;
+    player.vx = dx / Math.max(0.001, dtSeconds);
+    player.vy = dy / Math.max(0.001, dtSeconds);
+  }
+
+  if (progress >= 1) {
+    player.vx = 0;
+    player.vy = 0;
+    restoreLaserTagPlayerAtBase(player);
+  }
+}
+
+function laserTagBaseReturnPoints(arena, player, base) {
+  if (!arena?.asteroid || !base) {
+    return [{ x: player.x, y: player.y }];
+  }
+
+  const asteroid = arena.asteroid;
+  const startIndex = nearestLaserTagOpenTileIndex(
+    asteroid,
+    Math.floor(player.x / asteroid.tileSize),
+    Math.floor(player.y / asteroid.tileSize)
+  );
+  const baseX = base.x + base.width / 2;
+  const baseY = base.y + base.height / 2;
+  const goalIndex = nearestLaserTagOpenTileIndex(
+    asteroid,
+    Math.floor(baseX / asteroid.tileSize),
+    Math.floor(baseY / asteroid.tileSize)
+  );
+
+  if (startIndex < 0 || goalIndex < 0) {
+    return [{ x: player.x, y: player.y }, { x: baseX, y: baseY }];
+  }
+
+  const indexes = findLaserTagAStarPath(asteroid, startIndex, goalIndex);
+  if (!indexes.length) {
+    return [{ x: player.x, y: player.y }, { x: baseX, y: baseY }];
+  }
+
+  const points = [{ x: player.x, y: player.y }];
+  for (let index = 1; index < indexes.length; index += 1) {
+    points.push(tileCenterPoint(asteroid, indexes[index]));
+  }
+  points.push({ x: baseX, y: baseY });
+  return simplifyCollinearPath(points);
+}
+
+function nearestLaserTagOpenTileIndex(asteroid, tileX, tileY, maxRadius = 10) {
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let radius = 0; radius <= maxRadius; radius += 1) {
+    for (let y = tileY - radius; y <= tileY + radius; y += 1) {
+      for (let x = tileX - radius; x <= tileX + radius; x += 1) {
+        if (Math.max(Math.abs(x - tileX), Math.abs(y - tileY)) !== radius) {
+          continue;
+        }
+        const index = y * asteroid.widthTiles + x;
+        if (!laserTagPathTileOpen(asteroid, index)) {
+          continue;
+        }
+        const distance = (x - tileX) * (x - tileX) + (y - tileY) * (y - tileY);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = index;
+        }
+      }
+    }
+    if (bestIndex >= 0) {
+      return bestIndex;
+    }
+  }
+  return bestIndex;
+}
+
+function findLaserTagAStarPath(asteroid, startIndex, goalIndex) {
+  if (startIndex === goalIndex) {
+    return [startIndex];
+  }
+
+  const count = asteroid.tiles.length;
+  const cameFrom = new Int32Array(count);
+  const gScore = new Float32Array(count);
+  const closed = new Uint8Array(count);
+  cameFrom.fill(-1);
+  gScore.fill(Number.POSITIVE_INFINITY);
+  gScore[startIndex] = 0;
+
+  const open = [{ index: startIndex, priority: laserTagPathHeuristic(asteroid, startIndex, goalIndex) }];
+  while (open.length > 0) {
+    const current = takeLowestPriorityPathNode(open);
+    if (closed[current]) {
+      continue;
+    }
+    if (current === goalIndex) {
+      return reconstructIndexPath(cameFrom, current);
+    }
+    closed[current] = 1;
+
+    for (const neighbor of laserTagPathNeighbors(asteroid, current)) {
+      if (closed[neighbor] || !laserTagPathTileOpen(asteroid, neighbor)) {
+        continue;
+      }
+      const nextScore = gScore[current] + 1;
+      if (nextScore >= gScore[neighbor]) {
+        continue;
+      }
+      cameFrom[neighbor] = current;
+      gScore[neighbor] = nextScore;
+      open.push({
+        index: neighbor,
+        priority: nextScore + laserTagPathHeuristic(asteroid, neighbor, goalIndex)
+      });
+    }
+  }
+
+  return [];
+}
+
+function takeLowestPriorityPathNode(open) {
+  let bestIndex = 0;
+  let bestPriority = open[0].priority;
+  for (let index = 1; index < open.length; index += 1) {
+    if (open[index].priority < bestPriority) {
+      bestPriority = open[index].priority;
+      bestIndex = index;
+    }
+  }
+  const [entry] = open.splice(bestIndex, 1);
+  return entry.index;
+}
+
+function laserTagPathNeighbors(asteroid, index) {
+  const x = index % asteroid.widthTiles;
+  const y = Math.floor(index / asteroid.widthTiles);
+  const neighbors = [];
+  if (x > 0) {
+    neighbors.push(index - 1);
+  }
+  if (x < asteroid.widthTiles - 1) {
+    neighbors.push(index + 1);
+  }
+  if (y > 0) {
+    neighbors.push(index - asteroid.widthTiles);
+  }
+  if (y < asteroid.heightTiles - 1) {
+    neighbors.push(index + asteroid.widthTiles);
+  }
+  return neighbors;
+}
+
+function laserTagPathTileOpen(asteroid, index) {
+  if (index < 0 || index >= asteroid.tiles.length) {
+    return false;
+  }
+  const playable = asteroid.playable[index] === true || asteroid.playable[index] === "1";
+  return playable && !isAsteroidRockTile(asteroid.tiles[index]);
+}
+
+function laserTagPathHeuristic(asteroid, fromIndex, toIndex) {
+  const fromX = fromIndex % asteroid.widthTiles;
+  const fromY = Math.floor(fromIndex / asteroid.widthTiles);
+  const toX = toIndex % asteroid.widthTiles;
+  const toY = Math.floor(toIndex / asteroid.widthTiles);
+  return Math.abs(toX - fromX) + Math.abs(toY - fromY);
+}
+
+function reconstructIndexPath(cameFrom, current) {
+  const path = [current];
+  while (cameFrom[current] >= 0) {
+    current = cameFrom[current];
+    path.push(current);
+  }
+  path.reverse();
+  return path;
+}
+
+function tileCenterPoint(asteroid, index) {
+  const tileX = index % asteroid.widthTiles;
+  const tileY = Math.floor(index / asteroid.widthTiles);
+  return {
+    x: (tileX + 0.5) * asteroid.tileSize,
+    y: (tileY + 0.5) * asteroid.tileSize
+  };
+}
+
+function pathPointDistance(points) {
+  let distance = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    distance += Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
+  }
+  return distance;
+}
+
+function pointAlongPath(points, targetDistance) {
+  if (points.length <= 1) {
+    return points[0] || { x: 0, y: 0 };
+  }
+
+  let remaining = targetDistance;
+  for (let index = 1; index < points.length; index += 1) {
+    const from = points[index - 1];
+    const to = points[index];
+    const segmentDistance = Math.hypot(to.x - from.x, to.y - from.y);
+    if (segmentDistance <= 0) {
+      continue;
+    }
+    if (remaining <= segmentDistance) {
+      const t = clamp(remaining / segmentDistance, 0, 1);
+      return {
+        x: from.x + (to.x - from.x) * t,
+        y: from.y + (to.y - from.y) * t
+      };
+    }
+    remaining -= segmentDistance;
+  }
+  return points[points.length - 1];
+}
+
+function simplifyCollinearPath(points) {
+  if (points.length <= 2) {
+    return points;
+  }
+  const simplified = [points[0]];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = simplified[simplified.length - 1];
+    const current = points[index];
+    const next = points[index + 1];
+    const dx1 = Math.sign(current.x - previous.x);
+    const dy1 = Math.sign(current.y - previous.y);
+    const dx2 = Math.sign(next.x - current.x);
+    const dy2 = Math.sign(next.y - current.y);
+    if (dx1 === dx2 && dy1 === dy2) {
+      continue;
+    }
+    simplified.push(current);
+  }
+  simplified.push(points[points.length - 1]);
+  return simplified;
+}
+
+function laserTagPlayerAtOwnBase(arena, player) {
+  const base = laserTagBaseForTeam(arena, player?.team);
+  if (!base) {
+    return false;
+  }
+  return Boolean(circleRectOverlap(player, base));
+}
+
+function laserTagBaseForTeam(arena, team) {
+  if (!team || !arena?.asteroid?.laserTag) {
+    return null;
+  }
+  const tileSize = arena.asteroid.tileSize || ENGINE.laserTag.tileSize;
+  for (const base of arena.asteroid.laserTag.bases || []) {
+    if (base.team === team) {
+      return {
+        id: base.id,
+        team: base.team,
+        label: base.label,
+        x: Math.round(base.x - tileSize),
+        y: Math.round(base.y - tileSize),
+        width: tileSize * 2,
+        height: tileSize * 2
+      };
+    }
+  }
+  return null;
+}
+
+function laserTagTeamForPlayerNumber(number) {
+  return LASER_TAG_TEAMS[(Math.max(1, Math.floor(Number(number) || 1)) - 1) % LASER_TAG_TEAMS.length];
+}
+
+function laserTagSpawnForPlayer(arena, team, number) {
+  const teamName = team === "blue" ? "blue" : "red";
+  const spawns = arena.asteroid?.laserTag?.spawns?.[teamName] || [];
+  const teamIndex = Math.floor((Math.max(1, Math.floor(Number(number) || 1)) - 1) / LASER_TAG_TEAMS.length);
+  const spawn = spawns[teamIndex % Math.max(1, spawns.length)] || spawnForPlayerNumber(number, arena.asteroid);
+  return {
+    x: spawn.spawnX ?? spawn.x,
+    y: spawn.spawnY ?? spawn.y,
+    angle: Number.isFinite(spawn.angle) ? spawn.angle : teamName === "red" ? 0 : Math.PI
+  };
+}
+
+function updateLaserTagEndState(arena) {
+  if (!arena?.laserTag || arena.laserTag.ended) {
+    return;
+  }
+
+  const scores = arena.laserTag.teamScores || {};
+  const scoreLimit = ENGINE.laserTag.scoreLimit;
+  const ticksElapsed = arena.tick - (arena.laserTag.startedTick || 0);
+  const timeExpired = ticksElapsed >= ENGINE.laserTag.matchSeconds * ENGINE.tickRate;
+  const redWon = Number(scores.red || 0) >= scoreLimit;
+  const blueWon = Number(scores.blue || 0) >= scoreLimit;
+  if (!timeExpired && !redWon && !blueWon) {
+    return;
+  }
+
+  arena.laserTag.ended = true;
+  arena.laserTag.winnerTeam = Number(scores.blue || 0) > Number(scores.red || 0) ? "blue" : "red";
+}
+
 export function snapshotArena(arena) {
   return {
     arenaId: arena.id,
@@ -392,8 +1242,46 @@ export function snapshotArena(arena) {
     bugFootsteps: snapshotBugFootsteps(arena),
     asteroidMining: snapshotAsteroidMining(arena),
     entities: Array.from(arena.entities.values()).filter((entity) => entity.destroyed !== true),
-    effects: arena.effects
+    effects: arena.effects,
+    laserTag: snapshotLaserTag(arena)
   };
+}
+
+function snapshotLaserTag(arena) {
+  if (normalizeGameMode(arena.mode) !== GAME_MODES.laserTag || !arena.laserTag) {
+    return null;
+  }
+
+  return {
+    teamScores: {
+      red: Math.max(0, Math.floor(Number(arena.laserTag.teamScores?.red || 0))),
+      blue: Math.max(0, Math.floor(Number(arena.laserTag.teamScores?.blue || 0)))
+    },
+    scoreLimit: ENGINE.laserTag.scoreLimit,
+    startedTick: arena.laserTag.startedTick || 0,
+    matchSeconds: ENGINE.laserTag.matchSeconds,
+    ended: arena.laserTag.ended === true,
+    winnerTeam: arena.laserTag.winnerTeam || null,
+    events: (arena.laserTag.events || []).slice(-8),
+    shots: snapshotLaserTagShots(arena)
+  };
+}
+
+function snapshotLaserTagShots(arena) {
+  if (!Array.isArray(arena?.laserTag?.shots)) {
+    return [];
+  }
+
+  const retainTicks = Math.max(
+    1,
+    Math.ceil(Math.max(0.75, laserTagBeamDurationSeconds() * 2) * ENGINE.tickRate)
+  );
+  return arena.laserTag.shots
+    .filter((shot) => arena.tick - (Number.isFinite(shot.shotTick) ? shot.shotTick : arena.tick) <= retainTicks)
+    .map((shot) => ({
+      ...shot,
+      ageSeconds: 0
+    }));
 }
 
 function snapshotBugFootsteps(arena) {
@@ -439,15 +1327,39 @@ function stampBugFootstepsForPlayer(arena, player) {
 }
 
 function createArenaParams(mode, seed, params = {}) {
+  const safeParams = params && typeof params === "object" ? params : {};
+
+  if (mode === GAME_MODES.laserTag) {
+    return {
+      laserTagMap: sanitizeLaserTagMap(safeParams.laserTagMap) ||
+        defaultLaserTagMap()
+    };
+  }
+
   if (mode !== GAME_MODES.cars) {
     return {};
   }
 
-  const safeParams = params && typeof params === "object" ? params : {};
   return {
     carGround: sanitizeCarGroundVariant(safeParams.carGround) ||
       randomCarGroundVariant(seed)
   };
+}
+
+function sanitizeLaserTagMap(value) {
+  const id = sanitizeLaserTagMapId(value);
+  return id && laserTagMapIds().includes(id) ? id : null;
+}
+
+function defaultLaserTagMap() {
+  const maps = laserTagMapIds();
+  if (maps.includes("map-01")) {
+    return "map-01";
+  }
+  if (maps.length === 0) {
+    return "map-01";
+  }
+  return maps[0];
 }
 
 function sanitizeCarGroundVariant(value) {
@@ -540,7 +1452,12 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   const move = clampMagnitude(player.input.moveX, player.input.moveY, 1);
   const hasMoveIntent = move.x !== 0 || move.y !== 0;
   const canThrust = hasMoveIntent;
-  player.thrusting = gameMode === GAME_MODES.bugs || gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.octopus ? false : canThrust;
+  player.thrusting = gameMode === GAME_MODES.bugs ||
+    gameMode === GAME_MODES.clouds ||
+    gameMode === GAME_MODES.octopus ||
+    gameMode === GAME_MODES.laserTag
+    ? false
+    : canThrust;
 
   if (gameMode === GAME_MODES.cars) {
     simulateCarMovement(player, move, effects, dtSeconds);
@@ -565,7 +1482,11 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   player.rayExtension = miningRayExtension(player.mining, player.miningHoldSeconds);
   rechargePlayerHealth(arena, player, dtSeconds, effects);
 
-  processHuckRockInput(arena, player, dtSeconds);
+  if (gameMode === GAME_MODES.laserTag) {
+    processLaserTagInput(arena, player, dtSeconds);
+  } else {
+    processHuckRockInput(arena, player, dtSeconds);
+  }
 
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
@@ -1678,6 +2599,12 @@ function processMining(arena, dtSeconds) {
 }
 
 function processPlayerMining(arena, player, dtSeconds) {
+  if (normalizeGameMode(arena.mode) === GAME_MODES.laserTag) {
+    resetPlayerMiningTarget(player);
+    player.miningRay = null;
+    return;
+  }
+
   if (!player.mining) {
     resetPlayerMiningTarget(player);
     player.miningRay = null;
@@ -2824,6 +3751,14 @@ function miningRayExtension(mining, holdSeconds) {
 
 function syncPlayerDerivedStats(player) {
   const gameMode = normalizeGameMode(player.gameMode);
+  if (gameMode === GAME_MODES.laserTag) {
+    player.miningRayCount = 1;
+    player.healthBars = 1;
+    player.maxHealth = ENGINE.laserTag.health;
+    player.health = clamp(player.health || 0, 0, player.maxHealth);
+    return;
+  }
+
   const oldMaxHealth = player.maxHealth || playerMaxHealth(ENGINE.player.startingHealthBars, gameMode);
   const effects = aggregateUpgradeEffects(player.upgrades);
   const healthBars = playerHealthBars(player);
@@ -2902,8 +3837,11 @@ function circleTileOverlap(circle, tile) {
 }
 
 function resolvePlayerCollisions(arena) {
-  const players = Array.from(arena.players.values()).filter((player) => player.alive);
   const gameMode = normalizeGameMode(arena.mode);
+  const players = Array.from(arena.players.values()).filter((player) => (
+    player.alive &&
+    !(gameMode === GAME_MODES.laserTag && laserTagPlayerIsOut(player))
+  ));
 
   for (let aIndex = 0; aIndex < players.length; aIndex += 1) {
     for (let bIndex = aIndex + 1; bIndex < players.length; bIndex += 1) {
@@ -3072,6 +4010,7 @@ function snapshotPlayer(player, tick = 0, mode = GAME_MODES.bitspace) {
     miningRayCount: miningRayCountForPlayer(player),
     huckRockCooldownSeconds: roundForSnapshot(player.huckRockCooldownSeconds || 0),
     huckRockEngineCutoutSeconds: roundForSnapshot(player.huckRockEngineCutoutSeconds || 0),
+    laserTagCooldownSeconds: roundForSnapshot(player.laserTagCooldownSeconds || 0),
     miningRay: player.miningRay,
     rayExtension: roundForSnapshot(player.rayExtension || 0),
     thrusting: player.thrusting,
@@ -3082,6 +4021,11 @@ function snapshotPlayer(player, tick = 0, mode = GAME_MODES.bitspace) {
     health: roundForSnapshot(player.health),
     maxHealth: player.maxHealth,
     kills: Math.max(0, Math.floor(Number(player.kills || 0))),
+    team: player.team || null,
+    score: Math.max(0, Math.floor(Number(player.score || 0))),
+    laserTagGhost: player.laserTagGhost === true,
+    laserTagOutUntilTick: Math.max(0, Math.floor(Number(player.laserTagOutUntilTick || 0))),
+    laserTagLastEvent: player.laserTagLastEvent || null,
     killDrop,
     lastHit,
     killedById: player.killedById,
@@ -3137,6 +4081,9 @@ function normalizeGameMode(mode) {
   }
   if (mode === GAME_MODES.octopus) {
     return GAME_MODES.octopus;
+  }
+  if (mode === GAME_MODES.laserTag) {
+    return GAME_MODES.laserTag;
   }
   return GAME_MODES.bitspace;
 }
