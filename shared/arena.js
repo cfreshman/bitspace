@@ -447,24 +447,7 @@ function initializeLaserTagArena(arena) {
     events: []
   };
 
-  for (const gate of arena.asteroid?.laserTag?.gates || []) {
-    arena.entities.set(gate.id, createLaserTagTargetEntity(arena, gate, "laserGate"));
-  }
-
   arena.laserTag.nextDiamondSpawnTick = arena.tick + Math.round(config.diamondSpawnSeconds * ENGINE.tickRate);
-}
-
-function createLaserTagTargetEntity(arena, target, type) {
-  return {
-    id: target.id,
-    type,
-    team: target.team,
-    label: target.label,
-    x: Math.round(target.x - arena.asteroid.tileSize),
-    y: Math.round(target.y - arena.asteroid.tileSize),
-    width: arena.asteroid.tileSize * 2,
-    height: arena.asteroid.tileSize * 2
-  };
 }
 
 function stepLaserTagArena(arena, dtSeconds, options = {}) {
@@ -679,43 +662,11 @@ function laserTagBlastHit(arena, entity, startX, startY, angle, distance) {
     };
   }
 
-  const targetHit = laserTagBlastTargetHit(arena, entity, start, angle, distance);
-  if (targetHit && (!nearest || targetHit.distance < nearest.distance)) {
-    nearest = targetHit;
-  }
-
   const playerHit = laserTagBlastPlayerHit(arena, entity, start, angle, distance);
   if (playerHit && (!nearest || playerHit.distance < nearest.distance)) {
     nearest = playerHit;
   }
 
-  return nearest;
-}
-
-function laserTagBlastTargetHit(arena, entity, start, angle, maxDistance) {
-  const direction = {
-    x: Math.cos(angle),
-    y: Math.sin(angle)
-  };
-  let nearest = null;
-  for (const target of arena.entities.values()) {
-    if (target.type !== "laserGate") {
-      continue;
-    }
-    if (entity.team && target.team && entity.team === target.team) {
-      continue;
-    }
-    const hit = rayRectIntersection(start, direction, target, maxDistance);
-    if (!hit || (nearest && hit.distance >= nearest.distance)) {
-      continue;
-    }
-    nearest = {
-      type: "laserTarget",
-      distance: hit.distance,
-      hit,
-      target
-    };
-  }
   return nearest;
 }
 
@@ -753,21 +704,35 @@ function handleLaserTagBlastHit(arena, entity, hit) {
     return;
   }
 
-  if (hit.type === "laserTarget") {
-    tagLaserTagTarget(arena, entity, hit.target);
-    return;
-  }
-
   if (hit.type !== "asteroid") {
     return;
   }
 
   const tileHit = hit.hit;
+  const laserTarget = laserTagGateTargetForTile(arena.asteroid, tileHit.index);
+  if (laserTarget) {
+    tagLaserTagTarget(arena, entity, laserTarget);
+    return;
+  }
+
   if (tileHit.index >= 0 && tileHit.tile === ASTEROID_TILE.diamond) {
     const shooter = arena.players.get(entity.ownerId);
     addLaserTagScore(arena, shooter, ENGINE.laserTag.diamondPoints, "DIAMOND BLASTED");
     setAsteroidTile(arena, tileHit.index, ASTEROID_TILE.rock, 0);
   }
+}
+
+function laserTagGateTargetForTile(asteroid, index) {
+  if (!asteroid || index < 0) {
+    return null;
+  }
+
+  for (const gate of asteroid.laserTag?.gates || []) {
+    if (Array.isArray(gate.tileIndices) && gate.tileIndices.includes(index)) {
+      return gate;
+    }
+  }
+  return null;
 }
 
 function tagLaserTagPlayer(arena, entity, target) {

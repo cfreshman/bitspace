@@ -5657,6 +5657,9 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         }
         drawEntity(ctx, entity, camera, options, colors, textRenderer);
       }
+      if (options.gameMode === GAME_MODES.laserTag && options.asteroid?.laserTag?.gates) {
+        drawLaserTagGateLabels(ctx, options.asteroid, camera, colors, textRenderer);
+      }
     });
 
     measureBucket("particlesMs", () => {
@@ -9536,7 +9539,7 @@ function drawAsteroidTiles(
 
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
-        drawRockFill(ctx, screenX, screenY, tileSize, colors, tile);
+        drawRockFill(ctx, screenX, screenY, tileSize, laserTagGateRockColorsForIndex(asteroid, index, colors) || colors, tile);
       }
     }
   } else if (isWaterThemedGameMode(gameMode)) {
@@ -9574,7 +9577,7 @@ function drawAsteroidTiles(
         }
       }
     });
-  } else if (gameMode === GAME_MODES.clouds) {
+  } else if (gameMode === GAME_MODES.clouds || gameMode === GAME_MODES.laserTag) {
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
         const index = tileY * asteroid.widthTiles + tileX;
@@ -9585,6 +9588,9 @@ function drawAsteroidTiles(
 
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
+        const tileColors = gameMode === GAME_MODES.laserTag
+          ? laserTagGateRockColorsForIndex(asteroid, index, colors) || colors
+          : colors;
         if (isRockTile(tile)) {
           drawCarRockBodyFill(
             ctx,
@@ -9594,11 +9600,11 @@ function drawAsteroidTiles(
             screenX,
             screenY,
             tileSize,
-            colors,
+            tileColors,
             gameMode
           );
         } else {
-          drawRockFill(ctx, screenX, screenY, tileSize, colors, tile);
+          drawRockFill(ctx, screenX, screenY, tileSize, tileColors, tile);
         }
       }
     }
@@ -9663,7 +9669,10 @@ function drawAsteroidTiles(
 
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
-        drawBitspaceRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, colors, visibility);
+        const tileColors = gameMode === GAME_MODES.laserTag
+          ? laserTagGateRockColorsForIndex(asteroid, index, colors) || colors
+          : colors;
+        drawBitspaceRockOutline(ctx, asteroid, tileX, tileY, screenX, screenY, tileSize, tileColors, visibility);
       }
     }
     drawBitspaceInnerRockCornerConnectors(ctx, asteroid, camera, tileSize, minTileX, maxTileX, minTileY, maxTileY, colors, visibility);
@@ -11945,6 +11954,26 @@ function drawRockFill(ctx, x, y, size, colors, tile = null) {
     ? colors.wallFill || colors.rockFill || colors.background
     : colors.rockFill || colors.background;
   ctx.fillRect(x, y, size, size);
+}
+
+function laserTagGateRockColorsForIndex(asteroid, index, colors) {
+  const gate = laserTagGateForTileIndex(asteroid, index);
+  if (!gate) {
+    return null;
+  }
+  const gateColor = laserTagTeamColor(gate.team, colors);
+  return {
+    ...colors,
+    rockFill: gateColor,
+    rockLine: gateColor
+  };
+}
+
+function laserTagGateForTileIndex(asteroid, index) {
+  if (!asteroid?.laserTag?.gates || index < 0) {
+    return null;
+  }
+  return asteroid.laserTag.gates.find((gate) => Array.isArray(gate.tileIndices) && gate.tileIndices.includes(index)) || null;
 }
 
 function drawBitspaceRockOutline(ctx, asteroid, tileX, tileY, x, y, size, colors, visibility = null) {
@@ -14758,7 +14787,6 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
   }
 
   if (entity.type === "laserGate") {
-    drawLaserBaseEntity(ctx, entity, camera, colors, textRenderer);
     return;
   }
 
@@ -14902,6 +14930,32 @@ function drawLaserBaseEntity(ctx, entity, camera, colors, textRenderer) {
       fontSize: 8,
       color: teamColor,
       width: Math.max(36, width + 8)
+    });
+  }
+}
+
+function drawLaserTagGateLabels(ctx, asteroid, camera, colors, textRenderer) {
+  if (!textRenderer) {
+    return;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  for (const gate of asteroid.laserTag?.gates || []) {
+    if (!gate?.label || !Number.isFinite(gate.tileX) || !Number.isFinite(gate.tileY)) {
+      continue;
+    }
+
+    const screen = worldToScreen({
+      x: gate.tileX * tileSize,
+      y: gate.tileY * tileSize
+    }, camera);
+    const x = Math.round(screen.x);
+    const y = Math.round(screen.y) - 10;
+    const width = Math.max(64, Math.ceil((gate.widthTiles || 1) * tileSize) + 16);
+    textRenderer.draw(ctx, String(gate.label), x, y, {
+      fontSize: 8,
+      color: laserTagTeamColor(gate.team, colors),
+      width
     });
   }
 }

@@ -484,8 +484,10 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
       } else if (char === LASER_TAG_MAP_CHARS.blueSpawn) {
         markers.blueSpawn.push({ tileX, tileY });
       } else if (char === LASER_TAG_MAP_CHARS.redGate) {
+        tiles[index] = ASTEROID_TILE.rock;
         markers.redGate.push({ tileX, tileY });
       } else if (char === LASER_TAG_MAP_CHARS.blueGate) {
+        tiles[index] = ASTEROID_TILE.rock;
         markers.blueGate.push({ tileX, tileY });
       }
     }
@@ -533,8 +535,8 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
       },
       bases: [redBase, blueBase],
       gates: [
-        ...laserTagGateTargetsFromMarkers(markers.redGate, tileSize, "red"),
-        ...laserTagGateTargetsFromMarkers(markers.blueGate, tileSize, "blue")
+        ...laserTagGateTargetsFromMarkers(markers.redGate, tileSize, "red", widthTiles),
+        ...laserTagGateTargetsFromMarkers(markers.blueGate, tileSize, "blue", widthTiles)
       ]
     }
   };
@@ -570,20 +572,42 @@ function laserTagBaseFromSpawns(spawns, widthTiles, heightTiles, tileSize, team)
   };
 }
 
-function laserTagGateTargetsFromMarkers(markers, tileSize, team) {
+function laserTagGateTargetsFromMarkers(markers, tileSize, team, widthTiles) {
   const components = connectedMarkerComponents(markers);
   components.sort((a, b) => averageTileY(a) - averageTileY(b));
   return components.map((component, index) => {
     const center = averageMarkerCenter(component, tileSize);
-    const gateName = index === 0 ? "NORTH GATE" : index === 1 ? "SOUTH GATE" : `GATE ${index + 1}`;
+    const bounds = markerComponentBounds(component);
+    const gateName = components.length === 1
+      ? "POINT GATE"
+      : index === 0 ? "NORTH GATE" : index === 1 ? "SOUTH GATE" : `GATE ${index + 1}`;
     return {
       id: `laser-gate-${team}-${index + 1}`,
       team,
       label: gateName,
       x: center.x,
-      y: center.y
+      y: center.y,
+      tileX: bounds.minTileX,
+      tileY: bounds.minTileY,
+      widthTiles: bounds.maxTileX - bounds.minTileX + 1,
+      heightTiles: bounds.maxTileY - bounds.minTileY + 1,
+      tileIndices: component.map((marker) => marker.tileY * widthTiles + marker.tileX)
     };
   });
+}
+
+function markerComponentBounds(component) {
+  let minTileX = Number.POSITIVE_INFINITY;
+  let minTileY = Number.POSITIVE_INFINITY;
+  let maxTileX = Number.NEGATIVE_INFINITY;
+  let maxTileY = Number.NEGATIVE_INFINITY;
+  for (const marker of component) {
+    minTileX = Math.min(minTileX, marker.tileX);
+    minTileY = Math.min(minTileY, marker.tileY);
+    maxTileX = Math.max(maxTileX, marker.tileX);
+    maxTileY = Math.max(maxTileY, marker.tileY);
+  }
+  return { minTileX, minTileY, maxTileX, maxTileY };
 }
 
 function connectedMarkerComponents(markers) {
