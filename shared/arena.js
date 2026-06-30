@@ -47,8 +47,7 @@ import {
   miningRayLanesForPlayer
 } from "./mining.js";
 import {
-  laserTagMapIds,
-  sanitizeLaserTagMapId
+  laserTagMapIds
 } from "./laser-tag-maps.js";
 
 const DEFAULT_ARENA_ID = "main";
@@ -59,6 +58,12 @@ const LAST_HIT_NOTICE_TICKS = ENGINE.tickRate * 5;
 const RANDOM_DIAMOND_SPAWN_TICKS = ENGINE.tickRate * 15;
 const LASER_TAG_GHOST_RETURN_SECONDS = 5;
 const LASER_TAG_TEAMS = Object.freeze(["red", "blue"]);
+const LASER_TAG_DEFAULT_MAP_ID = "map-01";
+const LASER_TAG_SMALL_MAP_ID = "map-2p-01";
+const LASER_TAG_SMALL_MAP_MAX_PLAYERS = 4;
+const LASER_TAG_DUEL_PLAYER_COUNT = 2;
+const LASER_TAG_DUEL_SCORE_LIMIT = 250;
+const LASER_TAG_DUEL_MATCH_SECONDS = 5 * 60;
 const CAR_GROUND_VARIANTS = Object.freeze({
   desert: "desert",
   grass: "grass"
@@ -67,7 +72,7 @@ const CAR_GROUND_VARIANTS = Object.freeze({
 export function createArena(options = {}) {
   const seed = options.seed ?? "bitspace-main";
   const mode = normalizeGameMode(options.mode);
-  const params = createArenaParams(mode, seed, options.params);
+  const params = createArenaParams(mode, seed, options.params, options.playerCount);
   const laserTag = mode === GAME_MODES.laserTag;
   const asteroid = options.asteroid ?? (laserTag
     ? createLaserTagAsteroid({
@@ -428,10 +433,14 @@ export function stepArena(arena, dtSeconds = 1 / ENGINE.tickRate, options = {}) 
 
 function initializeLaserTagArena(arena) {
   const config = ENGINE.laserTag;
+  const scoreLimit = positiveInteger(arena.params?.scoreLimit, config.scoreLimit);
+  const matchSeconds = positiveNumber(arena.params?.matchSeconds, config.matchSeconds);
   arena.laserTag = {
     startedTick: arena.tick,
     ended: false,
     winnerTeam: null,
+    scoreLimit,
+    matchSeconds,
     teamScores: { red: 0, blue: 0 },
     nextDiamondSpawnTick: arena.tick,
     shots: [],
@@ -1216,9 +1225,10 @@ function updateLaserTagEndState(arena) {
   }
 
   const scores = arena.laserTag.teamScores || {};
-  const scoreLimit = ENGINE.laserTag.scoreLimit;
+  const scoreLimit = positiveInteger(arena.laserTag.scoreLimit, ENGINE.laserTag.scoreLimit);
+  const matchSeconds = positiveNumber(arena.laserTag.matchSeconds, ENGINE.laserTag.matchSeconds);
   const ticksElapsed = arena.tick - (arena.laserTag.startedTick || 0);
-  const timeExpired = ticksElapsed >= ENGINE.laserTag.matchSeconds * ENGINE.tickRate;
+  const timeExpired = ticksElapsed >= matchSeconds * ENGINE.tickRate;
   const redWon = Number(scores.red || 0) >= scoreLimit;
   const blueWon = Number(scores.blue || 0) >= scoreLimit;
   if (!timeExpired && !redWon && !blueWon) {
@@ -1257,9 +1267,9 @@ function snapshotLaserTag(arena) {
       red: Math.max(0, Math.floor(Number(arena.laserTag.teamScores?.red || 0))),
       blue: Math.max(0, Math.floor(Number(arena.laserTag.teamScores?.blue || 0)))
     },
-    scoreLimit: ENGINE.laserTag.scoreLimit,
+    scoreLimit: positiveInteger(arena.laserTag.scoreLimit, ENGINE.laserTag.scoreLimit),
     startedTick: arena.laserTag.startedTick || 0,
-    matchSeconds: ENGINE.laserTag.matchSeconds,
+    matchSeconds: positiveNumber(arena.laserTag.matchSeconds, ENGINE.laserTag.matchSeconds),
     ended: arena.laserTag.ended === true,
     winnerTeam: arena.laserTag.winnerTeam || null,
     events: (arena.laserTag.events || []).slice(-8),
@@ -1326,14 +1336,11 @@ function stampBugFootstepsForPlayer(arena, player) {
   }
 }
 
-function createArenaParams(mode, seed, params = {}) {
+function createArenaParams(mode, seed, params = {}, playerCount = 0) {
   const safeParams = params && typeof params === "object" ? params : {};
 
   if (mode === GAME_MODES.laserTag) {
-    return {
-      laserTagMap: sanitizeLaserTagMap(safeParams.laserTagMap) ||
-        defaultLaserTagMap()
-    };
+    return createLaserTagArenaParams(playerCount);
   }
 
   if (mode !== GAME_MODES.cars) {
@@ -1346,20 +1353,53 @@ function createArenaParams(mode, seed, params = {}) {
   };
 }
 
-function sanitizeLaserTagMap(value) {
-  const id = sanitizeLaserTagMapId(value);
-  return id && laserTagMapIds().includes(id) ? id : null;
+function createLaserTagArenaParams(playerCount = 0) {
+  const count = safePlayerCount(playerCount);
+  const duel = count === LASER_TAG_DUEL_PLAYER_COUNT;
+  return {
+    laserTagMap: defaultLaserTagMap(count),
+    scoreLimit: duel ? LASER_TAG_DUEL_SCORE_LIMIT : ENGINE.laserTag.scoreLimit,
+    matchSeconds: duel ? LASER_TAG_DUEL_MATCH_SECONDS : ENGINE.laserTag.matchSeconds
+  };
 }
 
-function defaultLaserTagMap() {
+function defaultLaserTagMap(playerCount = 0) {
   const maps = laserTagMapIds();
-  if (maps.includes("map-01")) {
-    return "map-01";
+  if (
+    safePlayerCount(playerCount) > 0 &&
+    safePlayerCount(playerCount) <= LASER_TAG_SMALL_MAP_MAX_PLAYERS &&
+    maps.includes(LASER_TAG_SMALL_MAP_ID)
+  ) {
+    return LASER_TAG_SMALL_MAP_ID;
+  }
+  if (maps.includes(LASER_TAG_DEFAULT_MAP_ID)) {
+    return LASER_TAG_DEFAULT_MAP_ID;
   }
   if (maps.length === 0) {
-    return "map-01";
+    return LASER_TAG_DEFAULT_MAP_ID;
   }
   return maps[0];
+}
+
+function safePlayerCount(value) {
+  const count = Math.floor(Number(value) || 0);
+  return count > 0 ? count : 0;
+}
+
+function positiveInteger(value, fallback) {
+  const number = Math.floor(Number(value));
+  if (Number.isFinite(number) && number > 0) {
+    return number;
+  }
+  return Math.max(1, Math.floor(Number(fallback) || 1));
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) {
+    return number;
+  }
+  return Math.max(1, Number(fallback) || 1);
 }
 
 function sanitizeCarGroundVariant(value) {

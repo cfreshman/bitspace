@@ -5376,6 +5376,8 @@ function serializeLocalBotLaserTag(laserTag) {
     startedTick: Math.max(0, Math.floor(Number(laserTag.startedTick || 0))),
     ended: laserTag.ended === true,
     winnerTeam: laserTag.winnerTeam || null,
+    scoreLimit: Math.max(1, Math.floor(Number(laserTag.scoreLimit || ENGINE.laserTag.scoreLimit))),
+    matchSeconds: Math.max(1, Number(laserTag.matchSeconds || ENGINE.laserTag.matchSeconds)),
     teamScores: {
       red: Math.max(0, Math.floor(Number(laserTag.teamScores?.red || 0))),
       blue: Math.max(0, Math.floor(Number(laserTag.teamScores?.blue || 0)))
@@ -5709,6 +5711,8 @@ function restoreLocalBotLaserTag(arena, savedLaserTag) {
   arena.laserTag.startedTick = Math.max(0, Math.floor(Number(savedLaserTag.startedTick || arena.laserTag.startedTick || 0)));
   arena.laserTag.ended = savedLaserTag.ended === true;
   arena.laserTag.winnerTeam = savedLaserTag.winnerTeam || null;
+  arena.laserTag.scoreLimit = Math.max(1, Math.floor(Number(savedLaserTag.scoreLimit || arena.laserTag.scoreLimit || ENGINE.laserTag.scoreLimit)));
+  arena.laserTag.matchSeconds = Math.max(1, Number(savedLaserTag.matchSeconds || arena.laserTag.matchSeconds || ENGINE.laserTag.matchSeconds));
   arena.laserTag.teamScores = {
     red: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.red || 0))),
     blue: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.blue || 0)))
@@ -8605,6 +8609,13 @@ async function handleVoiceSignal(payload = {}) {
 
   try {
     if (signal.description) {
+      if (
+        signal.description.type === "answer" &&
+        peer.pc.signalingState !== "have-local-offer"
+      ) {
+        return;
+      }
+
       await peer.pc.setRemoteDescription(new RTCSessionDescription(signal.description));
       await flushVoiceIceCandidates(peer);
       if (signal.description.type === "offer") {
@@ -8908,8 +8919,7 @@ function updateVoiceVisibility(snapshot, cameraPlayerId, timeSeconds) {
       peer.audibleSinceMs = null;
       peer.audibleUntilMs = 0;
       if (Math.abs((peer.voiceTargetGain || 0) - 0) > 0.001) {
-        setVoicePeerGain(peer, 0, { fadeSeconds: VOICE_GAIN_FADE_OUT_SECONDS });
-        peer.voiceTargetGain = 0;
+        applyVoicePeerGain(peer, 0, { fadeSeconds: VOICE_GAIN_FADE_OUT_SECONDS });
       }
       continue;
     }
@@ -8920,8 +8930,7 @@ function updateVoiceVisibility(snapshot, cameraPlayerId, timeSeconds) {
     peer.audibleUntilMs = nowMs;
     const targetGain = voiceRemoteGain();
     if (Math.abs((peer.voiceTargetGain || 0) - targetGain) > 0.001) {
-      setVoicePeerGain(peer, targetGain, { fadeSeconds: VOICE_GAIN_FADE_IN_SECONDS });
-      peer.voiceTargetGain = targetGain;
+      applyVoicePeerGain(peer, targetGain, { fadeSeconds: VOICE_GAIN_FADE_IN_SECONDS });
     }
   }
 }
@@ -9011,14 +9020,23 @@ function voiceLineOfSightClear(startX, startY, endX, endY, visibilityRegion = nu
   );
 }
 
+function applyVoicePeerGain(peer, targetGain, options = {}) {
+  if (!setVoicePeerGain(peer, targetGain, options)) {
+    return false;
+  }
+
+  peer.voiceTargetGain = Math.max(0, Math.min(Math.max(0.0001, voiceRemoteGain()), Number(targetGain) || 0));
+  return true;
+}
+
 function setVoicePeerGain(peer, targetGain, options = {}) {
   if (!peer?.gain) {
-    return;
+    return false;
   }
 
   const context = audio.context;
   if (!context) {
-    return;
+    return false;
   }
 
   const gain = peer.gain.gain;
@@ -9036,7 +9054,7 @@ function setVoicePeerGain(peer, targetGain, options = {}) {
     peer.voiceRampStartTime = now;
     peer.voiceRampEndTime = now;
     peer.voiceTargetGain = nextGain;
-    return;
+    return true;
   }
 
   const baseFadeSeconds = Math.max(0.001, Number(options.fadeSeconds) || VOICE_GAIN_FADE_OUT_SECONDS);
@@ -9050,6 +9068,7 @@ function setVoicePeerGain(peer, targetGain, options = {}) {
   peer.voiceRampStartTime = now;
   peer.voiceRampEndTime = now + fadeSeconds;
   peer.voiceTargetGain = nextGain;
+  return true;
 }
 
 function voicePeerCurrentGain(peer, now) {

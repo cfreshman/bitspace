@@ -169,9 +169,9 @@ export const ENGINE = Object.freeze({
     matchSeconds: 8 * 60,
     scoreLimit: 800,
     hitPoints: 16,
-    diamondPoints: 16,
+    diamondPoints: 8,
     gatePoints: 1,
-    diamondSpawnSeconds: 6
+    diamondSpawnSeconds: 8
   },
   player: {
     startingHealthBars: 3,

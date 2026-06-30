@@ -665,6 +665,7 @@ export function createRoomManager(options = {}) {
       params: room.params,
       playerCount: participants.length
     });
+    room.params = room.arena.params || room.params || {};
 
     const spawnNumbers = randomizedSpawnNumbers(matchSeed, participants.length);
     for (let index = 0; index < participants.length; index += 1) {
