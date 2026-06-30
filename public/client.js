@@ -81,6 +81,7 @@ const ROOM_NAME_STORAGE_KEY = "bitspace.roomName";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
 const OCTOPUS_THEME_STORAGE_KEY = "bitspace.octopusTheme";
+const BUG_THEME_STORAGE_KEY = "bitspace.bugTheme";
 const MENU_MODE_STORAGE_KEY = "bitspace.menuMode";
 const MENU_STATE_STORAGE_KEY = "bitspace.menuState";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
@@ -218,6 +219,10 @@ const THEME_RANDOM_CONTRAST_SAMPLES = 10;
 const OCTOPUS_THEMES = Object.freeze({
   classic: "classic",
   matrix: "matrix"
+});
+const BUG_THEMES = Object.freeze({
+  classic: "classic",
+  burrow: "burrow"
 });
 const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
@@ -550,6 +555,7 @@ const state = {
   },
   theme: loadTheme(),
   octopusTheme: loadOctopusTheme(),
+  bugTheme: loadBugTheme(),
   uiHoverId: null,
   lastReattachRequestAt: 0,
   resumePending: false,
@@ -2248,6 +2254,7 @@ function draw(now = 0) {
     theme: state.theme,
     themeName: themeLabelForTheme(state.theme),
     octopusTheme: state.octopusTheme,
+    bugTheme: state.bugTheme,
     settings: state.settings,
     voiceHudActive: voiceHudActive(),
     settingsUi: state.settingsUi,
@@ -4592,6 +4599,10 @@ function activateMenuEntity(entity) {
       toggleOctopusTheme();
       return;
     }
+    if (selectedMenuMode() === GAME_MODES.bugs) {
+      toggleBugTheme();
+      return;
+    }
     enterMenuRoom(MENU_ROOMS.theme);
     return;
   }
@@ -6127,7 +6138,8 @@ function menuEntities() {
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
   const octopusSelected = currentMode === GAME_MODES.octopus;
-  const themeDisabled = currentMode !== GAME_MODES.bitspace && !octopusSelected;
+  const bugsSelected = currentMode === GAME_MODES.bugs;
+  const themeDisabled = currentMode !== GAME_MODES.bitspace && !octopusSelected && !bugsSelected;
 
   return [
     menuTitle("menu-title", menuTitleLabelForMode(currentMode), MENU_ESRB_SUBTITLE, center.x, titleY),
@@ -6156,7 +6168,8 @@ function menuEntities() {
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth, {
       disabled: themeDisabled,
       strike: themeDisabled,
-      selected: octopusSelected && state.octopusTheme === OCTOPUS_THEMES.matrix
+      selected: (octopusSelected && state.octopusTheme === OCTOPUS_THEMES.matrix) ||
+        (bugsSelected && state.bugTheme === BUG_THEMES.burrow)
     }),
     menuButton("menu-prefs", "prefs", "PREFS", center.x + sideXGap - buttonWidth / 2, sideBottomY, buttonWidth)
   ];
@@ -6928,6 +6941,14 @@ function loadOctopusTheme() {
   }
 }
 
+function loadBugTheme() {
+  try {
+    return normalizeBugTheme(window.localStorage.getItem(BUG_THEME_STORAGE_KEY));
+  } catch {
+    return BUG_THEMES.classic;
+  }
+}
+
 function saveOctopusTheme() {
   try {
     window.localStorage.setItem(OCTOPUS_THEME_STORAGE_KEY, normalizeOctopusTheme(state.octopusTheme));
@@ -6936,8 +6957,20 @@ function saveOctopusTheme() {
   }
 }
 
+function saveBugTheme() {
+  try {
+    window.localStorage.setItem(BUG_THEME_STORAGE_KEY, normalizeBugTheme(state.bugTheme));
+  } catch {
+    // Ignore storage failures; the selected bugs theme still works for this session.
+  }
+}
+
 function normalizeOctopusTheme(value) {
   return value === OCTOPUS_THEMES.matrix ? OCTOPUS_THEMES.matrix : OCTOPUS_THEMES.classic;
+}
+
+function normalizeBugTheme(value) {
+  return value === BUG_THEMES.burrow ? BUG_THEMES.burrow : BUG_THEMES.classic;
 }
 
 function loadBotDebugOverlay() {
@@ -7473,6 +7506,14 @@ function toggleOctopusTheme() {
     ? OCTOPUS_THEMES.classic
     : OCTOPUS_THEMES.matrix;
   saveOctopusTheme();
+  clearRendererParticles();
+}
+
+function toggleBugTheme() {
+  state.bugTheme = state.bugTheme === BUG_THEMES.burrow
+    ? BUG_THEMES.classic
+    : BUG_THEMES.burrow;
+  saveBugTheme();
   clearRendererParticles();
 }
 

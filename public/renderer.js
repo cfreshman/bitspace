@@ -77,6 +77,10 @@ const OCTOPUS_THEMES = Object.freeze({
   classic: "classic",
   matrix: "matrix"
 });
+const BUG_THEMES = Object.freeze({
+  classic: "classic",
+  burrow: "burrow"
+});
 const OCTOPUS_MATRIX_MODE_COLORS = Object.freeze({
   foreground: "#00ff41",
   background: "#004118",
@@ -110,6 +114,24 @@ const BUG_MODE_COLORS = Object.freeze({
   bugBodyFill: "#000000",
   bugRay: "#ff4cff",
   health: "#ff2f2f"
+});
+const BUG_BURROW_MODE_COLORS = Object.freeze({
+  foreground: "#c98a4a",
+  background: "#3a2719",
+  backgroundDark: "#28170d",
+  backing: "#080403",
+  ore: "#e0b36d",
+  diamond: "#8fd8ff",
+  rockFill: "#120904",
+  rockLine: "#8a5430",
+  wallFill: "#100804",
+  wallLine: "#2f1a0e",
+  rockDark: "#1a0d07",
+  groundDebris: "#24140b",
+  disableGroundGrass: true,
+  bugLegLineWidth: 4,
+  bugBodyExtraOutline: true,
+  bugTheme: BUG_THEMES.burrow
 });
 const LASER_TAG_MODE_COLORS = Object.freeze({
   foreground: "#e8f4ff",
@@ -216,7 +238,17 @@ const SUB_HEALTH_COLORS = Object.freeze([
   "#ffdf2f",
   "#2fdfff"
 ]);
-const OCTOPUS_BODY_COLORS = Object.freeze([
+const OCTOPUS_CLASSIC_BODY_COLORS = Object.freeze([
+  "#00ff5a",
+  "#ff3030",
+  "#2f63ff",
+  "#ff8a00",
+  "#8a2cff",
+  "#ff2fc3",
+  "#ffe600",
+  "#00e6ff"
+]);
+const OCTOPUS_MATRIX_BODY_COLORS = Object.freeze([
   "#ff3030",
   "#2f63ff",
   "#ff8a00",
@@ -300,6 +332,7 @@ const BUG_LEG_TEARDROP_FRONT_SIDE_SCALE = 1;
 const BUG_LEG_TEARDROP_REAR_SIDE_SCALE = 0;
 const BUG_LEG_LINE_WIDTH = 2;
 const BUG_LEG_CAMERA_HEIGHT_SCALE = 12;
+const BUG_BODY_EXTRA_OUTLINE_OFFSET = 1;
 const OCTOPUS_TENTACLE_COUNT = 8;
 const OCTOPUS_TENTACLE_TRAIL_REACH_SCALE = 3.8;
 const OCTOPUS_TENTACLE_BASE_WIDTH = 5.2;
@@ -369,7 +402,8 @@ function renderGameMode(snapshot, options = {}) {
 function renderGameParams(snapshot, options = {}) {
   return {
     ...(snapshot?.params || options.room?.params || {}),
-    octopusTheme: normalizeOctopusTheme(options.octopusTheme)
+    octopusTheme: normalizeOctopusTheme(options.octopusTheme),
+    bugTheme: normalizeBugTheme(options.bugTheme)
   };
 }
 
@@ -410,9 +444,19 @@ function colorsForGameMode(colors, gameMode, params = {}) {
   }
 
   if (gameMode === GAME_MODES.bugs) {
-    return {
+    const bugColors = {
       ...colors,
-      ...BUG_MODE_COLORS
+      ...BUG_MODE_COLORS,
+      bugTheme: BUG_THEMES.classic
+    };
+    if (normalizeBugTheme(params.bugTheme) === BUG_THEMES.burrow) {
+      return {
+        ...bugColors,
+        ...BUG_BURROW_MODE_COLORS
+      };
+    }
+    return {
+      ...bugColors
     };
   }
 
@@ -449,6 +493,10 @@ function colorsForGameMode(colors, gameMode, params = {}) {
 
 function normalizeOctopusTheme(value) {
   return value === OCTOPUS_THEMES.matrix ? OCTOPUS_THEMES.matrix : OCTOPUS_THEMES.classic;
+}
+
+function normalizeBugTheme(value) {
+  return value === BUG_THEMES.burrow ? BUG_THEMES.burrow : BUG_THEMES.classic;
 }
 
 function octopusTentacleProfile(colors = {}) {
@@ -14532,14 +14580,15 @@ function drawGroundDebris(ctx, snapshot, camera, visibility = null, colors = {},
   const maxCellX = Math.ceil((camera.x + ctx.width + padding) / GROUND_DEBRIS_CELL_SIZE) + 1;
   const minCellY = Math.floor((camera.y - padding) / GROUND_DEBRIS_CELL_SIZE) - 1;
   const maxCellY = Math.ceil((camera.y + ctx.height + padding) / GROUND_DEBRIS_CELL_SIZE) + 1;
-  const color = colors.backgroundDark || colors.rockDark || colors.wallFill || colors.foreground || RENDER.foreground;
+  const color = colors.groundDebris || colors.backgroundDark || colors.rockDark || colors.wallFill || colors.foreground || RENDER.foreground;
+  const grassColors = colors.disableGroundGrass === true ? [] : GROUND_GRASS_COLORS;
   let currentColor = color;
   ctx.fillStyle = currentColor;
 
   for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
     for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
       const hash = hashCell(snapshot.arenaId || "ground", cellX, cellY);
-      const isGrass = hash % GROUND_GRASS_DENSITY_MOD === 0;
+      const isGrass = grassColors.length > 0 && hash % GROUND_GRASS_DENSITY_MOD === 0;
       const isDebris = hash % GROUND_DEBRIS_DENSITY_MOD === 0;
       if (!isGrass && !isDebris) {
         continue;
@@ -14561,7 +14610,7 @@ function drawGroundDebris(ctx, snapshot, camera, visibility = null, colors = {},
       }
 
       if (isGrass) {
-        const grassColor = GROUND_GRASS_COLORS[(hash >>> 16) % GROUND_GRASS_COLORS.length];
+        const grassColor = grassColors[(hash >>> 16) % grassColors.length];
         if (grassColor !== currentColor) {
           currentColor = grassColor;
           ctx.fillStyle = currentColor;
@@ -15900,7 +15949,7 @@ function drawShip(
   }
 
   if (gameMode === GAME_MODES.octopus) {
-    const bodyColor = octopusBodyColor(player);
+    const bodyColor = octopusBodyColor(player, colors);
     const octopusColors = {
       ...colors,
       octopusBodyColor: bodyColor,
@@ -17328,6 +17377,7 @@ function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSecon
   const legs = bugLegPlacements(player, camera, radius, angle, timeSeconds, legStates);
   const projectionCenter = bugLegProjectionCenter(player, camera, ctx, radius);
   const legColor = colors.bugBodyForeground || colors.foreground || RENDER.foreground;
+  const legLineWidth = bugLegLineWidth(colors);
   const bodyColors = {
     ...colors,
     foreground: colors.bugBodyForeground || colors.foreground,
@@ -17336,7 +17386,7 @@ function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSecon
 
   ctx.fillStyle = legColor;
   for (const leg of legs) {
-    drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter);
+    drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter, legLineWidth);
   }
 
   if (typeof drawMiddleLayer === "function") {
@@ -17344,13 +17394,29 @@ function drawBugBody(ctx, x, y, player, camera, radius, angle, colors, timeSecon
   }
 
   drawSphere(ctx, x, y, radius, angle, bodyColors);
+  if (colors.bugBodyExtraOutline === true) {
+    drawBugBodyExtraOutline(ctx, x, y, radius, bodyColors);
+  }
 }
 
-function drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter = null) {
+function bugLegLineWidth(colors = {}) {
+  const width = Number(colors.bugLegLineWidth);
+  return Number.isFinite(width) && width > 0
+    ? Math.max(1, Math.round(width))
+    : BUG_LEG_LINE_WIDTH;
+}
+
+function drawBugBodyExtraOutline(ctx, x, y, radius, colors) {
+  ctx.fillStyle = colors.foreground || colors.bugBodyForeground || RENDER.foreground;
+  drawCircle(ctx, x, y, radius + BUG_BODY_EXTRA_OUTLINE_OFFSET);
+}
+
+function drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter = null, lineWidth = BUG_LEG_LINE_WIDTH) {
   const radial = bugLegRadial(angle, leg.config);
   const legScale = bugVisualLegSizeScale(player);
   const legRadius = radius * legScale;
-  const shoulderDistance = Math.max(0, radius * BUG_LEG_SHOULDER_SCALE - BUG_LEG_LINE_WIDTH * 0.5);
+  const visualLegRadius = Math.ceil(Math.max(1, lineWidth) / 2);
+  const shoulderDistance = Math.max(0, radius * BUG_LEG_SHOULDER_SCALE - visualLegRadius);
   const shoulderWorld = bugLegWorldPoint(player, radial, shoulderDistance);
   const hip = {
     x: shoulderWorld.x,
@@ -17368,9 +17434,9 @@ function drawBugLeg(ctx, player, camera, radius, angle, leg, projectionCenter = 
   const hipScreen = bugProjectWorldPoint(pose.hip, camera, projectionCenter, radius);
   const kneeScreen = bugProjectWorldPoint(pose.knee, camera, projectionCenter, radius);
   const footScreen = bugProjectWorldPoint(pose.foot, camera, projectionCenter, radius);
-  drawBugLegLine(ctx, hipScreen, kneeScreen);
-  drawBugLegLine(ctx, kneeScreen, footScreen);
-  drawBugLegStamp(ctx, footScreen.x, footScreen.y);
+  drawBugLegLine(ctx, hipScreen, kneeScreen, lineWidth);
+  drawBugLegLine(ctx, kneeScreen, footScreen, lineWidth);
+  drawBugLegStamp(ctx, footScreen.x, footScreen.y, lineWidth);
 }
 
 function bugLegIkPose(hip, radial, radius, foot) {
@@ -17444,12 +17510,12 @@ function bugLegRenderStep(step) {
   };
 }
 
-function drawBugLegLine(ctx, from, to) {
+function drawBugLegLine(ctx, from, to, lineWidth = BUG_LEG_LINE_WIDTH) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const steps = Math.max(Math.abs(dx), Math.abs(dy));
   if (steps <= 0) {
-    drawBugLegStamp(ctx, from.x, from.y);
+    drawBugLegStamp(ctx, from.x, from.y, lineWidth);
     return;
   }
 
@@ -17458,19 +17524,20 @@ function drawBugLegLine(ctx, from, to) {
     drawBugLegStamp(
       ctx,
       Math.round(from.x + dx * t),
-      Math.round(from.y + dy * t)
+      Math.round(from.y + dy * t),
+      lineWidth
     );
   }
 }
 
-function drawBugLegStamp(ctx, x, y) {
-  if (BUG_LEG_LINE_WIDTH <= 1) {
+function drawBugLegStamp(ctx, x, y, lineWidth = BUG_LEG_LINE_WIDTH) {
+  if (lineWidth <= 1) {
     ctx.fillRect(x, y, 1, 1);
     return;
   }
 
-  const offset = Math.floor(BUG_LEG_LINE_WIDTH / 2);
-  ctx.fillRect(x - offset, y - offset, BUG_LEG_LINE_WIDTH, BUG_LEG_LINE_WIDTH);
+  const offset = Math.floor(lineWidth / 2);
+  ctx.fillRect(x - offset, y - offset, lineWidth, lineWidth);
 }
 
 function bugLegPlacements(player, camera, radius, angle, timeSeconds, legStates = null) {
@@ -18164,17 +18231,20 @@ function carBodyColor(player) {
   return player?.alive === false ? desaturateHexColor(color, 0.5) : color;
 }
 
-function octopusBodyColor(player) {
-  const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), OCTOPUS_BODY_COLORS.length);
-  const color = OCTOPUS_BODY_COLORS[index] || OCTOPUS_BODY_COLORS[0];
+function octopusBodyColor(player, colors = {}) {
+  const palette = colors.octopusTheme === OCTOPUS_THEMES.matrix
+    ? OCTOPUS_MATRIX_BODY_COLORS
+    : OCTOPUS_CLASSIC_BODY_COLORS;
+  const index = positiveModulo(Math.max(0, Math.floor(Number(player?.number || 1) - 1)), palette.length);
+  const color = palette[index] || palette[0];
   return player?.alive === false ? desaturateHexColor(color, 0.58) : color;
 }
 
 function octopusHealthColor(player, colors = {}) {
   if (colors.octopusTheme === OCTOPUS_THEMES.matrix) {
-    return octopusBodyColor(player);
+    return octopusBodyColor(player, colors);
   }
-  return mixHexColors(octopusBodyColor(player), "#ffffff", 0.48);
+  return mixHexColors(octopusBodyColor(player, colors), "#ffffff", 0.48);
 }
 
 function bugHealthColor(player) {
