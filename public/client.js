@@ -5396,15 +5396,37 @@ function serializeLocalBotLaserTag(laserTag) {
     winnerTeam: laserTag.winnerTeam || null,
     scoreLimit: Math.max(1, Math.floor(Number(laserTag.scoreLimit || ENGINE.laserTag.scoreLimit))),
     matchSeconds: Math.max(1, Number(laserTag.matchSeconds || ENGINE.laserTag.matchSeconds)),
-    diamondTargetCount: Math.max(1, Math.floor(Number(laserTag.diamondTargetCount || ENGINE.laserTag.diamondTargetBaseCount || 4))),
     teamScores: {
       red: Math.max(0, Math.floor(Number(laserTag.teamScores?.red || 0))),
       blue: Math.max(0, Math.floor(Number(laserTag.teamScores?.blue || 0)))
     },
+    gateDiamonds: serializeLocalBotLaserTagGateDiamonds(laserTag.gateDiamonds),
     events: Array.isArray(laserTag.events)
       ? laserTag.events.slice(-12).map((event) => ({ ...event }))
       : []
   };
+}
+
+function serializeLocalBotLaserTagGateDiamonds(gateDiamonds) {
+  if (!gateDiamonds) {
+    return {};
+  }
+
+  const entries = Array.isArray(gateDiamonds)
+    ? gateDiamonds.map((state) => [String(Math.floor(Number(state?.index))), state])
+    : Object.entries(gateDiamonds);
+  return entries.reduce((acc, [key, state]) => {
+    const index = Math.floor(Number(state?.index ?? key));
+    if (!Number.isFinite(index) || index < 0) {
+      return acc;
+    }
+    acc[String(index)] = {
+      index,
+      angle: Number(state?.angle || 0),
+      velocity: Number(state?.velocity || 0)
+    };
+    return acc;
+  }, {});
 }
 
 function localBotSaveRoomState(roomState) {
@@ -5732,11 +5754,11 @@ function restoreLocalBotLaserTag(arena, savedLaserTag) {
   arena.laserTag.winnerTeam = savedLaserTag.winnerTeam || null;
   arena.laserTag.scoreLimit = Math.max(1, Math.floor(Number(savedLaserTag.scoreLimit || arena.laserTag.scoreLimit || ENGINE.laserTag.scoreLimit)));
   arena.laserTag.matchSeconds = Math.max(1, Number(savedLaserTag.matchSeconds || arena.laserTag.matchSeconds || ENGINE.laserTag.matchSeconds));
-  arena.laserTag.diamondTargetCount = Math.max(1, Math.floor(Number(savedLaserTag.diamondTargetCount || arena.laserTag.diamondTargetCount || ENGINE.laserTag.diamondTargetBaseCount || 4)));
   arena.laserTag.teamScores = {
     red: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.red || 0))),
     blue: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.blue || 0)))
   };
+  arena.laserTag.gateDiamonds = serializeLocalBotLaserTagGateDiamonds(savedLaserTag.gateDiamonds);
   arena.laserTag.events = Array.isArray(savedLaserTag.events)
     ? savedLaserTag.events.slice(-12).map((event) => ({ ...event }))
     : [];

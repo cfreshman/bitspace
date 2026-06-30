@@ -166,13 +166,10 @@ export const ENGINE = Object.freeze({
     blastRadius: 2,
     maxRangeVisualRadiusScale: 1.3,
     beamLerpSeconds: 0.25,
-    matchSeconds: 8 * 60,
-    scoreLimit: 800,
-    hitPoints: 16,
-    diamondPoints: 8,
-    gatePoints: 1,
-    diamondTargetBaseCount: 1,
-    diamondTargetBaseTiles: 48 * 25
+    matchSeconds: 10 * 60,
+    scoreLimit: 500,
+    hitPoints: 10,
+    gatePoints: 1
   },
   player: {
     startingHealthBars: 3,

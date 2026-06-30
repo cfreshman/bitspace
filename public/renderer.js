@@ -93,7 +93,8 @@ const BUG_MODE_COLORS = Object.freeze({
 });
 const LASER_TAG_MODE_COLORS = Object.freeze({
   foreground: "#e8f4ff",
-  background: "#16172c",
+  // background: "#16172c",
+  background: "#000000",
   backgroundDark: "#101124",
   backing: "#050510",
   rockFill: "#202248",
@@ -735,6 +736,10 @@ const HUD_PANEL_ROW_STEP = 10;
 const HUD_PANEL_ACTION_GAP = 7;
 const HUD_CONTROL_TEXT_BORDER = Object.freeze({
   borderTransparentAsBacking: true
+});
+const LASER_TAG_PLAYER_COLOR_RANGES = Object.freeze({
+  red: Object.freeze({ start: 2, span: 22 }),
+  blue: Object.freeze({ start: 218, span: 38 })
 });
 const SETTINGS_PANEL = Object.freeze({
   minWidth: 132,
@@ -1497,7 +1502,8 @@ export function createRenderer(canvas, minimapCanvas = null) {
         lateOverlaySurface,
         sharedRenderState,
         frameOptions,
-        frameColors
+        frameColors,
+        textRenderer
       );
       const presentStart = measurePerf ? performance.now() : 0;
       const worldOverlays = [
@@ -5210,6 +5216,10 @@ function drawBitmapGlyphBorder(ctx, glyph, x, y, scale) {
 }
 
 function bitmapTextBorderColor(textColor, options = {}, colors = {}) {
+  if (options.borderColor === null || options.borderColor === false || options.noBorder === true) {
+    return null;
+  }
+
   if (options.borderColor) {
     if (options.borderColor === "auto") {
       return adaptiveBitmapTextBorder(colors, options);
@@ -5307,6 +5317,31 @@ function mixHexColors(fromHex, toHex, amount) {
   const green = Math.round(lerp(Number.parseInt(from.slice(2, 4), 16), Number.parseInt(to.slice(2, 4), 16), t));
   const blue = Math.round(lerp(Number.parseInt(from.slice(4, 6), 16), Number.parseInt(to.slice(4, 6), 16), t));
   return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
+}
+
+function hslToHex(hue, saturation, lightness) {
+  const h = positiveModulo(Number(hue) || 0, 360) / 360;
+  const s = clamp(Number(saturation), 0, 1);
+  const l = clamp(Number(lightness), 0, 1);
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const red = hueChannelToRgb(p, q, h + 1 / 3);
+  const green = hueChannelToRgb(p, q, h);
+  const blue = hueChannelToRgb(p, q, h - 1 / 3);
+  return `#${red.toString(16).padStart(2, "0")}${green.toString(16).padStart(2, "0")}${blue.toString(16).padStart(2, "0")}`;
+}
+
+function hueChannelToRgb(p, q, t) {
+  t = positiveModulo(t, 1);
+  let value = p;
+  if (t < 1 / 6) {
+    value = p + (q - p) * 6 * t;
+  } else if (t < 1 / 2) {
+    value = q;
+  } else if (t < 2 / 3) {
+    value = p + (q - p) * (2 / 3 - t) * 6;
+  }
+  return clamp(Math.round(value * 255), 0, 255);
 }
 
 function desaturateHexColor(hex, amount) {
@@ -5601,7 +5636,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           options.gpuStormRenderer,
           cameraPlayer,
           options.gpuFrameStormReady === true && gpuWorldEffectsAllowed,
-          options.gameMode
+          options.gameMode,
+          snapshot.laserTag
         ));
       } else {
         measureBucket("asteroidMs", () => drawWorldBounds(ctx, snapshot, camera));
@@ -5656,9 +5692,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           continue;
         }
         drawEntity(ctx, entity, camera, options, colors, textRenderer);
-      }
-      if (options.gameMode === GAME_MODES.laserTag && options.asteroid?.laserTag?.gates) {
-        drawLaserTagGateLabels(ctx, options.asteroid, camera, colors, textRenderer);
       }
     });
 
@@ -6171,19 +6204,31 @@ function endWorldViewport(ctx) {
   ctx.endClip();
 }
 
-function drawLateWorldOverlay(ctx, renderState, options, colors) {
-  if (
-    !ctx ||
-    options.playerMapLarge ||
-    !options.controllerAimCursor ||
-    !renderState?.localPlayer ||
-    !renderState?.camera
-  ) {
+function drawLateWorldOverlay(ctx, renderState, options, colors, textRenderer) {
+  const canDrawWorldOverlay = Boolean(ctx && !options.playerMapLarge && renderState?.camera);
+  const shouldDrawAimCursor = Boolean(
+    canDrawWorldOverlay &&
+    options.controllerAimCursor &&
+    renderState?.localPlayer
+  );
+  const shouldDrawLaserTagGateLabels = Boolean(
+    canDrawWorldOverlay &&
+    options.gameMode === GAME_MODES.laserTag &&
+    options.asteroid?.laserTag?.gates?.length &&
+    textRenderer
+  );
+
+  if (!shouldDrawAimCursor && !shouldDrawLaserTagGateLabels) {
     return;
   }
 
   beginWorldViewport(ctx, colors, false, false, true);
-  drawControllerAimCursor(ctx, renderState.localPlayer, renderState.camera, options.controllerAimCursor, colors);
+  if (shouldDrawLaserTagGateLabels) {
+    drawLaserTagGateLabels(ctx, options.asteroid, renderState.camera, colors, textRenderer);
+  }
+  if (shouldDrawAimCursor) {
+    drawControllerAimCursor(ctx, renderState.localPlayer, renderState.camera, options.controllerAimCursor, colors);
+  }
   endWorldViewport(ctx);
 }
 
@@ -8507,50 +8552,76 @@ function drawEndedHud(ctx, room, options, colors, textRenderer) {
 
 function drawLaserTagEndedHud(ctx, room, options, colors, textRenderer) {
   const laserTag = options.snapshot?.laserTag || {};
+  const players = options.snapshot?.players || [];
   const scores = laserTag.teamScores || {};
   const redScore = Math.max(0, Math.floor(Number(scores.red || 0)));
   const blueScore = Math.max(0, Math.floor(Number(scores.blue || 0)));
   const winnerTeam = laserTag.winnerTeam || (blueScore > redScore ? "blue" : "red");
-  const localPlayer = (options.snapshot?.players || []).find((player) => player.id === options.playerId);
+  const localPlayer = players.find((player) => player.id === options.playerId);
   const won = Boolean(localPlayer?.team) && localPlayer.team === winnerTeam;
   const title = won ? "YOU WON!" : "GAME OVER";
-  const rows = [
-    `${winnerTeam.toUpperCase()} TEAM WON`,
-    `RED ${redScore}`,
-    `BLUE ${blueScore}`,
-    `WIN ${Math.max(1, Math.floor(Number(laserTag.scoreLimit || ENGINE.laserTag.scoreLimit)))}`
-  ];
+  const scoreEntries = laserTagScoreEntries(players);
+  const playerRowCount = Math.max(1, scoreEntries.length);
+  const rowCount = 2 + playerRowCount;
   const resetSeconds = Number.isFinite(room.resetToLobbyAtMs)
     ? Math.max(0, Math.ceil((room.resetToLobbyAtMs - Date.now()) / 1000))
     : null;
-  const panel = mainHudPanelRect(
-    ctx,
-    ENDED_HUD_LAYOUT.width,
-    endedHudPanelHeight(rows.length, resetSeconds !== null),
-    options.settings
-  );
   const textOptions = {
     fontSize: 8,
-    color: colors.foreground
+    color: colors.foreground,
+    borderColor: null
   };
   const padding = HUD_PANEL_PADDING;
+  const summaryWidth = Math.max(
+    textRenderer.measure(`${winnerTeam.toUpperCase()} TEAM WON`, textOptions),
+    textRenderer.measure(`RED ${redScore} / BLUE ${blueScore}`, textOptions),
+    ...scoreEntries.map((entry, index) => textRenderer.measure(laserTagPlayerScoreLabel(entry, index), textOptions))
+  );
+  const panelWidth = Math.max(
+    ENDED_HUD_LAYOUT.width,
+    summaryWidth + padding * 2
+  );
+  const panel = mainHudPanelRect(
+    ctx,
+    panelWidth,
+    endedHudPanelHeight(rowCount, resetSeconds !== null),
+    options.settings
+  );
   const textX = panel.x + padding;
+  const tableStartY = panel.y + ENDED_HUD_LAYOUT.rowStartY + ENDED_HUD_LAYOUT.rowStep * 2;
 
-  drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
+  drawLaserTagEndedPanel(ctx, panel, colors);
   textRenderer.draw(ctx, title, textX, panel.y + ENDED_HUD_LAYOUT.titleY, {
     ...textOptions,
     width: panel.width - padding * 2
   });
 
-  rows.forEach((row, index) => {
-    textRenderer.draw(ctx, row, textX, panel.y + ENDED_HUD_LAYOUT.rowStartY + index * ENDED_HUD_LAYOUT.rowStep, {
-      ...textOptions,
-      width: panel.width - padding * 2
-    });
+  textRenderer.draw(ctx, `${winnerTeam.toUpperCase()} TEAM WON`, textX, panel.y + ENDED_HUD_LAYOUT.rowStartY, {
+    ...textOptions,
+    width: panel.width - padding * 2
   });
+  textRenderer.draw(ctx, `RED ${redScore} / BLUE ${blueScore}`, textX, panel.y + ENDED_HUD_LAYOUT.rowStartY + ENDED_HUD_LAYOUT.rowStep, {
+    ...textOptions,
+    width: panel.width - padding * 2
+  });
+  for (let index = 0; index < playerRowCount; index += 1) {
+    const rowY = tableStartY + ENDED_HUD_LAYOUT.rowStep * index;
+    drawLaserTagScoreRow(
+      ctx,
+      scoreEntries[index],
+      index,
+      textX,
+      rowY,
+      panel.width - padding * 2,
+      options.playerId,
+      winnerTeam,
+      colors,
+      textRenderer
+    );
+  }
 
   if (resetSeconds !== null) {
-    const countdownY = panel.y + endedHudCountdownY(rows.length);
+    const countdownY = panel.y + endedHudCountdownY(rowCount);
     textRenderer.draw(ctx, `LOBBY ${formatClock(resetSeconds)}`, textX, countdownY, {
       ...textOptions,
       width: panel.width - padding * 2
@@ -8558,6 +8629,74 @@ function drawLaserTagEndedHud(ctx, room, options, colors, textRenderer) {
   }
   const actionPosition = hudPanelActionPosition(ctx, panel, 0, 1, options.settings, terminalActionLineStep(options));
   drawTerminalLeaveAction(ctx, actionPosition.x, actionPosition.y, options, colors, textRenderer);
+}
+
+function drawLaserTagEndedPanel(ctx, panel, colors) {
+  ctx.fillStyle = colors.foreground;
+  ctx.fillRect(panel.x, panel.y, panel.width, panel.height);
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(panel.x + 1, panel.y + 1, panel.width - 2, panel.height - 2);
+}
+
+function drawLaserTagScoreRow(ctx, player, index, x, y, width, localPlayerId, winnerTeam, colors, textRenderer) {
+  if (!player) {
+    return;
+  }
+
+  const playerColor = laserTagPlayerColor(player, colors);
+  const winner = Boolean(player.team) && player.team === winnerTeam;
+  const rowX = x - 1;
+  const rowY = y - 1;
+  const rowWidth = width + 2;
+  const rowHeight = ENDED_HUD_LAYOUT.rowHighlightHeight;
+  const textOptions = {
+    fontSize: 8,
+    color: winner ? "#000000" : playerColor,
+    borderColor: null
+  };
+  if (winner) {
+    ctx.fillStyle = playerColor;
+    ctx.fillRect(
+      rowX,
+      rowY,
+      rowWidth,
+      rowHeight
+    );
+  }
+
+  textRenderer.draw(ctx, laserTagPlayerScoreLabel(player, index), x, y, {
+    ...textOptions,
+    width
+  });
+}
+
+function laserTagScoreEntries(players) {
+  return (players || [])
+    .filter((player) => player?.team === "red" || player?.team === "blue")
+    .map((player) => ({
+      id: player.id,
+      team: player.team,
+      number: Math.max(1, Math.floor(Number(player.number || 0))),
+      score: Math.max(0, Math.floor(Number(player.score || 0)))
+    }))
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      if (a.team !== b.team) {
+        return a.team === "red" ? -1 : 1;
+      }
+      return a.number - b.number;
+    });
+}
+
+function laserTagPlayerScoreLabel(player, index = 0) {
+  if (!player) {
+    return "";
+  }
+  const number = Math.max(1, Math.floor(Number(player.number || 0)));
+  const score = Math.min(9999, Math.max(0, Math.floor(Number(player.score || 0))));
+  return `${index + 1} ${String(player.team || "-").toUpperCase()} P${number} ${score}`;
 }
 
 function endedHudPanelHeight(rowCount, hasCountdown) {
@@ -8910,9 +9049,10 @@ function drawAsteroid(
   gpuStormRenderer = null,
   stormFocusPlayer = null,
   gpuFrameStormReady = false,
-  gameMode = GAME_MODES.bitspace
+  gameMode = GAME_MODES.bitspace,
+  laserTag = null
 ) {
-  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility, gameMode);
+  drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility, gameMode, laserTag);
   drawStormOverlay(
     ctx,
     asteroid,
@@ -9513,7 +9653,8 @@ function drawAsteroidTiles(
   timeSeconds,
   asteroidMiningTargets,
   visibility = null,
-  gameMode = GAME_MODES.bitspace
+  gameMode = GAME_MODES.bitspace,
+  laserTag = null
 ) {
   const tileSize = asteroid.tileSize || RENDER.tileSize;
   const padding = cameraCullPadding(camera);
@@ -9707,6 +9848,13 @@ function drawAsteroidTiles(
 
         const screenX = Math.round(tileX * tileSize - camera.x);
         const screenY = Math.round(tileY * tileSize - camera.y);
+        if (gameMode === GAME_MODES.laserTag) {
+          const gate = laserTagGateForTileIndex(asteroid, index);
+          if (gate) {
+            drawLaserTagGateDiamond(ctx, asteroid, gate, index, tileX, tileY, screenX, screenY, tileSize, colors, laserTag);
+            continue;
+          }
+        }
         if (tile === ASTEROID_TILE.ore) {
           ctx.fillStyle = coloredResources ? oreFillColor : colors.foreground;
           const amount = amountAt(asteroid, index);
@@ -11969,6 +12117,55 @@ function laserTagGateRockColorsForIndex(asteroid, index, colors) {
   };
 }
 
+function drawLaserTagGateDiamond(ctx, asteroid, gate, index, tileX, tileY, x, y, size, colors, laserTag = null) {
+  const gateColor = laserTagTeamColor(gate.team, colors);
+  const hash = hashCell(`${asteroid.seed}:laser-gate`, tileX, tileY);
+  const spin = laserTagGateDiamondSpinForIndex(laserTag, index);
+  const axis = laserTagGateDiamondSpinAxis(hash);
+  drawDiamondWireframe(
+    ctx,
+    x,
+    y,
+    size,
+    hash,
+    null,
+    {
+      edgeColor: gateColor,
+      spinAngle: spin.angle,
+      spinAxis: axis
+    }
+  );
+}
+
+function laserTagGateDiamondSpinForIndex(laserTag, index) {
+  const states = laserTag?.gateDiamonds;
+  if (!states) {
+    return { angle: 0, velocity: 0 };
+  }
+
+  if (Array.isArray(states)) {
+    const state = states.find((item) => Math.floor(Number(item?.index)) === index);
+    return {
+      angle: Number(state?.angle || 0),
+      velocity: Number(state?.velocity || 0)
+    };
+  }
+
+  const state = states[String(index)];
+  return {
+    angle: Number(state?.angle || 0),
+    velocity: Number(state?.velocity || 0)
+  };
+}
+
+function laserTagGateDiamondSpinAxis(hash) {
+  return normalize3d(
+    randomUnit(hash, 41) * 2 - 1,
+    randomUnit(hash, 42) * 2 - 1,
+    randomUnit(hash, 43) * 1.4 - 0.2
+  );
+}
+
 function laserTagGateForTileIndex(asteroid, index) {
   if (!asteroid?.laserTag?.gates || index < 0) {
     return null;
@@ -13242,17 +13439,14 @@ function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = nu
   const centerY = tileY + Math.floor(size / 2);
   const scale = resourceGeometryScale(size);
   const progressOffset = miningProgress === null ? 0 : clamp(miningProgress, 0, 1);
-  const yaw = ((hash & 255) / 255) * Math.PI * 2 + progressOffset * 0.18;
-  const pitch = (((hash >>> 8) & 255) / 255) * Math.PI * 2 + progressOffset * 0.12;
-  const roll =
-    (((hash >>> 16) & 255) / 255) * Math.PI * 2 +
-    progressOffset * 0.28;
+  const spinAngle = Number(options?.spinAngle || 0);
+  const orientation = diamondOrientationQuaternion(hash, progressOffset, spinAngle, options?.spinAxis);
   const vertices = [
     { x: 1, y: 1, z: 1 },
     { x: -1, y: -1, z: 1 },
     { x: -1, y: 1, z: -1 },
     { x: 1, y: -1, z: -1 }
-  ].map((point) => projectPoint3D(rotatePoint3D(point, yaw, pitch, roll), centerX, centerY, scale));
+  ].map((point) => projectPoint3D(rotatePointByQuaternion(point, orientation), centerX, centerY, scale));
   const edges = [
     [0, 1],
     [0, 2],
@@ -13296,6 +13490,76 @@ function drawDiamondWireframe(ctx, tileX, tileY, size, hash, miningProgress = nu
 
 function resourceGeometryScale(tileSize) {
   return Math.max(0.5, tileSize / RESOURCE_BASE_TILE_SIZE);
+}
+
+function diamondOrientationQuaternion(hash, progressOffset, spinAngle, spinAxis = null) {
+  const baseYaw = ((hash & 255) / 255) * Math.PI * 2;
+  const basePitch = (((hash >>> 8) & 255) / 255) * Math.PI * 2;
+  const baseRoll = (((hash >>> 16) & 255) / 255) * Math.PI * 2;
+  const base = quaternionFromEuler(
+    baseYaw + progressOffset * 0.18,
+    basePitch + progressOffset * 0.12,
+    baseRoll + progressOffset * 0.28
+  );
+  if (!Number.isFinite(spinAngle) || Math.abs(spinAngle) <= 0.000001) {
+    return base;
+  }
+
+  const axis = spinAxis && Number.isFinite(spinAxis.x) && Number.isFinite(spinAxis.y) && Number.isFinite(spinAxis.z)
+    ? normalize3d(spinAxis.x, spinAxis.y, spinAxis.z)
+    : normalize3d(randomUnit(hash, 41) * 2 - 1, randomUnit(hash, 42) * 2 - 1, randomUnit(hash, 43) * 1.4 - 0.2);
+  const spin = quaternionFromAxisAngle(axis, spinAngle);
+  return normalizeQuaternion(multiplyQuaternions(spin, base));
+}
+
+function quaternionFromEuler(yaw, pitch, roll) {
+  const yawQuat = quaternionFromAxisAngle({ x: 0, y: 1, z: 0 }, yaw);
+  const pitchQuat = quaternionFromAxisAngle({ x: 1, y: 0, z: 0 }, pitch);
+  const rollQuat = quaternionFromAxisAngle({ x: 0, y: 0, z: 1 }, roll);
+  return normalizeQuaternion(multiplyQuaternions(rollQuat, multiplyQuaternions(pitchQuat, yawQuat)));
+}
+
+function quaternionFromAxisAngle(axis, angle) {
+  const normalized = normalize3d(axis.x, axis.y, axis.z);
+  const half = angle / 2;
+  const sinHalf = Math.sin(half);
+  return normalizeQuaternion({
+    w: Math.cos(half),
+    x: normalized.x * sinHalf,
+    y: normalized.y * sinHalf,
+    z: normalized.z * sinHalf
+  });
+}
+
+function multiplyQuaternions(a, b) {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+  };
+}
+
+function normalizeQuaternion(quaternion) {
+  const length = Math.hypot(quaternion.w, quaternion.x, quaternion.y, quaternion.z) || 1;
+  return {
+    w: quaternion.w / length,
+    x: quaternion.x / length,
+    y: quaternion.y / length,
+    z: quaternion.z / length
+  };
+}
+
+function rotatePointByQuaternion(point, quaternion) {
+  const tx = 2 * (quaternion.y * point.z - quaternion.z * point.y);
+  const ty = 2 * (quaternion.z * point.x - quaternion.x * point.z);
+  const tz = 2 * (quaternion.x * point.y - quaternion.y * point.x);
+
+  return {
+    x: point.x + quaternion.w * tx + quaternion.y * tz - quaternion.z * ty,
+    y: point.y + quaternion.w * ty + quaternion.z * tx - quaternion.x * tz,
+    z: point.z + quaternion.w * tz + quaternion.x * ty - quaternion.y * tx
+  };
 }
 
 function fillConvexPolygon(ctx, points, color) {
@@ -14782,7 +15046,7 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
   }
 
   if (entity.type === "laserBlast") {
-    drawLaserBlastEntity(ctx, entity, camera, colors);
+    drawLaserBlastEntity(ctx, entity, camera, colors, options);
     return;
   }
 
@@ -14859,9 +15123,9 @@ function shouldDrawWorldPlayer(player, options) {
   return true;
 }
 
-function drawLaserBlastEntity(ctx, entity, camera, colors) {
+function drawLaserBlastEntity(ctx, entity, camera, colors, options = {}) {
   const angle = Number.isFinite(entity.angle) ? entity.angle : Math.atan2(entity.vy || 0, entity.vx || 0);
-  const teamColor = laserTagTeamColor(entity.team, colors);
+  const teamColor = laserTagEntityPlayerColor(entity, colors, options);
   const spawnX = Number.isFinite(entity.spawnX) ? entity.spawnX : entity.x;
   const spawnY = Number.isFinite(entity.spawnY) ? entity.spawnY : entity.y;
   const direction = {
@@ -14949,10 +15213,13 @@ function drawLaserTagGateLabels(ctx, asteroid, camera, colors, textRenderer) {
       x: gate.tileX * tileSize,
       y: gate.tileY * tileSize
     }, camera);
-    const x = Math.round(screen.x);
+    const label = String(gate.label);
     const y = Math.round(screen.y) - 10;
-    const width = Math.max(64, Math.ceil((gate.widthTiles || 1) * tileSize) + 16);
-    textRenderer.draw(ctx, String(gate.label), x, y, {
+    const gateWidth = Math.max(1, Math.ceil((gate.widthTiles || 1) * tileSize));
+    const labelWidth = textRenderer.measure(label, { fontSize: 8 });
+    const width = Math.max(64, gateWidth + 16, labelWidth);
+    const x = Math.round(screen.x + gateWidth / 2 - width / 2);
+    textRenderer.draw(ctx, label, x, y, {
       fontSize: 8,
       color: laserTagTeamColor(gate.team, colors),
       width
@@ -14996,6 +15263,38 @@ function laserTagTeamColor(team, colors) {
   return team === "blue"
     ? colors.blue || LASER_TAG_MODE_COLORS.blue
     : colors.red || LASER_TAG_MODE_COLORS.red;
+}
+
+function laserTagPlayerColor(player, colors) {
+  if (!player) {
+    return laserTagTeamColor(null, colors);
+  }
+
+  const team = player.team === "blue" ? "blue" : "red";
+  const teamIndex = Math.max(0, Math.floor((Math.max(1, Math.floor(Number(player.number || 1))) - 1) / 2));
+  return laserTagPlayerColorForTeamIndex(team, teamIndex);
+}
+
+function laserTagPlayerColorForTeamIndex(team, teamIndex) {
+  if (teamIndex <= 0) {
+    return laserTagTeamColor(team, LASER_TAG_MODE_COLORS);
+  }
+
+  const range = LASER_TAG_PLAYER_COLOR_RANGES[team === "blue" ? "blue" : "red"];
+  const maxTeamPlayers = Math.max(1, Math.ceil(ENGINE.maxPlayers / 2));
+  const t = maxTeamPlayers <= 2 ? 1 : (clamp(teamIndex, 1, maxTeamPlayers - 1) - 1) / (maxTeamPlayers - 2);
+  return hslToHex(range.start + range.span * t, 0.95, 0.58);
+}
+
+function laserTagEntityPlayerColor(entity, colors, options = {}) {
+  const ownerId = entity?.ownerId;
+  const players = options.renderState?.renderPlayers || options.renderState?.worldRenderPlayers || [];
+  const owner = ownerId
+    ? players.find((player) => player?.id === ownerId)
+    : null;
+  return owner
+    ? laserTagPlayerColor(owner, colors)
+    : laserTagTeamColor(entity?.team, colors);
 }
 
 function drawOctopusInkEntity(ctx, entity, camera) {
@@ -15579,7 +15878,7 @@ function drawShip(
 }
 
 function drawLaserTagShip(ctx, x, y, player, radius, angle, colors) {
-  const teamColor = laserTagTeamColor(player.team, colors);
+  const teamColor = laserTagPlayerColor(player, colors);
   const uvColor = colors.rockLine || LASER_TAG_MODE_COLORS.rockLine;
   const uvDarkColor = LASER_TAG_MODE_COLORS.bodyOuterLine || colors.rockLine || LASER_TAG_MODE_COLORS.rockLine;
   const bodyColor = LASER_TAG_PLAYER_BODY_STROKE;
@@ -18266,15 +18565,12 @@ function laserTagHudRows(player, layout = {}, voiceRow = false) {
   const elapsedSeconds = Math.max(0, (tick - startedTick) / ENGINE.tickRate);
   const remainingSeconds = Math.max(0, matchSeconds - elapsedSeconds);
   const ownScore = Math.min(9999, Math.max(0, Math.floor(Number(player.score || 0))));
-  const ghost = player.laserTagGhost === true ||
-    (Number(player.health || 0) <= 0 && Number(player.laserTagOutUntilTick || 0) > 0);
   const rows = [
     `TEAM ${String(player.team || "-").toUpperCase()}`,
     `YOU ${ownScore}`,
     `RED ${redScore} / BLUE ${blueScore}`,
     `WIN ${scoreLimit}`,
-    `TIME ${formatClock(remainingSeconds)}`,
-    ghost ? "RETREAT" : "ACTIVE"
+    `TIME ${formatClock(remainingSeconds)}`
   ];
   if (voiceRow) {
     rows.push("VOICE ON");
