@@ -12078,7 +12078,8 @@ function resolvePredictionAsteroidCollisions(player, gameMode = activeGameMode()
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
     const blockers = blockingTilesNearCircle(state.asteroid, player.x, player.y, player.radius, {
-      blockNonPlayable: !state.asteroid.storm
+      blockNonPlayable: !state.asteroid.storm,
+      blockWindows: gameMode === GAME_MODES.laserTag
     });
 
     for (const blocker of blockers) {

@@ -28,6 +28,8 @@ export const STORM_STATE = Object.freeze({
   storm: 2
 });
 
+const LASER_TAG_WINDOW_COLLISION_RADIUS = 0.5;
+
 const DEFAULT_GENERATION = Object.freeze({
   playerPocketRadius: 3,
   playerOrbitRadius: 56,
@@ -467,7 +469,8 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
     redSpawn: [],
     blueSpawn: [],
     redGate: [],
-    blueGate: []
+    blueGate: [],
+    window: []
   };
 
   for (let tileY = 0; tileY < heightTiles; tileY += 1) {
@@ -489,6 +492,8 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
       } else if (char === LASER_TAG_MAP_CHARS.blueGate) {
         tiles[index] = ASTEROID_TILE.rock;
         markers.blueGate.push({ tileX, tileY });
+      } else if (char === LASER_TAG_MAP_CHARS.window) {
+        markers.window.push({ tileX, tileY });
       }
     }
   }
@@ -537,7 +542,8 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
       gates: [
         ...laserTagGateTargetsFromMarkers(markers.redGate, tileSize, "red", widthTiles),
         ...laserTagGateTargetsFromMarkers(markers.blueGate, tileSize, "blue", widthTiles)
-      ]
+      ],
+      windows: laserTagWindowSegmentsFromMarkers(markers.window, tileSize)
     }
   };
 }
@@ -557,6 +563,67 @@ function fallbackLaserTagSpawn(widthTiles, heightTiles, tileSize, team) {
     x: (red ? 2.5 : widthTiles - 2.5) * tileSize,
     y: heightTiles * tileSize * 0.5,
     angle: red ? 0 : Math.PI
+  };
+}
+
+function laserTagWindowSegmentsFromMarkers(markers, tileSize) {
+  return connectedMarkerComponents(markers)
+    .map((component, index) => laserTagWindowSegmentFromComponent(component, tileSize, index))
+    .filter(Boolean);
+}
+
+function laserTagWindowSegmentFromComponent(component, tileSize, index) {
+  if (!Array.isArray(component) || component.length <= 0) {
+    return null;
+  }
+
+  const endpoints = farthestMarkerPair(component);
+  const start = endpoints.start;
+  const end = endpoints.end;
+  const startCenter = markerCenter(start, tileSize);
+  const endCenter = markerCenter(end, tileSize);
+  const dx = endCenter.x - startCenter.x;
+  const dy = endCenter.y - startCenter.y;
+  const length = Math.hypot(dx, dy);
+  const ux = length > 0.0001 ? dx / length : 1;
+  const uy = length > 0.0001 ? dy / length : 0;
+  const extension = tileSize * 0.5;
+
+  return {
+    id: `window-${index + 1}`,
+    tileCount: component.length,
+    x1: startCenter.x - ux * extension,
+    y1: startCenter.y - uy * extension,
+    x2: endCenter.x + ux * extension,
+    y2: endCenter.y + uy * extension
+  };
+}
+
+function farthestMarkerPair(component) {
+  let start = component[0];
+  let end = component[0];
+  let bestDistance = -1;
+  for (let aIndex = 0; aIndex < component.length; aIndex += 1) {
+    const a = component[aIndex];
+    for (let bIndex = aIndex; bIndex < component.length; bIndex += 1) {
+      const b = component[bIndex];
+      const dx = b.tileX - a.tileX;
+      const dy = b.tileY - a.tileY;
+      const distance = dx * dx + dy * dy;
+      if (distance > bestDistance) {
+        start = a;
+        end = b;
+        bestDistance = distance;
+      }
+    }
+  }
+  return { start, end };
+}
+
+function markerCenter(marker, tileSize) {
+  return {
+    x: (marker.tileX + 0.5) * tileSize,
+    y: (marker.tileY + 0.5) * tileSize
   };
 }
 
@@ -645,7 +712,11 @@ function markerNeighbors(marker) {
     { tileX: marker.tileX + 1, tileY: marker.tileY },
     { tileX: marker.tileX - 1, tileY: marker.tileY },
     { tileX: marker.tileX, tileY: marker.tileY + 1 },
-    { tileX: marker.tileX, tileY: marker.tileY - 1 }
+    { tileX: marker.tileX, tileY: marker.tileY - 1 },
+    { tileX: marker.tileX + 1, tileY: marker.tileY + 1 },
+    { tileX: marker.tileX + 1, tileY: marker.tileY - 1 },
+    { tileX: marker.tileX - 1, tileY: marker.tileY + 1 },
+    { tileX: marker.tileX - 1, tileY: marker.tileY - 1 }
   ];
 }
 
@@ -829,6 +900,10 @@ export function blockingTilesNearCircle(asteroid, x, y, radius, options = {}) {
     }
   }
 
+  if (options.blockWindows === true) {
+    tiles.push(...laserTagWindowBlockersNearCircle(asteroid, x, y, radius));
+  }
+
   return tiles;
 }
 
@@ -847,7 +922,69 @@ export function blockingTilesAlongSegment(asteroid, startX, startY, endX, endY, 
     }
   }
 
+  if (options.blockWindows === true) {
+    tiles.push(...laserTagWindowBlockersAlongSegment(asteroid, startX, startY, endX, endY, radius));
+  }
+
   return tiles;
+}
+
+function laserTagWindowBlockersNearCircle(asteroid, x, y, radius) {
+  const circle = { x, y, radius };
+  return laserTagWindowBlockers(asteroid).filter((blocker) => {
+    const bounds = blockerBounds(blocker);
+    return circleBoundsOverlap(circle, bounds.x, bounds.y, bounds.width, bounds.height);
+  });
+}
+
+function laserTagWindowBlockersAlongSegment(asteroid, startX, startY, endX, endY, radius) {
+  const minX = Math.min(startX, endX) - radius;
+  const maxX = Math.max(startX, endX) + radius;
+  const minY = Math.min(startY, endY) - radius;
+  const maxY = Math.max(startY, endY) + radius;
+  return laserTagWindowBlockers(asteroid).filter((blocker) => {
+    const bounds = blockerBounds(blocker);
+    return bounds.right >= minX && bounds.x <= maxX && bounds.bottom >= minY && bounds.y <= maxY;
+  });
+}
+
+function laserTagWindowBlockers(asteroid) {
+  const windows = Array.isArray(asteroid?.laserTag?.windows) ? asteroid.laserTag.windows : [];
+  return windows.map((window, index) => laserTagWindowBlocker(window, index)).filter(Boolean);
+}
+
+function laserTagWindowBlocker(window, index) {
+  const x1 = Number(window?.x1);
+  const y1 = Number(window?.y1);
+  const x2 = Number(window?.x2);
+  const y2 = Number(window?.y2);
+  if (![x1, y1, x2, y2].every(Number.isFinite)) {
+    return null;
+  }
+
+  const radius = Math.max(0, Number(window.radius) || LASER_TAG_WINDOW_COLLISION_RADIUS);
+  const x = Math.min(x1, x2) - radius;
+  const y = Math.min(y1, y2) - radius;
+  const right = Math.max(x1, x2) + radius;
+  const bottom = Math.max(y1, y2) + radius;
+  return {
+    key: `window:${window.id || index}`,
+    type: "laserTagWindow",
+    x,
+    y,
+    right,
+    bottom,
+    width: right - x,
+    height: bottom - y,
+    shape: {
+      type: "segment",
+      x1,
+      y1,
+      x2,
+      y2,
+      radius
+    }
+  };
 }
 
 export function raycastAsteroid(asteroid, startX, startY, angle, maxDistance, options = {}) {
@@ -1060,6 +1197,11 @@ export function pointOverlapsBlockerShape(x, y, blocker) {
     return false;
   }
 
+  if (isSegmentBlocker(blocker)) {
+    const shape = blocker.shape;
+    return pointDistanceToSegment(x, y, shape.x1, shape.y1, shape.x2, shape.y2) <= (Number(shape.radius) || 0);
+  }
+
   const bounds = blockerBounds(blocker);
   if (!pointInBounds(x, y, bounds)) {
     return false;
@@ -1074,6 +1216,11 @@ export function pointOverlapsBlockerShape(x, y, blocker) {
 }
 
 export function pointDistanceToBlockerShape(x, y, blocker) {
+  if (isSegmentBlocker(blocker)) {
+    const shape = blocker.shape;
+    return Math.max(0, pointDistanceToSegment(x, y, shape.x1, shape.y1, shape.x2, shape.y2) - (Number(shape.radius) || 0));
+  }
+
   const bounds = blockerBounds(blocker);
   if (!blocker?.shape?.rounded) {
     return pointDistanceToBounds(x, y, bounds);
@@ -1093,6 +1240,10 @@ export function pointDistanceToBlockerShape(x, y, blocker) {
 export function circleBlockerOverlap(circle, blocker) {
   if (!circle || !blocker) {
     return null;
+  }
+
+  if (isSegmentBlocker(blocker)) {
+    return circleSegmentBlockerOverlap(circle, blocker);
   }
 
   const bounds = blockerBounds(blocker);
@@ -1121,6 +1272,10 @@ export function circleBlockerOverlap(circle, blocker) {
 export function sweptCircleBlockerHit(previousX, previousY, x, y, radius, blocker) {
   if (!blocker) {
     return null;
+  }
+
+  if (isSegmentBlocker(blocker)) {
+    return sweptCircleSegmentBlockerHit(previousX, previousY, x, y, radius, blocker);
   }
 
   const bounds = blockerBounds(blocker);
@@ -1194,6 +1349,127 @@ export function sweptCircleBlockerHit(previousX, previousY, x, y, radius, blocke
     x: hitX,
     y: hitY
   };
+}
+
+function isSegmentBlocker(blocker) {
+  return blocker?.shape?.type === "segment";
+}
+
+function circleSegmentBlockerOverlap(circle, blocker) {
+  const shape = blocker.shape;
+  const closest = closestPointOnSegment(circle.x, circle.y, shape.x1, shape.y1, shape.x2, shape.y2);
+  const dx = circle.x - closest.x;
+  const dy = circle.y - closest.y;
+  const distance = Math.hypot(dx, dy);
+  const combinedRadius = Math.max(0, Number(circle.radius) || 0) + Math.max(0, Number(shape.radius) || 0);
+  if (distance >= combinedRadius) {
+    return null;
+  }
+
+  let normalX = 1;
+  let normalY = 0;
+  if (distance > 0.0001) {
+    normalX = dx / distance;
+    normalY = dy / distance;
+  } else {
+    const segmentDx = shape.x2 - shape.x1;
+    const segmentDy = shape.y2 - shape.y1;
+    const segmentLength = Math.hypot(segmentDx, segmentDy);
+    if (segmentLength > 0.0001) {
+      normalX = -segmentDy / segmentLength;
+      normalY = segmentDx / segmentLength;
+    }
+  }
+
+  return {
+    normalX,
+    normalY,
+    overlap: combinedRadius - distance,
+    distance
+  };
+}
+
+function sweptCircleSegmentBlockerHit(previousX, previousY, x, y, radius, blocker) {
+  const startOverlap = circleSegmentBlockerOverlap({ x: previousX, y: previousY, radius }, blocker);
+  if (startOverlap) {
+    return {
+      ...startOverlap,
+      time: 0,
+      x: previousX,
+      y: previousY
+    };
+  }
+
+  const dx = x - previousX;
+  const dy = y - previousY;
+  let low = 0;
+  let high = null;
+  const scanSteps = 16;
+  for (let step = 1; step <= scanSteps; step += 1) {
+    const t = step / scanSteps;
+    const probe = {
+      x: previousX + dx * t,
+      y: previousY + dy * t,
+      radius
+    };
+    if (circleSegmentBlockerOverlap(probe, blocker)) {
+      high = t;
+      break;
+    }
+    low = t;
+  }
+
+  if (high === null) {
+    return null;
+  }
+
+  for (let step = 0; step < 8; step += 1) {
+    const t = (low + high) * 0.5;
+    const probe = {
+      x: previousX + dx * t,
+      y: previousY + dy * t,
+      radius
+    };
+    if (circleSegmentBlockerOverlap(probe, blocker)) {
+      high = t;
+    } else {
+      low = t;
+    }
+  }
+
+  const hitX = previousX + dx * high;
+  const hitY = previousY + dy * high;
+  const hit = circleSegmentBlockerOverlap({ x: hitX, y: hitY, radius }, blocker);
+  if (!hit) {
+    return null;
+  }
+
+  return {
+    ...hit,
+    time: high,
+    x: hitX,
+    y: hitY
+  };
+}
+
+function closestPointOnSegment(x, y, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 0.000001) {
+    return { x: x1, y: y1 };
+  }
+
+  const t = clampNumber(((x - x1) * dx + (y - y1) * dy) / lengthSq, 0, 1);
+  return {
+    x: x1 + dx * t,
+    y: y1 + dy * t
+  };
+}
+
+function pointDistanceToSegment(x, y, x1, y1, x2, y2) {
+  const closest = closestPointOnSegment(x, y, x1, y1, x2, y2);
+  return Math.hypot(x - closest.x, y - closest.y);
 }
 
 function rockCollisionShape(asteroid, tileX, tileY, tile) {

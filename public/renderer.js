@@ -134,8 +134,9 @@ const BUG_BURROW_MODE_COLORS = Object.freeze({
   bugTheme: BUG_THEMES.burrow
 });
 const LASER_TAG_COLOR_UV = "#1122ff";
+const LASER_TAG_COLOR_UV_LIGHT = mixHexColors(LASER_TAG_COLOR_UV, "#4e89f7", 0.5);
 const LASER_TAG_MODE_COLORS = Object.freeze({
-  foreground: LASER_TAG_COLOR_UV,
+  foreground: LASER_TAG_COLOR_UV_LIGHT,
   // background: "#16172c",
   background: "#000108",
   backing: "#000000",
@@ -144,6 +145,7 @@ const LASER_TAG_MODE_COLORS = Object.freeze({
   wallFill: "#000000",
   wallLine: LASER_TAG_COLOR_UV,
   bodyOuterLine: LASER_TAG_COLOR_UV,
+  windowLine: LASER_TAG_COLOR_UV_LIGHT,
   ore: "#e8f4ff",
   diamond: "#a4ceff",
   red: "#ff314f",
@@ -9189,6 +9191,9 @@ function drawAsteroid(
   laserTag = null
 ) {
   drawAsteroidTiles(ctx, asteroid, camera, colors, timeSeconds, asteroidMiningTargets, visibility, gameMode, laserTag);
+  if (gameMode === GAME_MODES.laserTag) {
+    drawLaserTagWindows(ctx, asteroid, camera, colors);
+  }
   drawStormOverlay(
     ctx,
     asteroid,
@@ -9203,6 +9208,28 @@ function drawAsteroid(
   );
   if (!asteroid.storm) {
     drawAsteroidBoundary(ctx, asteroid, camera, colors, visibility);
+  }
+}
+
+function drawLaserTagWindows(ctx, asteroid, camera, colors) {
+  const windows = Array.isArray(asteroid?.laserTag?.windows) ? asteroid.laserTag.windows : [];
+  if (windows.length <= 0) {
+    return;
+  }
+
+  ctx.fillStyle = colors.windowLine || colors.foreground || LASER_TAG_MODE_COLORS.windowLine;
+  for (const window of windows) {
+    const x1 = Number(window?.x1);
+    const y1 = Number(window?.y1);
+    const x2 = Number(window?.x2);
+    const y2 = Number(window?.y2);
+    if (![x1, y1, x2, y2].every(Number.isFinite)) {
+      continue;
+    }
+
+    const start = worldToScreen({ x: x1, y: y1 }, camera);
+    const end = worldToScreen({ x: x2, y: y2 }, camera);
+    drawPixelLine(ctx, Math.round(start.x), Math.round(start.y), Math.round(end.x), Math.round(end.y));
   }
 }
 

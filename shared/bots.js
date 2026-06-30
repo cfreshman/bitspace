@@ -209,6 +209,8 @@ const BOT_LASER_TAG_DEFEND_GATE_FALLBACK_PENALTY = 180;
 const BOT_LASER_TAG_VISIBLE_GATE_WEIGHT = 260;
 const BOT_LASER_TAG_PATROL_REPLAN_TICKS = 180;
 const BOT_LASER_TAG_TARGET_REPLAN_TICKS = 30;
+const BOT_LASER_TAG_DEFEND_GATE_CACHE_TICKS = BOT_LASER_TAG_TARGET_REPLAN_TICKS;
+const BOT_LASER_TAG_DEFEND_GATE_ROUTE_CANDIDATES = 4;
 const BOT_LASER_TAG_GATE_STANDOFF_TILES = 4;
 const BOT_LASER_TAG_FIRE_AIM_DOT = 0.985;
 const BOT_LASER_TAG_PLAYER_AIM_RADIUS_SCALE = 3;
@@ -1020,7 +1022,7 @@ function botLaserTagObjective(arena, bot, brain, shot) {
     return null;
   }
 
-  const defendedGate = botLaserTagAttackedFriendlyGateObjective(arena, bot);
+  const defendedGate = botLaserTagAttackedFriendlyGateObjective(arena, bot, brain);
   const committed = botLaserTagCommittedObjective(arena, bot, brain);
   if (
     committed &&
@@ -1343,11 +1345,32 @@ function botLaserTagGateAimPoints(arena, gate) {
   return points;
 }
 
-function botLaserTagAttackedFriendlyGateObjective(arena, bot) {
+function botLaserTagAttackedFriendlyGateObjective(arena, bot, brain = null) {
   const attacks = arena?.laserTag?.gateAttacks;
   const asteroid = arena?.asteroid;
   if (!attacks || !asteroid || !bot?.team) {
+    if (brain) {
+      brain.laserTagDefendGateCache = null;
+    }
     return null;
+  }
+
+  const cacheKey = botLaserTagFriendlyGateAttackKey(arena, bot);
+  if (!cacheKey) {
+    if (brain) {
+      brain.laserTagDefendGateCache = null;
+    }
+    return null;
+  }
+
+  const cached = brain?.laserTagDefendGateCache;
+  if (
+    cached &&
+    cached.key === cacheKey &&
+    arena.tick - Number(cached.tick || 0) < BOT_LASER_TAG_DEFEND_GATE_CACHE_TICKS
+  ) {
+    const target = copyTarget(cached.target);
+    return target && botLaserTagFreshGateAttackForTarget(arena, bot, target) ? target : null;
   }
 
   const tileSize = asteroid.tileSize || RENDER.tileSize || 16;
@@ -1369,7 +1392,7 @@ function botLaserTagAttackedFriendlyGateObjective(arena, bot) {
       selected = visibleAttacker || selected;
     }
 
-    for (const point of botLaserTagGateSearchPoints(arena, bot, gate, attack)) {
+    for (const point of botLaserTagGateSearchRouteCandidates(arena, bot, gate, attack)) {
       const route = botPathRouteToTarget(arena, bot, point, {
         allowMining: false,
         pathLimitToView: false
@@ -1400,7 +1423,49 @@ function botLaserTagAttackedFriendlyGateObjective(arena, bot) {
       }
     }
   }
+  if (brain) {
+    brain.laserTagDefendGateCache = {
+      key: cacheKey,
+      tick: arena.tick,
+      target: copyTarget(selected)
+    };
+  }
   return selected;
+}
+
+function botLaserTagFriendlyGateAttackKey(arena, bot) {
+  const attacks = arena?.laserTag?.gateAttacks;
+  if (!attacks || !bot?.team) {
+    return "";
+  }
+
+  const parts = [];
+  for (const gate of botLaserTagFriendlyGates(arena, bot)) {
+    const attack = attacks[gate.id];
+    const attackTick = Math.floor(Number(attack?.tick));
+    if (!Number.isFinite(attackTick)) {
+      continue;
+    }
+    const ageTicks = Math.max(0, arena.tick - attackTick);
+    if (ageTicks > BOT_LASER_TAG_DEFEND_GATE_ACTIVE_TICKS) {
+      continue;
+    }
+    const tileIndex = Number.isInteger(attack?.tileIndex) ? attack.tileIndex : -1;
+    parts.push(`${gate.id}:${attackTick}:${tileIndex}`);
+  }
+
+  return parts.sort().join("|");
+}
+
+function botLaserTagGateSearchRouteCandidates(arena, bot, gate, attack) {
+  return botLaserTagGateSearchPoints(arena, bot, gate, attack)
+    .map((point) => ({
+      point,
+      score: distanceBetween(bot, point) + Number(point.searchPenalty || 0)
+    }))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, BOT_LASER_TAG_DEFEND_GATE_ROUTE_CANDIDATES)
+    .map((entry) => entry.point);
 }
 
 function botLaserTagFreshGateAttackForTarget(arena, bot, target) {

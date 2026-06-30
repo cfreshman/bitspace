@@ -5,7 +5,8 @@ export const LASER_TAG_MAP_COLORS = Object.freeze({
   redSpawn: "#ff0000",
   blueSpawn: "#0000ff",
   redGate: "#ff66aa",
-  blueGate: "#66aaff"
+  blueGate: "#66aaff",
+  window: "#ffff00"
 });
 
 export const LASER_TAG_MAP_CHARS = Object.freeze({
@@ -15,7 +16,8 @@ export const LASER_TAG_MAP_CHARS = Object.freeze({
   redSpawn: "R",
   blueSpawn: "B",
   redGate: "r",
-  blueGate: "b"
+  blueGate: "b",
+  window: "W"
 });
 
 const COLOR_TO_CHAR = new Map(Object.entries(LASER_TAG_MAP_COLORS).map(([key, color]) => [

@@ -1020,7 +1020,11 @@ function findLaserTagAStarPath(asteroid, startIndex, goalIndex) {
     closed[current] = 1;
 
     for (const neighbor of laserTagPathNeighbors(asteroid, current)) {
-      if (closed[neighbor] || !laserTagPathTileOpen(asteroid, neighbor)) {
+      if (
+        closed[neighbor] ||
+        !laserTagPathTileOpen(asteroid, neighbor) ||
+        !laserTagPathEdgeOpen(asteroid, current, neighbor)
+      ) {
         continue;
       }
       const nextScore = gScore[current] + 1;
@@ -1076,7 +1080,58 @@ function laserTagPathTileOpen(asteroid, index) {
     return false;
   }
   const playable = asteroid.playable[index] === true || asteroid.playable[index] === "1";
-  return playable && !isAsteroidRockTile(asteroid.tiles[index]);
+  return playable &&
+    !isAsteroidRockTile(asteroid.tiles[index]) &&
+    !laserTagPathTileHitsWindow(asteroid, index);
+}
+
+function laserTagPathTileHitsWindow(asteroid, index) {
+  if (!asteroid?.laserTag?.windows?.length) {
+    return false;
+  }
+
+  const point = tileCenterPoint(asteroid, index);
+  const radius = laserTagPathRadius();
+  const blockers = blockingTilesNearCircle(asteroid, point.x, point.y, radius, {
+    blockNonPlayable: false,
+    blockWindows: true
+  });
+  for (const blocker of blockers) {
+    if (blocker?.type !== "laserTagWindow") {
+      continue;
+    }
+    if (circleBlockerOverlap({ x: point.x, y: point.y, radius }, blocker)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function laserTagPathEdgeOpen(asteroid, fromIndex, toIndex) {
+  if (!asteroid?.laserTag?.windows?.length) {
+    return true;
+  }
+
+  const from = tileCenterPoint(asteroid, fromIndex);
+  const to = tileCenterPoint(asteroid, toIndex);
+  const radius = laserTagPathRadius();
+  const blockers = blockingTilesAlongSegment(asteroid, from.x, from.y, to.x, to.y, radius, {
+    blockNonPlayable: false,
+    blockWindows: true
+  });
+  for (const blocker of blockers) {
+    if (blocker?.type !== "laserTagWindow") {
+      continue;
+    }
+    if (sweptCircleBlockerHit(from.x, from.y, to.x, to.y, radius, blocker)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function laserTagPathRadius() {
+  return Math.max(1, Number(ENGINE.laserTag.radius || ENGINE.ship.radius || 7));
 }
 
 function laserTagPathHeuristic(asteroid, fromIndex, toIndex) {
@@ -1610,21 +1665,26 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
     processHuckRockInput(arena, player, dtSeconds);
   }
 
+  const previousX = player.x;
+  const previousY = player.y;
   player.x += player.vx * dtSeconds;
   player.y += player.vy * dtSeconds;
 
-  resolveStaticCollisions(arena, player, options);
+  resolveStaticCollisions(arena, player, options, previousX, previousY);
   if (gameMode === GAME_MODES.bugs) {
     clampBugLegCenterToCore(player, arena.asteroid);
   }
   applyStormDamage(arena, player, dtSeconds);
 }
 
-function resolveStaticCollisions(arena, player, options = {}) {
+function resolveStaticCollisions(arena, player, options = {}, previousX = player.x, previousY = player.y) {
   const gameMode = normalizeGameMode(arena.mode);
   return arena.asteroid
     ? resolveAsteroidCollisions(arena.asteroid, player, {
       blockNonPlayable: !arena.storm,
+      blockWindows: gameMode === GAME_MODES.laserTag,
+      previousX,
+      previousY,
       boundaryRestitution: boundaryRestitutionForGameMode(gameMode),
       onImpact: options.onAsteroidImpact
         ? (speed, blocker, hit) => options.onAsteroidImpact(arena, player, speed, blocker, hit)
@@ -1635,6 +1695,10 @@ function resolveStaticCollisions(arena, player, options = {}) {
 
 function resolveAsteroidCollisions(asteroid, player, options = {}) {
   let impact = 0;
+
+  if (options.blockWindows === true) {
+    impact = Math.max(impact, resolveSweptWindowCollisions(asteroid, player, options));
+  }
 
   for (let pass = 0; pass < 4; pass += 1) {
     let resolved = false;
@@ -1669,6 +1733,58 @@ function resolveAsteroidCollisions(asteroid, player, options = {}) {
   }
 
   return impact;
+}
+
+function resolveSweptWindowCollisions(asteroid, player, options = {}) {
+  const previousX = Number(options.previousX);
+  const previousY = Number(options.previousY);
+  if (
+    !Number.isFinite(previousX) ||
+    !Number.isFinite(previousY) ||
+    (previousX === player.x && previousY === player.y)
+  ) {
+    return 0;
+  }
+
+  let nearest = null;
+  const blockers = blockingTilesAlongSegment(
+    asteroid,
+    previousX,
+    previousY,
+    player.x,
+    player.y,
+    player.radius,
+    options
+  );
+  for (const blocker of blockers) {
+    if (blocker?.type !== "laserTagWindow") {
+      continue;
+    }
+    const hit = sweptCircleBlockerHit(previousX, previousY, player.x, player.y, player.radius, blocker);
+    if (!hit || (nearest && hit.time >= nearest.time)) {
+      continue;
+    }
+    nearest = hit;
+  }
+
+  if (!nearest) {
+    return 0;
+  }
+
+  player.x = nearest.x + nearest.normalX * Math.max(0.01, nearest.overlap || 0);
+  player.y = nearest.y + nearest.normalY * Math.max(0.01, nearest.overlap || 0);
+
+  const normalSpeed = player.vx * nearest.normalX + player.vy * nearest.normalY;
+  if (normalSpeed < 0) {
+    if (typeof options.onImpact === "function") {
+      options.onImpact(-normalSpeed, { type: "laserTagWindow" }, nearest);
+    }
+    const restitution = options.boundaryRestitution ?? ENGINE.collision.boundaryRestitution;
+    player.vx -= (1 + restitution) * normalSpeed * nearest.normalX;
+    player.vy -= (1 + restitution) * normalSpeed * nearest.normalY;
+  }
+
+  return Math.abs(normalSpeed);
 }
 
 function processHuckRockInput(arena, player, dtSeconds) {
