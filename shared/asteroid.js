@@ -530,8 +530,8 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
     laserTag: {
       variant: map.id,
       spawns: {
-        red: pockets.filter((_pocket, index) => index % 2 === 0),
-        blue: pockets.filter((_pocket, index) => index % 2 === 1)
+        red: redSpawns.length ? redSpawns : [fallbackLaserTagSpawn(widthTiles, heightTiles, tileSize, "red")],
+        blue: blueSpawns.length ? blueSpawns : [fallbackLaserTagSpawn(widthTiles, heightTiles, tileSize, "blue")]
       },
       bases: [redBase, blueBase],
       gates: [

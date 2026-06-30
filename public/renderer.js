@@ -133,17 +133,17 @@ const BUG_BURROW_MODE_COLORS = Object.freeze({
   bugBodyExtraOutline: true,
   bugTheme: BUG_THEMES.burrow
 });
+const LASER_TAG_COLOR_UV = "#1122ff";
 const LASER_TAG_MODE_COLORS = Object.freeze({
-  foreground: "#e8f4ff",
+  foreground: LASER_TAG_COLOR_UV,
   // background: "#16172c",
-  background: "#000000",
-  backgroundDark: "#101124",
-  backing: "#050510",
-  rockFill: "#202248",
-  rockLine: "#6d75ff",
-  wallFill: "#202248",
-  wallLine: "#6d75ff",
-  bodyOuterLine: "#3238a7",
+  background: "#000108",
+  backing: "#000000",
+  rockFill: "#000000",
+  rockLine: LASER_TAG_COLOR_UV,
+  wallFill: "#000000",
+  wallLine: LASER_TAG_COLOR_UV,
+  bodyOuterLine: LASER_TAG_COLOR_UV,
   ore: "#e8f4ff",
   diamond: "#a4ceff",
   red: "#ff314f",
@@ -197,12 +197,12 @@ const LASER_TAG_CARPET_ROTATION = -Math.PI / 12;
 const LASER_TAG_CARPET_BRIGHTNESS = 0.42;
 const LASER_TAG_CARPET_CONTRAST = 0.9;
 const LASER_TAG_CARPET_SATURATION = 0.85;
-const LASER_TAG_CARPET_UV_TINT_COLOR = "#3923ff";
-const LASER_TAG_CARPET_UV_TINT_AMOUNT = 0.2;
+const LASER_TAG_CARPET_UV_TINT_COLOR = "#000088";
+const LASER_TAG_CARPET_UV_TINT_AMOUNT = 0.25;
 const LASER_TAG_SHADOW_MASK_COLOR = "#030201";
 const LASER_TAG_SHADOW_TINT_COLOR = "#0d0b10";
 const LASER_TAG_SHADOW_ALPHA = 0.7;
-const LASER_TAG_PLAYER_BODY_STROKE = "#000000";
+const LASER_TAG_PLAYER_BODY_STROKE = "#111111";
 const BUG_HUCK_ROCK_WEB_LIGHT = "#ffffff";
 const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
 const SUB_SHADOW_MASK_COLOR = "#010203";
@@ -769,11 +769,11 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   nozzleMax: 0.5,
 });
 const LASER_TAG_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
-  rate: 5,
-  plumeSpeed: 0.2,
-  life: .5,
-  nozzle: .8,
-  spread: 1,
+  rate: 20,
+  plumeSpeed: 1.5,
+  life: .05,
+  nozzle: .5,
+  spread: 0,
   sideOffsetScale: 1
 });
 const LASER_TAG_THRUSTER_ENGINE_RAMP = Object.freeze({
@@ -16048,7 +16048,8 @@ function drawOutlinedLaserTagShip(ctx, x, y, player, radius, angle, colors, game
     canvas.height,
     x - center,
     y - center,
-    colors.foreground
+    // laserTagTeamColor(player.team, colors),
+    laserTagPlayerColor(player, colors),
   );
   drawLaserTagShipComposite(ctx, x, y, player, radius, angle, colors, gameOver);
 }
@@ -16056,7 +16057,8 @@ function drawOutlinedLaserTagShip(ctx, x, y, player, radius, angle, colors, game
 function drawLaserTagShipComposite(ctx, x, y, player, radius, angle, colors, gameOver = false) {
   drawBitspaceShipBody(ctx, x, y, radius, angle, {
     ...colors,
-    foreground: LASER_TAG_PLAYER_BODY_STROKE
+    foreground: colors.backing,
+    background: colors.backing,
   });
   drawLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver);
 }
@@ -16145,7 +16147,7 @@ function drawShipSilhouetteOutlineFromMask(ctx, data, width, height, offsetX, of
 
 function drawLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver = false) {
   const teamColor = laserTagPlayerColor(player, colors);
-  const bodyColor = LASER_TAG_PLAYER_BODY_STROKE;
+  const bodyColor = colors.backing;
   const lightsActive = gameOver || (player.laserTagGhost !== true && Number(player.health || 0) > 0);
   const rayAngle = Number.isFinite(player?.aimAngle) ? player.aimAngle : angle;
   const direction = {

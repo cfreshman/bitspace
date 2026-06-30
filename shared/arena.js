@@ -1237,7 +1237,7 @@ function laserTagSpawnTileIsOpen(asteroid, spawn) {
     return false;
   }
   const index = tileY * asteroid.widthTiles + tileX;
-  return !isAsteroidRockTile(asteroid, index);
+  return !isAsteroidRockTile(asteroid.tiles[index]);
 }
 
 function laserTagSpawnPointIsFree(arena, player, spawn) {
@@ -1260,9 +1260,30 @@ function laserTagSpawnPointIsFree(arena, player, spawn) {
 function laserTagSpawnForPlayer(arena, team, number) {
   const teamName = team === "blue" ? "blue" : "red";
   const spawns = arena.asteroid?.laserTag?.spawns?.[teamName] || [];
+  const candidates = spawns
+    .map((spawn) => laserTagSpawnPoint(spawn, teamName))
+    .filter((spawn) => laserTagSpawnTileIsOpen(arena.asteroid, spawn));
+  const pool = candidates.length ? candidates : spawns.map((spawn) => laserTagSpawnPoint(spawn, teamName));
   const teamIndex = Math.floor((Math.max(1, Math.floor(Number(number) || 1)) - 1) / LASER_TAG_TEAMS.length);
-  const spawn = spawns[teamIndex % Math.max(1, spawns.length)] || spawnForPlayerNumber(number, arena.asteroid);
-  return laserTagSpawnPoint(spawn, teamName);
+  const order = shuffledLaserTagSpawnPool(pool, arena.seed, teamName);
+  return order[teamIndex % Math.max(1, order.length)] ||
+    laserTagSpawnPoint(spawnForPlayerNumber(number, arena.asteroid), teamName);
+}
+
+function shuffledLaserTagSpawnPool(spawns, seed, teamName) {
+  if (!Array.isArray(spawns) || spawns.length <= 1) {
+    return Array.isArray(spawns) ? spawns.slice() : [];
+  }
+
+  const random = createSeededRandom(`${seed}:laser-tag:spawn-order:${teamName}:${spawns.length}`);
+  const shuffled = spawns.slice();
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    const value = shuffled[index];
+    shuffled[index] = shuffled[swapIndex];
+    shuffled[swapIndex] = value;
+  }
+  return shuffled;
 }
 
 function updateLaserTagEndState(arena) {

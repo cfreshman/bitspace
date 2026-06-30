@@ -22,6 +22,13 @@ const COLOR_TO_CHAR = new Map(Object.entries(LASER_TAG_MAP_COLORS).map(([key, co
   color,
   LASER_TAG_MAP_CHARS[key]
 ]));
+const LASER_TAG_MAP_COLOR_TOLERANCE = 12;
+const LASER_TAG_MAP_PALETTE = Object.entries(LASER_TAG_MAP_COLORS).map(([key, color]) => ({
+  char: LASER_TAG_MAP_CHARS[key],
+  red: Number.parseInt(color.slice(1, 3), 16),
+  green: Number.parseInt(color.slice(3, 5), 16),
+  blue: Number.parseInt(color.slice(5, 7), 16)
+}));
 const LASER_TAG_MAPS = new Map();
 const DEFAULT_LASER_TAG_MAP_ID = "map-01";
 
@@ -67,8 +74,32 @@ export function laserTagMapCharForRgb(r, g, b, alpha = 255) {
   if (alpha < 128) {
     return LASER_TAG_MAP_CHARS.open;
   }
-  const color = `#${hexByte(r)}${hexByte(g)}${hexByte(b)}`;
-  return COLOR_TO_CHAR.get(color) ?? null;
+  const red = hexChannel(r);
+  const green = hexChannel(g);
+  const blue = hexChannel(b);
+  const color = `#${hexByte(red)}${hexByte(green)}${hexByte(blue)}`;
+  return COLOR_TO_CHAR.get(color) ?? nearestLaserTagMapPaletteChar(red, green, blue);
+}
+
+function nearestLaserTagMapPaletteChar(red, green, blue) {
+  let best = null;
+  let bestDistanceSq = Infinity;
+  for (const entry of LASER_TAG_MAP_PALETTE) {
+    const dr = red - entry.red;
+    const dg = green - entry.green;
+    const db = blue - entry.blue;
+    const maxDelta = Math.max(Math.abs(dr), Math.abs(dg), Math.abs(db));
+    if (maxDelta > LASER_TAG_MAP_COLOR_TOLERANCE) {
+      continue;
+    }
+
+    const distanceSq = dr * dr + dg * dg + db * db;
+    if (distanceSq < bestDistanceSq) {
+      best = entry.char;
+      bestDistanceSq = distanceSq;
+    }
+  }
+  return best;
 }
 
 function sanitizeLaserTagMapRows(rows) {
@@ -99,7 +130,11 @@ function sanitizeLaserTagMapRows(rows) {
 }
 
 function hexByte(value) {
-  return Math.max(0, Math.min(255, Math.round(Number(value) || 0)))
+  return hexChannel(value)
     .toString(16)
     .padStart(2, "0");
+}
+
+function hexChannel(value) {
+  return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
 }
