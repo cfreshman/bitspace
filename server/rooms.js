@@ -1057,7 +1057,7 @@ function createLobbyArena(id, seed, mode = GAME_MODES.bitspace, params = {}) {
     tileSize,
     createLobbyPockets: true,
     playerCount: ENGINE.maxPlayers,
-    seedResources: false
+    seedResources: normalizedMode !== GAME_MODES.laserTag
   });
   return createArena({
     id,

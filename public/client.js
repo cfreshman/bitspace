@@ -3636,8 +3636,7 @@ function updateMenuSimulation(timeSeconds) {
 
   player.thrusting = gameMode === GAME_MODES.bugs ||
     gameMode === GAME_MODES.clouds ||
-    gameMode === GAME_MODES.octopus ||
-    gameMode === GAME_MODES.laserTag
+    gameMode === GAME_MODES.octopus
     ? false
     : canThrust;
   player.mining = physicalMiningInputActive() && !state.chat.active;
@@ -4728,7 +4727,7 @@ function createLocalBotLobbyArena(botCount, seed, preservePlayer = null, mode = 
     tileSize,
     createLobbyPockets: true,
     playerCount: ENGINE.maxPlayers,
-    seedResources: false
+    seedResources: mode !== GAME_MODES.laserTag
   });
   const arena = createArena({
     id: `${LOCAL_BOT_ROOM_ID}:waiting`,
@@ -10073,8 +10072,7 @@ function updateLocalShipAudio(player, timeSeconds) {
   const inputLevel = alive &&
     gameMode !== GAME_MODES.bugs &&
     gameMode !== GAME_MODES.clouds &&
-    gameMode !== GAME_MODES.octopus &&
-    gameMode !== GAME_MODES.laserTag
+    gameMode !== GAME_MODES.octopus
     ? playerThrustInputLevel(player)
     : 0;
   const miningActive = gameMode !== GAME_MODES.laserTag &&
@@ -11089,8 +11087,7 @@ function updatePrediction(timeSeconds) {
   predicted.rayExtension = miningRayExtension(predicted.mining, predicted.miningHoldSeconds);
   predicted.thrusting = gameMode === GAME_MODES.bugs ||
     gameMode === GAME_MODES.clouds ||
-    gameMode === GAME_MODES.octopus ||
-    gameMode === GAME_MODES.laserTag
+    gameMode === GAME_MODES.octopus
     ? false
     : canThrust;
 
@@ -12353,9 +12350,16 @@ function recordLaserTagEvents(snapshot, timeSeconds) {
     }
 
     state.laserTagEventIds.add(id);
+    const eventTick = Number(event.tick);
+    const snapshotTick = Number(snapshot.tick);
+    const secondsSinceEvent = Number.isFinite(eventTick) && Number.isFinite(snapshotTick)
+      ? Math.max(0, (snapshotTick - eventTick) / ENGINE.tickRate)
+      : 0;
     state.eliminationNotices.push({
       id,
       text: String(event.text || "").toUpperCase(),
+      showElapsedSeconds: true,
+      eventTimeSeconds: timeSeconds - secondsSinceEvent,
       createdAt: timeSeconds,
       expiresAt: timeSeconds + ELIMINATION_NOTICE_SECONDS
     });
@@ -14623,7 +14627,7 @@ function approximateGlyphWidth(character) {
   if (character === " ") {
     return 3;
   }
-  if (character === "I" || character === "1" || character === "/" || character === ":") {
+  if (character === "I" || character === "/" || character === ":") {
     return 3;
   }
   return 5;

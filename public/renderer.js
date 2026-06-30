@@ -160,7 +160,6 @@ const LASER_TAG_CARPET_UV_TINT_AMOUNT = 0.2;
 const LASER_TAG_SHADOW_MASK_COLOR = "#030201";
 const LASER_TAG_SHADOW_TINT_COLOR = "#0d0b10";
 const LASER_TAG_SHADOW_ALPHA = 0.7;
-const LASER_TAG_PLAYER_BODY_FILL = "#060029";
 const LASER_TAG_PLAYER_BODY_STROKE = "#000000";
 const BUG_HUCK_ROCK_WEB_LIGHT = "#ffffff";
 const BUG_HUCK_ROCK_WEB_DARK = "#cfd5d2";
@@ -661,6 +660,22 @@ const THRUSTER_ENGINE_RAMP = Object.freeze({
   nozzleMin: 0.33,
   nozzleMax: 0.5,
 });
+const LASER_TAG_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
+  rate: 5,
+  plumeSpeed: 0.2,
+  life: .5,
+  nozzle: .8,
+  spread: 1,
+  sideOffsetScale: 1
+});
+const LASER_TAG_THRUSTER_ENGINE_RAMP = Object.freeze({
+  ...Object.keys(LASER_TAG_THRUSTER_ENGINE_RAMP_MINS).reduce((acc, key) => {
+    const value = LASER_TAG_THRUSTER_ENGINE_RAMP_MINS[key];
+    acc[key + 'Min'] = value;
+    acc[key + 'Max'] = value;
+    return acc;
+  }, {})
+});
 const SUB_THRUSTER_ENGINE_RAMP_MINS = Object.freeze({
   rate: .5,
   plumeSpeed: 0.5,
@@ -834,6 +849,8 @@ const HUCK_ROCK_SHAPE_CACHE_MAX = 512;
 const asteroidBoundaryContourCache = new WeakMap();
 let playerMapScratchCanvas = null;
 let playerMapScratchContext = null;
+let shipSilhouetteOutlineScratchCanvas = null;
+let shipSilhouetteOutlineScratchContext = null;
 
 function playerMapCompactCellSize() {
   return PLAYER_MAP_CELL_SIZE / Math.max(1, PLAYER_MAP_COMPACT_SAMPLE_TILES);
@@ -917,7 +934,7 @@ const BITMAP_GLYPHS = Object.freeze({
   Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
   Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
   0: ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
-  1: ["010", "110", "010", "010", "010", "010", "111"],
+  1: ["00100", "01100", "10100", "00100", "00100", "00100", "11111"],
   2: ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
   3: ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
   4: ["10010", "10010", "10010", "11111", "00010", "00010", "00010"],
@@ -5662,7 +5679,7 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
           emitTireTrackParticles(particleState, renderPlayer, options.dtSeconds);
         }
 
-        if (options.gameMode !== GAME_MODES.laserTag && renderPlayer.thrusting) {
+        if (renderPlayer.thrusting) {
           emitThrusterParticles(particleState, renderPlayer, options.dtSeconds, options.gameMode, camera);
         }
 
@@ -5696,10 +5713,6 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
     });
 
     measureBucket("particlesMs", () => {
-      if (options.gameMode === GAME_MODES.laserTag) {
-        return;
-      }
-
       if (isWaterThemedGameMode(options.gameMode)) {
         drawWithoutWorldMask(ctx, () => {
           drawParticles(ctx, particleState.particles, camera, colors, options.timeSeconds);
@@ -8853,7 +8866,8 @@ function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds 
   };
 
   activeNotices.forEach((notice, index) => {
-    const textWidth = textRenderer.measure(notice.text, textOptions);
+    const text = noticeDisplayText(notice, timeSeconds, index);
+    const textWidth = textRenderer.measure(text, textOptions);
     const visibleWidth = mobileActive ? mobileHudVisibleWidth(ctx) : ctx.width;
     const panelWidth = Math.min(visibleWidth - 16, textWidth + 10);
     const panelHeight = 15;
@@ -8863,11 +8877,24 @@ function drawEliminationNotices(ctx, notices, colors, textRenderer, timeSeconds 
       : ctx.height - 8 - panelHeight - index * (panelHeight + 3);
 
     drawPanel(ctx, x, y, panelWidth, panelHeight, colors);
-    textRenderer.draw(ctx, notice.text, x + 5, y + 4, {
+    textRenderer.draw(ctx, text, x + 5, y + 4, {
       ...textOptions,
       width: panelWidth - 10
     });
   });
+}
+
+function noticeDisplayText(notice, timeSeconds, index=-1) {
+  const text = String(notice?.text || "");
+  if (notice?.showElapsedSeconds !== true) {
+    return text;
+  }
+  const eventTimeSeconds = Number.isFinite(notice.eventTimeSeconds)
+    ? notice.eventTimeSeconds
+    : notice.createdAt;
+  const elapsedSeconds = Math.max(0, Math.floor(timeSeconds - (Number(eventTimeSeconds) || timeSeconds)));
+  // return `${text} - ${elapsedSeconds}S`;
+  return `${text}${index === 0 && elapsedSeconds <= 1 ? " - now" : ""}`;
 }
 
 function drawRoomButtons(ctx, options, colors, textRenderer) {
@@ -15115,6 +15142,7 @@ function shouldDrawWorldPlayer(player, options) {
   if (
     options.gameMode === GAME_MODES.laserTag &&
     player.laserTagGhost === true &&
+    options.room?.state !== "ended" &&
     player.id !== options.playerId
   ) {
     return false;
@@ -15757,28 +15785,12 @@ function drawShip(
   const x = Math.round(screen.x);
   const y = Math.round(screen.y);
   const mainRadius = shipMainRadius(player);
-  const geometryScale = shipGeometryScaleForRadius(mainRadius);
-  const smallOrbRadius = shipSmallOrbRadius(geometryScale);
   const bodyAngle = gameMode === GAME_MODES.clouds
     ? 0
     : shipVisualAngle(player);
-  const rearAngle = bodyAngle + Math.PI;
-  const rear = {
-    x: Math.cos(rearAngle),
-    y: Math.sin(rearAngle)
-  };
-  const side = {
-    x: Math.cos(bodyAngle + Math.PI / 2),
-    y: Math.sin(bodyAngle + Math.PI / 2)
-  };
-  const mainOccluder = {
-    x,
-    y,
-    radius: mainRadius
-  };
 
   if (gameMode === GAME_MODES.laserTag) {
-    drawLaserTagShip(ctx, x, y, player, mainRadius, bodyAngle, colors);
+    drawOutlinedLaserTagShip(ctx, x, y, player, mainRadius, bodyAngle, colors, freezeAuxiliaryAim);
     drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
     return;
   }
@@ -15857,6 +15869,28 @@ function drawShip(
     return;
   }
 
+  drawBitspaceShipBody(ctx, x, y, mainRadius, bodyAngle, colors);
+
+  drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim);
+
+  drawShipHealthIndicator(ctx, x, y, player, colors);
+  drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
+}
+
+function drawBitspaceShipBody(ctx, x, y, mainRadius, bodyAngle, colors) {
+  const geometryScale = shipGeometryScaleForRadius(mainRadius);
+  const smallOrbRadius = shipSmallOrbRadius(geometryScale);
+  const rearAngle = bodyAngle + Math.PI;
+  const rear = {
+    x: Math.cos(rearAngle),
+    y: Math.sin(rearAngle)
+  };
+  const side = {
+    x: Math.cos(bodyAngle + Math.PI / 2),
+    y: Math.sin(bodyAngle + Math.PI / 2)
+  };
+  const mainOccluder = { x, y, radius: mainRadius };
+
   for (const orb of REAR_ORBS.filter((candidate) => candidate.layer === "back")) {
     const orbX = Math.round(x + rear.x * orb.rear * geometryScale + side.x * orb.side * geometryScale);
     const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
@@ -15870,20 +15904,126 @@ function drawShip(
     const orbY = Math.round(y + rear.y * orb.rear * geometryScale + side.y * orb.side * geometryScale);
     drawTruncatedRearSphere(ctx, orbX, orbY, smallOrbRadius, rear, colors);
   }
-
-  drawMiningRayEmitters(ctx, player, camera, asteroid, colors, freezeAuxiliaryAim);
-
-  drawShipHealthIndicator(ctx, x, y, player, colors);
-  drawShipStormWarning(ctx, x, y, player, colors, textRenderer);
 }
 
-function drawLaserTagShip(ctx, x, y, player, radius, angle, colors) {
+function drawOutlinedLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver = false) {
+  const scratch = shipSilhouetteOutlineScratch(shipSilhouetteOutlineSize(radius));
+  if (!scratch) {
+    drawLaserTagShipComposite(ctx, x, y, player, radius, angle, colors, gameOver);
+    return;
+  }
+
+  const { canvas, context } = scratch;
+  const center = Math.floor(canvas.width / 2);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  drawLaserTagShipComposite(context, center, center, player, radius, angle, colors, gameOver);
+
+  drawShipSilhouetteOutlineFromMask(
+    ctx,
+    context.getImageData(0, 0, canvas.width, canvas.height).data,
+    canvas.width,
+    canvas.height,
+    x - center,
+    y - center,
+    colors.foreground
+  );
+  drawLaserTagShipComposite(ctx, x, y, player, radius, angle, colors, gameOver);
+}
+
+function drawLaserTagShipComposite(ctx, x, y, player, radius, angle, colors, gameOver = false) {
+  drawBitspaceShipBody(ctx, x, y, radius, angle, {
+    ...colors,
+    foreground: LASER_TAG_PLAYER_BODY_STROKE
+  });
+  drawLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver);
+}
+
+function shipSilhouetteOutlineSize(radius) {
+  const geometryScale = shipGeometryScaleForRadius(radius);
+  const smallOrbRadius = shipSmallOrbRadius(geometryScale);
+  const rearExtent = REAR_ORBS.reduce((extent, orb) => Math.max(
+    extent,
+    Math.abs(orb.rear) * geometryScale + Math.abs(orb.side) * geometryScale + smallOrbRadius
+  ), 0);
+  const extent = Math.ceil(Math.max(radius + 4, rearExtent + 4));
+  return extent * 2 + 1;
+}
+
+function shipSilhouetteOutlineScratch(size) {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  if (!shipSilhouetteOutlineScratchCanvas) {
+    shipSilhouetteOutlineScratchCanvas = document.createElement("canvas");
+    shipSilhouetteOutlineScratchContext = shipSilhouetteOutlineScratchCanvas.getContext("2d", { alpha: true });
+  }
+  if (!shipSilhouetteOutlineScratchContext) {
+    return null;
+  }
+  const nextSize = Math.max(1, Math.ceil(size));
+  if (
+    shipSilhouetteOutlineScratchCanvas.width !== nextSize ||
+    shipSilhouetteOutlineScratchCanvas.height !== nextSize
+  ) {
+    shipSilhouetteOutlineScratchCanvas.width = nextSize;
+    shipSilhouetteOutlineScratchCanvas.height = nextSize;
+  }
+  shipSilhouetteOutlineScratchContext.imageSmoothingEnabled = false;
+  return {
+    canvas: shipSilhouetteOutlineScratchCanvas,
+    context: shipSilhouetteOutlineScratchContext
+  };
+}
+
+function drawShipSilhouetteOutlineFromMask(ctx, data, width, height, offsetX, offsetY, color) {
+  const opaque = new Uint8Array(width * height);
+  const outline = new Uint8Array(width * height);
+  for (let index = 0; index < opaque.length; index += 1) {
+    opaque[index] = data[index * 4 + 3] > 0 ? 1 : 0;
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (!opaque[index]) {
+        continue;
+      }
+      for (let oy = -1; oy <= 1; oy += 1) {
+        const ny = y + oy;
+        if (ny < 0 || ny >= height) {
+          continue;
+        }
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (ox === 0 && oy === 0) {
+            continue;
+          }
+          const nx = x + ox;
+          if (nx < 0 || nx >= width) {
+            continue;
+          }
+          const neighbor = ny * width + nx;
+          if (!opaque[neighbor]) {
+            outline[neighbor] = 1;
+          }
+        }
+      }
+    }
+  }
+
+  ctx.fillStyle = color;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (outline[y * width + x]) {
+        ctx.fillRect(offsetX + x, offsetY + y, 1, 1);
+      }
+    }
+  }
+}
+
+function drawLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver = false) {
   const teamColor = laserTagPlayerColor(player, colors);
-  const uvColor = colors.rockLine || LASER_TAG_MODE_COLORS.rockLine;
-  const uvDarkColor = LASER_TAG_MODE_COLORS.bodyOuterLine || colors.rockLine || LASER_TAG_MODE_COLORS.rockLine;
   const bodyColor = LASER_TAG_PLAYER_BODY_STROKE;
-  const bodyFill = LASER_TAG_PLAYER_BODY_FILL;
-  const lightsActive = player.laserTagGhost !== true && Number(player.health || 0) > 0;
+  const lightsActive = gameOver || (player.laserTagGhost !== true && Number(player.health || 0) > 0);
   const rayAngle = Number.isFinite(player?.aimAngle) ? player.aimAngle : angle;
   const direction = {
     x: Math.cos(rayAngle),
@@ -15898,11 +16038,9 @@ function drawLaserTagShip(ctx, x, y, player, radius, angle, colors) {
     y: y - direction.y
   };
 
-  ctx.fillStyle = bodyFill;
-  fillSolidDisk(ctx, x, y, radius);
   ctx.fillStyle = bodyColor;
   fillLaserTagTube(ctx, tubeBack, tubeFront, direction, 3, bodyColor);
-  if (lightsActive && Number(player.laserTagCooldownSeconds || 0) <= 0) {
+  if (lightsActive && (gameOver || Number(player.laserTagCooldownSeconds || 0) <= 0)) {
     fillLaserTagTube(ctx, tubeBack, tubeFront, direction, 1, teamColor);
   }
 
@@ -15911,11 +16049,6 @@ function drawLaserTagShip(ctx, x, y, player, radius, angle, colors) {
   drawLaserTagSideArc(ctx, x, y, radius, rayAngle + Math.PI / 2, bodyColor, teamColor, lightsActive);
   drawLaserTagSideArc(ctx, x, y, radius, rayAngle - Math.PI / 2, bodyColor, teamColor, lightsActive);
   drawLaserTagSideArc(ctx, x, y, radius, rayAngle - Math.PI, bodyColor, teamColor, lightsActive);
-  // drawLaserTagCircleRing(ctx, x, y, radius, 1, bodyColor);
-  // drawLaserTagCircleRing(ctx, x, y, radius + 1, 1, bodyColor);
-  // drawLaserTagCircleRing(ctx, x, y, radius + 2, 2, bodyColor);
-  // drawLaserTagCircleRing(ctx, x, y, radius + 3, 1, uvColor);
-  // drawLaserTagCircleRing(ctx, x, y, radius + 4, 1, bodyColor);
 }
 
 function drawLaserTagCircleRing(ctx, x, y, radius, thickness, color) {
@@ -15929,7 +16062,7 @@ function drawLaserTagCircleRing(ctx, x, y, radius, thickness, color) {
 function drawLaserTagSideArc(ctx, x, y, radius, centerAngle, outlineColor, innerColor, lit = true) {
   // drawLaserTagArcBand(ctx, x, y, radius - 5, radius + 1, centerAngle, 0.35, outlineColor);
   if (lit) {
-    drawLaserTagArcBand(ctx, x, y, 3, radius - 2, centerAngle, Math.PI / 6, innerColor);
+    drawLaserTagArcBand(ctx, x, y, 3, radius - 2, centerAngle, Math.PI / 8, innerColor);
   }
   // drawLaserTagArcBand(ctx, x, y, radius - 1, radius + 1, centerAngle, 0.22, innerColor);
 }
@@ -19510,6 +19643,9 @@ function emitThrusterParticles(state, player, dtSeconds, gameMode = GAME_MODES.b
         seed,
         heat: thrusterKind ? particleHeat : null,
         kind: thrusterKind,
+        color: gameMode === GAME_MODES.laserTag
+          ? laserTagPlayerColor(player, LASER_TAG_MODE_COLORS)
+          : null,
         ownerId: key
       });
     }
@@ -19531,9 +19667,11 @@ function thrusterEngineRamp(player, gameMode = GAME_MODES.bitspace) {
   const t = THRUSTER_ENGINE_MAX_LEVEL > 0 ? level / THRUSTER_ENGINE_MAX_LEVEL : 0;
   const ramp = gameMode === GAME_MODES.cars
     ? CAR_THRUSTER_ENGINE_RAMP
-    : isSubThemedGameMode(gameMode)
-      ? SUB_THRUSTER_ENGINE_RAMP
-      : THRUSTER_ENGINE_RAMP;
+    : gameMode === GAME_MODES.laserTag
+      ? LASER_TAG_THRUSTER_ENGINE_RAMP
+      : isSubThemedGameMode(gameMode)
+        ? SUB_THRUSTER_ENGINE_RAMP
+        : THRUSTER_ENGINE_RAMP;
 
   return {
     rate: lerp(ramp.rateMin, ramp.rateMax, t),
@@ -19901,6 +20039,10 @@ function shadowedSubThrusterParticleColor(particle, colors) {
 }
 
 function particleColor(particle, colors) {
+  if (typeof particle?.color === "string" && particle.color) {
+    return particle.color;
+  }
+
   if (particle?.kind === CAR_THRUSTER_PARTICLE_KIND) {
     return carThrusterParticleColor(particle);
   }

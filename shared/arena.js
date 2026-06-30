@@ -67,6 +67,7 @@ const LASER_TAG_DUEL_MATCH_SECONDS = 5 * 60;
 const LASER_TAG_GATE_DIAMOND_SPIN_IMPULSE = 8.5;
 const LASER_TAG_GATE_DIAMOND_SPIN_DAMPING = 2.2;
 const LASER_TAG_GATE_DIAMOND_SPIN_MAX = 42;
+const LASER_TAG_GATE_ATTACK_MEMORY_TICKS = ENGINE.tickRate * 8;
 const TAU = Math.PI * 2;
 const CAR_GROUND_VARIANTS = Object.freeze({
   desert: "desert",
@@ -447,6 +448,7 @@ function initializeLaserTagArena(arena) {
     matchSeconds,
     teamScores: { red: 0, blue: 0 },
     gateDiamonds: {},
+    gateAttacks: {},
     shots: [],
     events: []
   };
@@ -466,6 +468,7 @@ function stepLaserTagArena(arena, dtSeconds, options = {}) {
 
   stepLaserTagBlasts(arena, dtSeconds);
   stepLaserTagGateDiamonds(arena, dtSeconds);
+  pruneLaserTagGateAttacks(arena);
   resolvePlayerCollisions(arena);
   updateLaserTagEndState(arena);
 }
@@ -687,6 +690,7 @@ function tagLaserTagPlayer(arena, entity, target) {
   }
 
   addLaserTagScore(arena, shooter, ENGINE.laserTag.hitPoints, "OPPONENT HIT");
+  pushLaserTagEvent(arena, "A FRIENDLY WAS HIT", target.team);
   shooter.kills = Math.max(0, Math.floor(Number(shooter.kills || 0))) + 1;
   startLaserTagGhostReturn(arena, target);
   target.health = 0;
@@ -710,9 +714,41 @@ function tagLaserTagTarget(arena, entity, target, tileIndex = -1) {
     return;
   }
 
+  recordLaserTagGateAttack(arena, entity, target, tileIndex);
   spinLaserTagGateDiamond(arena, target, tileIndex);
   addLaserTagScore(arena, shooter, ENGINE.laserTag.gatePoints, `${target.label} HIT`);
   pushLaserTagEvent(arena, `${target.label} UNDER ATTACK`, target.team);
+}
+
+function recordLaserTagGateAttack(arena, entity, target, tileIndex = -1) {
+  if (!arena?.laserTag || !target?.id) {
+    return;
+  }
+  if (!arena.laserTag.gateAttacks) {
+    arena.laserTag.gateAttacks = {};
+  }
+  arena.laserTag.gateAttacks[target.id] = {
+    id: target.id,
+    team: target.team || "",
+    tileIndex: Number.isInteger(tileIndex) ? tileIndex : -1,
+    hitX: Number.isFinite(entity?.hitX) ? roundForSnapshot(entity.hitX) : null,
+    hitY: Number.isFinite(entity?.hitY) ? roundForSnapshot(entity.hitY) : null,
+    angle: Number.isFinite(entity?.angle) ? roundForSnapshot(entity.angle) : null,
+    tick: arena.tick
+  };
+}
+
+function pruneLaserTagGateAttacks(arena) {
+  const attacks = arena?.laserTag?.gateAttacks;
+  if (!attacks) {
+    return;
+  }
+  for (const [id, attack] of Object.entries(attacks)) {
+    const tick = Number.isFinite(attack?.tick) ? attack.tick : Number.NEGATIVE_INFINITY;
+    if (arena.tick - tick > LASER_TAG_GATE_ATTACK_MEMORY_TICKS) {
+      delete attacks[id];
+    }
+  }
 }
 
 function spinLaserTagGateDiamond(arena, target, tileIndex) {
@@ -1520,8 +1556,7 @@ function stepPlayer(arena, player, dtSeconds, options = {}) {
   const canThrust = hasMoveIntent;
   player.thrusting = gameMode === GAME_MODES.bugs ||
     gameMode === GAME_MODES.clouds ||
-    gameMode === GAME_MODES.octopus ||
-    gameMode === GAME_MODES.laserTag
+    gameMode === GAME_MODES.octopus
     ? false
     : canThrust;
 
