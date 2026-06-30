@@ -6131,9 +6131,6 @@ function menuEntities() {
   const modeButtons = menuModeButtons(currentMode);
   const modeRowWidth = modeButtons.length * buttonWidth + Math.max(0, modeButtons.length - 1) * modeButtonGap;
   const modeButtonX = center.x - modeRowWidth / 2;
-  const laserTagButtonWidth = Math.max(buttonWidth * 2 + modeButtonGap, 96);
-  const laserTagY = carsY + MENU_BUTTON_HEIGHT + 8;
-  const laserTagSelected = currentMode === GAME_MODES.laserTag;
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
@@ -6154,15 +6151,6 @@ function menuEntities() {
       buttonWidth,
       { targetMode: modeButton.targetMode }
     )),
-    menuButton(
-      "menu-mode-laser-tag",
-      "set-mode",
-      laserTagSelected ? "SHIPS" : "LASER TAG",
-      center.x - laserTagButtonWidth / 2,
-      laserTagY,
-      laserTagButtonWidth,
-      { targetMode: laserTagSelected ? GAME_MODES.bitspace : GAME_MODES.laserTag }
-    ),
     menuButton("menu-room", "named-room", "ROOM", center.x - sideXGap - buttonWidth / 2, sideTopY, buttonWidth),
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth, {

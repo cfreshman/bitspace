@@ -136,9 +136,9 @@ const BUG_BURROW_MODE_COLORS = Object.freeze({
 const LASER_TAG_COLOR_UV = "#1122ff";
 const LASER_TAG_COLOR_UV_LIGHT = mixHexColors(LASER_TAG_COLOR_UV, "#4e89f7", 0.5);
 const LASER_TAG_MODE_COLORS = Object.freeze({
-  foreground: LASER_TAG_COLOR_UV_LIGHT,
+  foreground: '#ffffff',
   // background: "#16172c",
-  background: "#000108",
+  background: "#010101",
   backing: "#000000",
   rockFill: "#000000",
   rockLine: LASER_TAG_COLOR_UV,
@@ -199,8 +199,8 @@ const LASER_TAG_CARPET_ROTATION = -Math.PI / 12;
 const LASER_TAG_CARPET_BRIGHTNESS = 0.42;
 const LASER_TAG_CARPET_CONTRAST = 0.9;
 const LASER_TAG_CARPET_SATURATION = 0.85;
-const LASER_TAG_CARPET_UV_TINT_COLOR = "#000088";
-const LASER_TAG_CARPET_UV_TINT_AMOUNT = 0.25;
+const LASER_TAG_CARPET_UV_TINT_COLOR = "#000055";
+const LASER_TAG_CARPET_UV_TINT_AMOUNT = 0.6;
 const LASER_TAG_SHADOW_MASK_COLOR = "#030201";
 const LASER_TAG_SHADOW_TINT_COLOR = "#0d0b10";
 const LASER_TAG_SHADOW_ALPHA = 0.7;
@@ -1542,7 +1542,8 @@ export function createRenderer(canvas, minimapCanvas = null) {
         drawLaserTagCarpetCompositeBase(
           terrainSurface,
           sharedRenderState.camera,
-          frameColors
+          frameColors,
+          options.asteroid
         );
         surface.restoreColorsFromSurface(terrainSurface, [
           frameColors.background,
@@ -1913,6 +1914,46 @@ function createPixelSurface(canvasContext, width, height) {
     return writeProjectedPoint(projectedX, projectedY, color) || wrote;
   }
 
+  function blendPixelIndex(index, sourceR, sourceG, sourceB, amount) {
+    const dest = pixels[index] >>> 0;
+    const destR = dest & 0xff;
+    const destG = (dest >>> 8) & 0xff;
+    const destB = (dest >>> 16) & 0xff;
+    const red = Math.round(destR + (sourceR - destR) * amount);
+    const green = Math.round(destG + (sourceG - destG) * amount);
+    const blue = Math.round(destB + (sourceB - destB) * amount);
+    pixels[index] = (255 << 24) | (blue << 16) | (green << 8) | red;
+  }
+
+  function markProjectedPoint(markedPixels, x, y, blend) {
+    if (!canWriteFinalPixel(x, y)) {
+      return false;
+    }
+
+    const index = y * width + x;
+    if (!markedPixels.has(index)) {
+      markedPixels.set(index, blend);
+    }
+    return true;
+  }
+
+  function markMappedProjectedPoint(projection, index, markedPixels, blend) {
+    if (index < 0 || projection.x[index] === projection.invalid) {
+      return false;
+    }
+
+    const projectedBaseX = projection.baseX[index];
+    const projectedBaseY = projection.baseY[index];
+    const projectedX = projection.x[index];
+    const projectedY = projection.y[index];
+    let wrote = false;
+    if (projectedBaseX !== projectedX || projectedBaseY !== projectedY) {
+      wrote = markProjectedPoint(markedPixels, projectedBaseX, projectedBaseY, blend) || wrote;
+    }
+
+    return markProjectedPoint(markedPixels, projectedX, projectedY, blend) || wrote;
+  }
+
   function canWriteFinalPixel(x, y) {
     return x >= 0 &&
       y >= 0 &&
@@ -2189,56 +2230,132 @@ function createPixelSurface(canvasContext, width, height) {
         }
       }
     },
-    fillRectAlpha(x, y, rectWidth, rectHeight, color, alpha = 1) {
-      const amount = clamp(alpha, 0, 1);
-      if (amount <= 0) {
-        return;
-      }
-      if (amount >= 1) {
-        const previous = currentColor;
-        currentColor = colorFor(color || RENDER.background, colorCache);
-        this.fillRect(x, y, rectWidth, rectHeight);
-        currentColor = previous;
-        return;
-      }
-
-      const packed = colorFor(color || RENDER.background, colorCache) >>> 0;
-      const sourceR = packed & 0xff;
-      const sourceG = (packed >>> 8) & 0xff;
-      const sourceB = (packed >>> 16) & 0xff;
-      const rawX0 = Math.floor(x);
-      const rawY0 = Math.floor(y);
-      const rawX1 = Math.ceil(x + rectWidth);
-      const rawY1 = Math.ceil(y + rectHeight);
-      const x0 = Math.max(0, rawX0);
-      const y0 = Math.max(0, rawY0);
-      const x1 = Math.min(width, rawX1);
-      const y1 = Math.min(height, rawY1);
-      if (x0 >= x1 || y0 >= y1) {
-        return;
-      }
-
-      for (let py = y0; py < y1; py += 1) {
-        if (activeClip && (activeClip.starts[py] >= activeClip.ends[py])) {
+    fillRectsAlpha(rects) {
+      const list = Array.isArray(rects) ? rects : [rects];
+      const items = [];
+      for (const rect of list) {
+        const amount = clamp(Number(rect?.alpha ?? 1), 0, 1);
+        const rectX = Number(rect?.x);
+        const rectY = Number(rect?.y);
+        const rectWidth = Number(rect?.width ?? rect?.w);
+        const rectHeight = Number(rect?.height ?? rect?.h);
+        if (
+          amount <= 0 ||
+          !Number.isFinite(rectX) ||
+          !Number.isFinite(rectY) ||
+          !Number.isFinite(rectWidth) ||
+          !Number.isFinite(rectHeight) ||
+          rectWidth <= 0 ||
+          rectHeight <= 0
+        ) {
           continue;
         }
-        const clipStart = activeClip ? Math.max(x0, activeClip.starts[py]) : x0;
-        const clipEnd = activeClip ? Math.min(x1, activeClip.ends[py]) : x1;
-        const row = py * width;
-        for (let px = clipStart; px < clipEnd; px += 1) {
-          if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
+
+        if (amount >= 1) {
+          const previous = currentColor;
+          currentColor = colorFor(rect?.color || RENDER.background, colorCache);
+          this.fillRect(rectX, rectY, rectWidth, rectHeight);
+          currentColor = previous;
+          continue;
+        }
+
+        const packed = colorFor(rect?.color || RENDER.background, colorCache) >>> 0;
+        items.push({
+          rawX0: Math.floor(rectX),
+          rawY0: Math.floor(rectY),
+          rawX1: Math.ceil(rectX + rectWidth),
+          rawY1: Math.ceil(rectY + rectHeight),
+          sourceR: packed & 0xff,
+          sourceG: (packed >>> 8) & 0xff,
+          sourceB: (packed >>> 16) & 0xff,
+          amount
+        });
+      }
+      if (items.length <= 0) {
+        return;
+      }
+
+      const markedPixels = new Map();
+      if (activeLens) {
+        const sourcePadding = activeLens.sourcePadding || 0;
+        for (const item of items) {
+          const x0 = Math.max(-sourcePadding, item.rawX0);
+          const y0 = Math.max(-sourcePadding, item.rawY0);
+          const x1 = Math.min(width + sourcePadding, item.rawX1);
+          const y1 = Math.min(height + sourcePadding, item.rawY1);
+          if (x0 >= x1 || y0 >= y1) {
             continue;
           }
-          const dest = pixels[row + px] >>> 0;
-          const destR = dest & 0xff;
-          const destG = (dest >>> 8) & 0xff;
-          const destB = (dest >>> 16) & 0xff;
-          const red = Math.round(destR + (sourceR - destR) * amount);
-          const green = Math.round(destG + (sourceG - destG) * amount);
-          const blue = Math.round(destB + (sourceB - destB) * amount);
-          pixels[row + px] = (255 << 24) | (blue << 16) | (green << 8) | red;
+
+          for (let py = y0; py < y1; py += 1) {
+            if (forWorldMaskRanges(py, x0, x1, (rangeStart, rangeEnd) => {
+              for (let px = rangeStart; px < rangeEnd; px += 1) {
+                markMappedProjectedPoint(
+                  activeLens,
+                  lensProjectionIndex(activeLens, px, py),
+                  markedPixels,
+                  item
+                );
+              }
+            })) {
+              continue;
+            }
+
+            for (let px = x0; px < x1; px += 1) {
+              if (!activeWorldMask?.allows || activeWorldMask.allows(px, py)) {
+                markMappedProjectedPoint(
+                  activeLens,
+                  lensProjectionIndex(activeLens, px, py),
+                  markedPixels,
+                  item
+                );
+              }
+            }
+          }
+        }
+      } else {
+        for (const item of items) {
+          const x0 = Math.max(0, item.rawX0);
+          const y0 = Math.max(0, item.rawY0);
+          const x1 = Math.min(width, item.rawX1);
+          const y1 = Math.min(height, item.rawY1);
+          if (x0 >= x1 || y0 >= y1) {
+            continue;
+          }
+
+          for (let py = y0; py < y1; py += 1) {
+            if (activeClip && (activeClip.starts[py] >= activeClip.ends[py])) {
+              continue;
+            }
+            const clipStart = activeClip ? Math.max(x0, activeClip.starts[py]) : x0;
+            const clipEnd = activeClip ? Math.min(x1, activeClip.ends[py]) : x1;
+            const row = py * width;
+            for (let px = clipStart; px < clipEnd; px += 1) {
+              if (activeWorldMask?.allows && !activeWorldMask.allows(px, py)) {
+                continue;
+              }
+              const index = row + px;
+              if (!markedPixels.has(index)) {
+                markedPixels.set(index, item);
+              }
+            }
+          }
         }
       }
+
+      for (const [index, item] of markedPixels) {
+        blendPixelIndex(index, item.sourceR, item.sourceG, item.sourceB, item.amount);
+      }
+    },
+    fillRectAlpha(x, y, rectWidth, rectHeight, color, alpha = 1) {
+      this.fillRectsAlpha([{
+        x,
+        y,
+        width: rectWidth,
+        height: rectHeight,
+        color,
+        alpha
+      }]);
     },
     getPixelColor(x, y) {
       const px = Math.floor(x);
@@ -2865,12 +2982,13 @@ function drawCloudTerrainCompositeBase(ctx, camera, colors, timeSeconds = 0) {
   endWorldViewport(ctx);
 }
 
-function drawLaserTagCarpetCompositeBase(ctx, camera, colors) {
+function drawLaserTagCarpetCompositeBase(ctx, camera, colors, asteroid = null) {
   ctx.clear();
   beginWorldViewport(ctx, colors, false, false, true);
   drawLaserTagCarpetBackground(ctx, camera, {
     sourcePadding: worldLensSourcePadding(ctx.width, ctx.height)
   }, colors);
+  drawLaserTagSpawnGlows(ctx, asteroid, camera, colors);
   endWorldViewport(ctx);
 }
 
@@ -12273,6 +12391,83 @@ function drawRockFill(ctx, x, y, size, colors, tile = null) {
   ctx.fillRect(x, y, size, size);
 }
 
+function drawLaserTagSpawnGlows(ctx, asteroid, camera, colors) {
+  const spawns = asteroid?.laserTag?.spawns;
+  if (!spawns || typeof spawns !== "object" || !camera) {
+    return;
+  }
+
+  const tileSize = asteroid.tileSize || RENDER.tileSize;
+  const sourcePadding = worldLensSourcePadding(ctx.width, ctx.height);
+  const drawn = new Set();
+  const rects = [];
+  for (const [team, teamSpawns] of Object.entries(spawns)) {
+    if (!Array.isArray(teamSpawns)) {
+      continue;
+    }
+
+    const teamColor = laserTagTeamColor(team, colors);
+    for (const spawn of teamSpawns) {
+      const tile = laserTagSpawnGlowTile(asteroid, spawn, tileSize);
+      if (
+        !tile ||
+        tile.tileX * tileSize > ctx.width + camera.x + sourcePadding ||
+        (tile.tileX + 1) * tileSize < camera.x - sourcePadding ||
+        tile.tileY * tileSize > ctx.height + camera.y + sourcePadding ||
+        (tile.tileY + 1) * tileSize < camera.y - sourcePadding
+      ) {
+        continue;
+      }
+
+      const key = `${team}:${tile.tileX}:${tile.tileY}`;
+      if (drawn.has(key)) {
+        continue;
+      }
+      drawn.add(key);
+
+      const x = Math.round(tile.tileX * tileSize - camera.x);
+      const y = Math.round(tile.tileY * tileSize - camera.y);
+      rects.push({
+        x,
+        y,
+        width: tileSize,
+        height: tileSize,
+        color: teamColor,
+        alpha: 0.32
+      });
+    }
+  }
+
+  if (typeof ctx.fillRectsAlpha === "function") {
+    ctx.fillRectsAlpha(rects);
+    return;
+  }
+
+  for (const rect of rects) {
+    const backing = colors.backing || colors.background || LASER_TAG_MODE_COLORS.backing;
+    ctx.fillStyle = mixHexColors(backing, rect.color, rect.alpha);
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  }
+}
+
+function laserTagSpawnGlowTile(asteroid, spawn, tileSize) {
+  if (!asteroid || !spawn) {
+    return null;
+  }
+
+  const tileX = Number.isFinite(spawn.tileX)
+    ? Math.floor(spawn.tileX)
+    : Math.floor(Number(spawn.spawnX ?? spawn.x) / tileSize);
+  const tileY = Number.isFinite(spawn.tileY)
+    ? Math.floor(spawn.tileY)
+    : Math.floor(Number(spawn.spawnY ?? spawn.y) / tileSize);
+  if (tileX < 0 || tileY < 0 || tileX >= asteroid.widthTiles || tileY >= asteroid.heightTiles) {
+    return null;
+  }
+
+  return { tileX, tileY };
+}
+
 function laserTagGateRockColorsForIndex(asteroid, index, colors) {
   const gate = laserTagGateForTileIndex(asteroid, index);
   if (!gate) {
@@ -16077,6 +16272,7 @@ function drawOutlinedLaserTagShip(ctx, x, y, player, radius, angle, colors, game
     y - center,
     // laserTagTeamColor(player.team, colors),
     laserTagPlayerColor(player, colors),
+    // LASER_TAG_COLOR_UV,
   );
   drawLaserTagShipComposite(ctx, x, y, player, radius, angle, colors, gameOver);
 }
@@ -16176,6 +16372,9 @@ function drawLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver = f
   const teamColor = laserTagPlayerColor(player, colors);
   const bodyColor = colors.backing;
   const lightsActive = gameOver || (player.laserTagGhost !== true && Number(player.health || 0) > 0);
+  const healthLights = gameOver
+    ? 3
+    : clamp(Math.ceil(Number(player.health || 0)), 0, 3);
   const rayAngle = Number.isFinite(player?.aimAngle) ? player.aimAngle : angle;
   const direction = {
     x: Math.cos(rayAngle),
@@ -16198,9 +16397,21 @@ function drawLaserTagShip(ctx, x, y, player, radius, angle, colors, gameOver = f
 
   ctx.fillStyle = bodyColor;
   drawLaserTagCircleRing(ctx, x, y, radius, 2, bodyColor);
-  drawLaserTagSideArc(ctx, x, y, radius, rayAngle + Math.PI / 2, bodyColor, teamColor, lightsActive);
-  drawLaserTagSideArc(ctx, x, y, radius, rayAngle - Math.PI / 2, bodyColor, teamColor, lightsActive);
-  drawLaserTagSideArc(ctx, x, y, radius, rayAngle - Math.PI, bodyColor, teamColor, lightsActive);
+  drawLaserTagVestLights(ctx, x, y, radius, rayAngle, bodyColor, teamColor, lightsActive ? healthLights : 0);
+}
+
+function drawLaserTagVestLights(ctx, x, y, radius, rayAngle, bodyColor, teamColor, lightCount) {
+  const count = clamp(Math.floor(Number(lightCount) || 0), 0, 3);
+  if (count <= 0) {
+    return;
+  }
+
+  const rearAngle = rayAngle + Math.PI;
+  const gap = Math.PI / 2;
+  const startAngle = rearAngle - gap * (count - 1) * 0.5;
+  for (let index = 0; index < count; index += 1) {
+    drawLaserTagSideArc(ctx, x, y, radius, startAngle + gap * index, bodyColor, teamColor, true);
+  }
 }
 
 function drawLaserTagCircleRing(ctx, x, y, radius, thickness, color) {
@@ -18780,9 +18991,7 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
       Math.ceil(Math.max(...laserTagRows.map((row) => textRenderer.measure(row, textOptions))) + HUD_PANEL_PADDING * 2)
     )
     : HUD_PANEL_MIN_WIDTH;
-  const height = laserTag
-    ? hudPanelHeightForRows((header ? 1 : 0) + laserTagRows.length)
-    : playerHudPanelHeight(header, layout.settings, layout.voiceHudActive, layout.gameMode);
+  const height = playerHudPanelHeight(header, layout.settings, layout.voiceHudActive, layout.gameMode);
   const panel = mainHudPanelRect(ctx, width, height, layout.settings);
   if (Number.isFinite(layout.x)) {
     panel.x = Math.round(layout.x);
@@ -18796,7 +19005,9 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   const contentX = x + padding;
   const contentRight = x + width - padding;
   const hpY = y + padding + headerOffset;
-  const rowY = y + 18 + headerOffset;
+  const rowY = laserTag
+    ? hpY + HUD_PANEL_ROW_STEP
+    : y + 18 + headerOffset;
   const rowStep = HUD_PANEL_ROW_STEP;
   const hp = clamp(player.health ?? 0, 0, player.maxHealth || 1);
   const maxHp = Math.max(1, player.maxHealth || 1);
@@ -18822,9 +19033,13 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   }
 
   if (laserTag) {
-    const firstRowY = y + padding + headerOffset;
+    textRenderer.draw(ctx, "HP", contentX, hpY, {
+      fontSize: 8,
+      color: colors.foreground
+    });
+    drawHudHealthBars(ctx, x + 22, hpY + 1, contentRight - (x + 22), 5, hp, maxHp, healthBars, colors);
     laserTagRows.forEach((row, index) => {
-      drawHudMessage(ctx, row, contentX, firstRowY + rowStep * index, textRenderer, colors, {
+      drawHudMessage(ctx, row, contentX, rowY + rowStep * index, textRenderer, colors, {
         width: contentRight - contentX
       });
     });
@@ -18975,7 +19190,7 @@ function mobilePlayerHudLayout(ctx, options = {}) {
 
   return {
     x: Math.max(HUD_EDGE_INSET, mobileHudVisibleWidth(ctx) - HUD_PANEL_MIN_WIDTH - HUD_EDGE_INSET),
-    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings, options.voiceHudActive)),
+    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings, options.voiceHudActive, options.gameMode)),
     settings: options.settings,
     voiceHudActive: options.voiceHudActive
   };

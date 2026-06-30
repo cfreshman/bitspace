@@ -139,7 +139,7 @@ export function addPlayer(arena, playerOptions) {
     : spawnForPlayerNumber(spawnNumber, arena.asteroid);
   const startingResources = playerOptions.resources || {};
   const gameMode = normalizeGameMode(arena.mode);
-  const healthBars = laserTag ? 1 : ENGINE.player.startingHealthBars;
+  const healthBars = laserTag ? ENGINE.laserTag.health : ENGINE.player.startingHealthBars;
   const maxHealth = laserTag ? ENGINE.laserTag.health : playerMaxHealth(healthBars, gameMode);
   const player = {
     id: playerOptions.id,
@@ -464,6 +464,7 @@ function stepLaserTagArena(arena, dtSeconds, options = {}) {
       respawnLaserTagPlayer(arena, player);
     }
     stepPlayer(arena, player, dtSeconds, options);
+    restoreLaserTagPlayerHealthOnSpawnTile(arena, player);
   }
 
   stepLaserTagBlasts(arena, dtSeconds);
@@ -626,7 +627,8 @@ function laserTagBlastPlayerHit(arena, entity, start, angle, maxDistance) {
     if (
       target.id === entity.ownerId ||
       target.alive === false ||
-      laserTagPlayerIsOut(target)
+      laserTagPlayerIsOut(target) ||
+      laserTagPlayerTouchesSpawnTile(arena, target)
     ) {
       continue;
     }
@@ -689,23 +691,31 @@ function tagLaserTagPlayer(arena, entity, target) {
     return;
   }
 
+  if (laserTagPlayerTouchesSpawnTile(arena, target)) {
+    return;
+  }
+
+  target.health = clamp(Math.floor(Number(target.health || 0)) - 1, 0, target.maxHealth || ENGINE.laserTag.health);
+  target.lastDamageTick = arena.tick;
+  shooter.lastHitTargetId = target.id;
+  shooter.lastHitTick = arena.tick;
+  shooter.lastHitHealth = target.health;
+  shooter.lastHitMaxHealth = target.maxHealth;
+  shooter.lastHitHealthBars = target.healthBars;
   addLaserTagScore(arena, shooter, ENGINE.laserTag.hitPoints, "OPPONENT HIT");
   pushLaserTagEvent(arena, "A FRIENDLY WAS HIT", target.team);
+  if (target.health > 0) {
+    return;
+  }
+
   shooter.kills = Math.max(0, Math.floor(Number(shooter.kills || 0))) + 1;
   startLaserTagGhostReturn(arena, target);
-  target.health = 0;
   target.laserTagOutUntilTick = 0;
   target.mining = false;
   target.miningRay = null;
   target.rayExtension = 0;
-  target.lastDamageTick = arena.tick;
   target.killedById = shooter.id;
   target.eliminatedAtTick = arena.tick;
-  shooter.lastHitTargetId = target.id;
-  shooter.lastHitTick = arena.tick;
-  shooter.lastHitHealth = 0;
-  shooter.lastHitMaxHealth = target.maxHealth;
-  shooter.lastHitHealthBars = target.healthBars;
 }
 
 function tagLaserTagTarget(arena, entity, target, tileIndex = -1) {
@@ -1271,6 +1281,77 @@ function randomFreeLaserTagSpawnForPlayer(arena, player) {
   }
 
   return order[0]?.spawn || fallback;
+}
+
+function restoreLaserTagPlayerHealthOnSpawnTile(arena, player) {
+  if (!player || laserTagPlayerIsOut(player) || !laserTagPlayerTouchesSpawnTile(arena, player)) {
+    return;
+  }
+
+  const maxHealth = Math.max(1, Number(player.maxHealth) || ENGINE.laserTag.health);
+  if (player.health < maxHealth) {
+    player.health = maxHealth;
+  }
+}
+
+function laserTagPlayerTouchesSpawnTile(arena, player) {
+  const asteroid = arena?.asteroid;
+  if (!asteroid?.laserTag?.spawns || !player) {
+    return false;
+  }
+
+  const radius = Math.max(0, Number(player.radius) || playerRadiusForGameMode(GAME_MODES.laserTag));
+  const circle = { x: player.x, y: player.y, radius };
+  for (const team of LASER_TAG_TEAMS) {
+    for (const spawn of asteroid.laserTag.spawns[team] || []) {
+      const rect = laserTagSpawnTileRect(asteroid, spawn);
+      if (rect && circleTouchesRect(circle, rect)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function laserTagSpawnTileRect(asteroid, spawn) {
+  if (!asteroid || !spawn) {
+    return null;
+  }
+
+  const tileSize = asteroid.tileSize || ENGINE.laserTag.tileSize;
+  const spawnTileX = Number(spawn.tileX);
+  const spawnTileY = Number(spawn.tileY);
+  const tileX = Number.isFinite(spawnTileX)
+    ? Math.floor(spawnTileX)
+    : Math.floor(Number(spawn.spawnX ?? spawn.x) / tileSize);
+  const tileY = Number.isFinite(spawnTileY)
+    ? Math.floor(spawnTileY)
+    : Math.floor(Number(spawn.spawnY ?? spawn.y) / tileSize);
+  if (
+    !Number.isFinite(tileX) ||
+    !Number.isFinite(tileY) ||
+    tileX < 0 ||
+    tileY < 0 ||
+    tileX >= asteroid.widthTiles ||
+    tileY >= asteroid.heightTiles
+  ) {
+    return null;
+  }
+
+  return {
+    x: tileX * tileSize,
+    y: tileY * tileSize,
+    width: tileSize,
+    height: tileSize
+  };
+}
+
+function circleTouchesRect(circle, rect) {
+  const closestX = clamp(circle.x, rect.x, rect.x + rect.width);
+  const closestY = clamp(circle.y, rect.y, rect.y + rect.height);
+  const dx = circle.x - closestX;
+  const dy = circle.y - closestY;
+  return dx * dx + dy * dy <= circle.radius * circle.radius + 0.000001;
 }
 
 function laserTagSpawnPoint(spawn, teamName) {
@@ -3991,7 +4072,7 @@ function syncPlayerDerivedStats(player) {
   const gameMode = normalizeGameMode(player.gameMode);
   if (gameMode === GAME_MODES.laserTag) {
     player.miningRayCount = 1;
-    player.healthBars = 1;
+    player.healthBars = ENGINE.laserTag.health;
     player.maxHealth = ENGINE.laserTag.health;
     player.health = clamp(player.health || 0, 0, player.maxHealth);
     return;

@@ -551,6 +551,8 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
 function laserTagSpawnPointsFromMarkers(markers, tileSize, team) {
   const angle = team === "red" ? 0 : Math.PI;
   return markers.map((marker) => ({
+    tileX: marker.tileX,
+    tileY: marker.tileY,
     x: (marker.tileX + 0.5) * tileSize,
     y: (marker.tileY + 0.5) * tileSize,
     angle

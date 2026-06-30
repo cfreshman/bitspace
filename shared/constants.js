@@ -161,14 +161,14 @@ export const ENGINE = Object.freeze({
     radius: 7,
     tileSize: 16,
     speedMultiplier: 1.5,
-    health: 1,
+    health: 3,
     fireIntervalSeconds: 0.65,
     blastRadius: 2,
     maxRangeVisualRadiusScale: 1.3,
     beamLerpSeconds: 0.25,
     matchSeconds: 10 * 60,
     scoreLimit: 500,
-    hitPoints: 10,
+    hitPoints: 5,
     gatePoints: 1
   },
   player: {
