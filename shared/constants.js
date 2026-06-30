@@ -171,7 +171,8 @@ export const ENGINE = Object.freeze({
     hitPoints: 16,
     diamondPoints: 8,
     gatePoints: 1,
-    diamondSpawnSeconds: 8
+    diamondTargetBaseCount: 1,
+    diamondTargetBaseTiles: 48 * 25
   },
   player: {
     startingHealthBars: 3,

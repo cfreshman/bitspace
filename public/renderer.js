@@ -18155,10 +18155,16 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
 
   const header = String(layout.header || "").trim().toUpperCase();
   const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
-  const width = HUD_PANEL_MIN_WIDTH;
   const voiceRow = voiceHudEnabled(layout.settings, layout.voiceHudActive);
   const laserTag = layout.gameMode === GAME_MODES.laserTag;
   const laserTagRows = laserTag ? laserTagHudRows(player, layout, voiceRow) : null;
+  const textOptions = { fontSize: 8 };
+  const width = laserTag
+    ? Math.max(
+      HUD_PANEL_MIN_WIDTH,
+      Math.ceil(Math.max(...laserTagRows.map((row) => textRenderer.measure(row, textOptions))) + HUD_PANEL_PADDING * 2)
+    )
+    : HUD_PANEL_MIN_WIDTH;
   const height = laserTag
     ? hudPanelHeightForRows((header ? 1 : 0) + laserTagRows.length)
     : playerHudPanelHeight(header, layout.settings, layout.voiceHudActive, layout.gameMode);
@@ -18203,7 +18209,9 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
   if (laserTag) {
     const firstRowY = y + padding + headerOffset;
     laserTagRows.forEach((row, index) => {
-      drawHudMessage(ctx, row, contentX, firstRowY + rowStep * index, textRenderer, colors);
+      drawHudMessage(ctx, row, contentX, firstRowY + rowStep * index, textRenderer, colors, {
+        width: contentRight - contentX
+      });
     });
     return panel;
   }
@@ -18225,17 +18233,23 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
       mode: HUD_FLASH_MODE.additive,
       rate: HUD_FLASH_RATE.slow
     })) {
-      drawHudMessage(ctx, `${killDropAmount} DIAMOND${killDropAmount === 1 ? "" : "S"}`, contentX, rowY + rowStep * 3, textRenderer, colors);
+      drawHudMessage(ctx, `${killDropAmount} DIAMOND${killDropAmount === 1 ? "" : "S"}`, contentX, rowY + rowStep * 3, textRenderer, colors, {
+        width: contentRight - contentX
+      });
     }
     if (voiceRow) {
-      drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors);
+      drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors, {
+        width: contentRight - contentX
+      });
     }
     return panel;
   }
 
   drawHudKillRow(ctx, player.kills || 0, playersLeft, contentX, contentRight, rowY + rowStep * 3, textRenderer, colors);
   if (voiceRow) {
-    drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors);
+    drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors, {
+      width: contentRight - contentX
+    });
   }
   return panel;
 }
@@ -19067,11 +19081,12 @@ function drawHudKillRow(ctx, kills, playersLeft, labelX, countRight, y, textRend
   });
 }
 
-function drawHudMessage(ctx, text, x, y, textRenderer, colors) {
+function drawHudMessage(ctx, text, x, y, textRenderer, colors, options = {}) {
+  const width = Math.max(1, Math.floor(Number(options.width) || ctx.width - x));
   textRenderer.draw(ctx, text, x, y, {
     fontSize: 8,
     color: colors.foreground,
-    width: 96
+    width
   });
 }
 

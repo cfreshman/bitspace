@@ -14,5 +14,5 @@ Each source PNG pixel is one map tile. Use exact RGB values.
 
 Do not use `ASTEROID_TILE.wall` for laser tag maps. Wall is vestigial here.
 
-Runtime diamonds spawn in any rock tile with at least one cardinal open-floor face.
+Cyan diamond pixels define the preferred runtime diamond spawn candidates for that map. If a map has any cyan pixels, runtime diamond spawn attempts use those tiles; if a map has no cyan pixels, runtime diamonds fall back to any rock tile with at least one cardinal open-floor face.
 Each connected gate marker group becomes a target. Per team, top-to-bottom gates are named `NORTH GATE`, then `SOUTH GATE`.

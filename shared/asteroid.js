@@ -464,6 +464,7 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
   const amounts = new Uint8Array(widthTiles * heightTiles);
   const playable = new Array(widthTiles * heightTiles).fill(true);
   const markers = {
+    diamond: [],
     redSpawn: [],
     blueSpawn: [],
     redGate: [],
@@ -479,6 +480,7 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
         tiles[index] = ASTEROID_TILE.rock;
       } else if (char === LASER_TAG_MAP_CHARS.diamond) {
         tiles[index] = ASTEROID_TILE.rock;
+        markers.diamond.push({ tileX, tileY });
       } else if (char === LASER_TAG_MAP_CHARS.redSpawn) {
         markers.redSpawn.push({ tileX, tileY });
       } else if (char === LASER_TAG_MAP_CHARS.blueSpawn) {
@@ -534,6 +536,7 @@ function createLaserTagAsteroidFromMap(map, options = {}) {
         blue: pockets.filter((_pocket, index) => index % 2 === 1)
       },
       bases: [redBase, blueBase],
+      diamondSpawns: markers.diamond.map((marker) => marker.tileY * widthTiles + marker.tileX),
       gates: [
         ...laserTagGateTargetsFromMarkers(markers.redGate, tileSize, "red", widthTiles),
         ...laserTagGateTargetsFromMarkers(markers.blueGate, tileSize, "blue", widthTiles)

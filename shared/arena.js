@@ -441,17 +441,17 @@ function initializeLaserTagArena(arena) {
     winnerTeam: null,
     scoreLimit,
     matchSeconds,
+    diamondTargetCount: laserTagDiamondTargetCount(arena.asteroid),
     teamScores: { red: 0, blue: 0 },
-    nextDiamondSpawnTick: arena.tick,
     shots: [],
     events: []
   };
 
-  arena.laserTag.nextDiamondSpawnTick = arena.tick + Math.round(config.diamondSpawnSeconds * ENGINE.tickRate);
+  maintainLaserTagDiamonds(arena);
 }
 
 function stepLaserTagArena(arena, dtSeconds, options = {}) {
-  spawnScheduledLaserTagDiamond(arena);
+  maintainLaserTagDiamonds(arena);
 
   for (const player of arena.players.values()) {
     player.alive = true;
@@ -469,14 +469,43 @@ function stepLaserTagArena(arena, dtSeconds, options = {}) {
   updateLaserTagEndState(arena);
 }
 
-function spawnScheduledLaserTagDiamond(arena) {
-  if (!arena.laserTag || arena.tick < arena.laserTag.nextDiamondSpawnTick) {
+function maintainLaserTagDiamonds(arena) {
+  if (!arena?.laserTag || !arena.asteroid) {
     return false;
   }
 
-  const spawned = spawnRandomLaserTagDiamond(arena, `${arena.seed}:laser-tag:diamond:${arena.tick}`);
-  arena.laserTag.nextDiamondSpawnTick = arena.tick + Math.round(ENGINE.laserTag.diamondSpawnSeconds * ENGINE.tickRate);
-  return spawned;
+  const targetCount = positiveInteger(arena.laserTag.diamondTargetCount, laserTagDiamondTargetCount(arena.asteroid));
+  let currentCount = countLaserTagDiamonds(arena.asteroid);
+  let changed = false;
+  for (let index = currentCount; index < targetCount; index += 1) {
+    if (!spawnRandomLaserTagDiamond(arena, `${arena.seed}:laser-tag:diamond:${arena.tick}:${index}`)) {
+      break;
+    }
+    currentCount += 1;
+    changed = true;
+  }
+  return changed;
+}
+
+function countLaserTagDiamonds(asteroid) {
+  if (!asteroid?.tiles) {
+    return 0;
+  }
+
+  let count = 0;
+  for (const tile of asteroid.tiles) {
+    if (tile === ASTEROID_TILE.diamond) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function laserTagDiamondTargetCount(asteroid) {
+  const baseCount = positiveInteger(ENGINE.laserTag.diamondTargetBaseCount, 4);
+  const baseTiles = positiveInteger(ENGINE.laserTag.diamondTargetBaseTiles, 48 * 25);
+  const tileCount = positiveInteger((asteroid?.widthTiles || 0) * (asteroid?.heightTiles || 0), baseTiles);
+  return Math.max(1, Math.round(baseCount * tileCount / baseTiles));
 }
 
 function spawnRandomLaserTagDiamond(arena, seed) {
@@ -486,15 +515,27 @@ function spawnRandomLaserTagDiamond(arena, seed) {
   }
 
   const random = createSeededRandom(seed);
+  const markedSpawns = laserTagDiamondSpawnIndices(asteroid);
   let selectedIndex = null;
   let candidateCount = 0;
-  for (let index = 0; index < asteroid.tiles.length; index += 1) {
-    if (!laserTagDiamondCandidate(asteroid, index)) {
-      continue;
+
+  const visitCandidate = (index, options = {}) => {
+    if (!laserTagDiamondCandidate(asteroid, index, options)) {
+      return;
     }
     candidateCount += 1;
     if (random() < 1 / candidateCount) {
       selectedIndex = index;
+    }
+  };
+
+  if (markedSpawns.length > 0) {
+    for (const index of markedSpawns) {
+      visitCandidate(index, { requireOpenFace: false });
+    }
+  } else {
+    for (let index = 0; index < asteroid.tiles.length; index += 1) {
+      visitCandidate(index);
     }
   }
 
@@ -507,9 +548,40 @@ function spawnRandomLaserTagDiamond(arena, seed) {
   return true;
 }
 
-function laserTagDiamondCandidate(asteroid, index) {
+function laserTagDiamondSpawnIndices(asteroid) {
+  if (!Array.isArray(asteroid?.laserTag?.diamondSpawns)) {
+    return [];
+  }
+
+  const seen = new Set();
+  const indices = [];
+  for (const rawIndex of asteroid.laserTag.diamondSpawns) {
+    const index = Math.floor(Number(rawIndex));
+    if (
+      !Number.isFinite(index) ||
+      index < 0 ||
+      index >= asteroid.tiles.length ||
+      seen.has(index)
+    ) {
+      continue;
+    }
+    seen.add(index);
+    indices.push(index);
+  }
+  return indices;
+}
+
+function laserTagDiamondCandidate(asteroid, index, options = {}) {
   if (asteroid.tiles[index] !== ASTEROID_TILE.rock) {
     return false;
+  }
+
+  if (laserTagGateTargetForTile(asteroid, index)) {
+    return false;
+  }
+
+  if (options.requireOpenFace === false) {
+    return true;
   }
 
   const tileX = index % asteroid.widthTiles;

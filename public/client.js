@@ -328,6 +328,7 @@ const audio = {
   masterOutput: null,
   unlocked: false,
   pendingBeeps: 0,
+  pendingScoreDings: 0,
   pendingMelodies: [],
   ship: null,
   lastHealth: null,
@@ -464,6 +465,7 @@ const state = {
   laserTagEventIds: new Set(),
   laserTagShotIds: new Set(),
   playerAliveById: new Map(),
+  playerScoreById: new Map(),
   spectatorTargetId: null,
   lastRoomId: null,
   lastActiveMatchKey: null,
@@ -660,6 +662,7 @@ function applyServerRoom(room) {
     state.laserTagEventIds.clear();
     state.laserTagShotIds.clear();
     state.playerAliveById.clear();
+    state.playerScoreById.clear();
     setSpectatorTarget(null);
   }
 
@@ -677,6 +680,7 @@ function applyServerRoom(room) {
     state.laserTagEventIds.clear();
     state.laserTagShotIds.clear();
     state.playerAliveById.clear();
+    state.playerScoreById.clear();
     setSpectatorTarget(null);
     state.lastActiveMatchKey = null;
     state.upgrades.active = false;
@@ -706,6 +710,7 @@ function applyServerRoom(room) {
   if (activeMatchKey && activeMatchKey !== state.lastActiveMatchKey) {
     resetControlStateForNewMatch();
     state.laserTagShotIds.clear();
+    state.playerScoreById.clear();
   }
   state.lastActiveMatchKey = activeMatchKey || (room.state === "ended" ? state.lastActiveMatchKey : null);
   if (!playerMapAllowed()) {
@@ -781,6 +786,7 @@ socket.on(SERVER_EVENTS.snapshot, (payload) => {
   updateLocalDamageAudio(snapshot, receivedAtSeconds);
   recordEliminations(snapshot, receivedAtSeconds);
   recordLaserTagEvents(snapshot, receivedAtSeconds);
+  recordPlayerScoreAudio(snapshot, receivedAtSeconds);
   state.snapshot = snapshot;
   handleRoomEndAudio(state.room, snapshot, receivedAtSeconds);
   if (state.asteroid) {
@@ -4708,6 +4714,7 @@ function startLocalBotLobby(mode = selectedMenuMode()) {
   state.laserTagEventIds.clear();
   state.laserTagShotIds.clear();
   state.playerAliveById.clear();
+  state.playerScoreById.clear();
   setSpectatorTarget(null);
   setClientAsteroid(snapshotAsteroid(arena));
   syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
@@ -4861,6 +4868,7 @@ function startLocalBotGame(botCount = state.localGame.botCount || LOCAL_BOT_DEFA
   state.laserTagEventIds.clear();
   state.laserTagShotIds.clear();
   state.playerAliveById.clear();
+  state.playerScoreById.clear();
   setSpectatorTarget(null);
   setClientAsteroid(snapshotAsteroid(arena));
   syncLocalArenaSnapshot(performance.now() / 1000);
@@ -4965,6 +4973,7 @@ function leaveLocalBotGame() {
   state.laserTagEventIds.clear();
   state.laserTagShotIds.clear();
   state.playerAliveById.clear();
+  state.playerScoreById.clear();
   setSpectatorTarget(null);
   state.lastActiveMatchKey = null;
   resetControlStateForNewMatch();
@@ -5223,9 +5232,11 @@ function syncLocalArenaSnapshot(timeSeconds, options = {}) {
   updateLocalDamageAudio(snapshot, timeSeconds);
   if (options.skipEliminations) {
     primePlayerAliveState(snapshot);
+    primePlayerScoreState(snapshot);
   } else {
     recordEliminations(snapshot, timeSeconds);
     recordLaserTagEvents(snapshot, timeSeconds);
+    recordPlayerScoreAudio(snapshot, timeSeconds);
   }
   state.snapshot = snapshot;
   if (!options.skipEliminations) {
@@ -5241,6 +5252,13 @@ function primePlayerAliveState(snapshot) {
   state.playerAliveById.clear();
   for (const player of snapshot.players || []) {
     state.playerAliveById.set(player.id, player.alive !== false);
+  }
+}
+
+function primePlayerScoreState(snapshot) {
+  state.playerScoreById.clear();
+  for (const player of snapshot.players || []) {
+    state.playerScoreById.set(player.id, normalizedPlayerScore(player));
   }
 }
 
@@ -5378,11 +5396,11 @@ function serializeLocalBotLaserTag(laserTag) {
     winnerTeam: laserTag.winnerTeam || null,
     scoreLimit: Math.max(1, Math.floor(Number(laserTag.scoreLimit || ENGINE.laserTag.scoreLimit))),
     matchSeconds: Math.max(1, Number(laserTag.matchSeconds || ENGINE.laserTag.matchSeconds)),
+    diamondTargetCount: Math.max(1, Math.floor(Number(laserTag.diamondTargetCount || ENGINE.laserTag.diamondTargetBaseCount || 4))),
     teamScores: {
       red: Math.max(0, Math.floor(Number(laserTag.teamScores?.red || 0))),
       blue: Math.max(0, Math.floor(Number(laserTag.teamScores?.blue || 0)))
     },
-    nextDiamondSpawnTick: Math.max(0, Math.floor(Number(laserTag.nextDiamondSpawnTick || 0))),
     events: Array.isArray(laserTag.events)
       ? laserTag.events.slice(-12).map((event) => ({ ...event }))
       : []
@@ -5593,6 +5611,7 @@ function restoreLocalBotGame() {
   state.laserTagEventIds.clear();
   state.laserTagShotIds.clear();
   state.playerAliveById.clear();
+  state.playerScoreById.clear();
   setClientAsteroid(snapshotAsteroid(arena));
   syncLocalArenaSnapshot(performance.now() / 1000, { skipEliminations: true });
   return true;
@@ -5713,14 +5732,11 @@ function restoreLocalBotLaserTag(arena, savedLaserTag) {
   arena.laserTag.winnerTeam = savedLaserTag.winnerTeam || null;
   arena.laserTag.scoreLimit = Math.max(1, Math.floor(Number(savedLaserTag.scoreLimit || arena.laserTag.scoreLimit || ENGINE.laserTag.scoreLimit)));
   arena.laserTag.matchSeconds = Math.max(1, Number(savedLaserTag.matchSeconds || arena.laserTag.matchSeconds || ENGINE.laserTag.matchSeconds));
+  arena.laserTag.diamondTargetCount = Math.max(1, Math.floor(Number(savedLaserTag.diamondTargetCount || arena.laserTag.diamondTargetCount || ENGINE.laserTag.diamondTargetBaseCount || 4)));
   arena.laserTag.teamScores = {
     red: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.red || 0))),
     blue: Math.max(0, Math.floor(Number(savedLaserTag.teamScores?.blue || 0)))
   };
-  arena.laserTag.nextDiamondSpawnTick = Math.max(
-    arena.tick,
-    Math.floor(Number(savedLaserTag.nextDiamondSpawnTick || arena.laserTag.nextDiamondSpawnTick || arena.tick))
-  );
   arena.laserTag.events = Array.isArray(savedLaserTag.events)
     ? savedLaserTag.events.slice(-12).map((event) => ({ ...event }))
     : [];
@@ -9393,7 +9409,39 @@ function requestVolumePreview(id, options = {}) {
 
 function flushPendingAudio() {
   flushPendingBeeps();
+  flushPendingScoreDings();
   flushPendingMelodies();
+}
+
+function requestScoreDing() {
+  const context = audio.context || createAudioContext();
+  if (!context) {
+    return;
+  }
+
+  audio.context = context;
+  if (context.state === "suspended") {
+    audio.pendingScoreDings = Math.min(audio.pendingScoreDings + 1, 4);
+    context.resume()
+      .then(flushPendingAudio)
+      .catch(() => {});
+    return;
+  }
+
+  playScoreDing(context);
+}
+
+function flushPendingScoreDings() {
+  const context = audio.context;
+  if (!context || context.state !== "running" || audio.pendingScoreDings <= 0) {
+    return;
+  }
+
+  const dings = audio.pendingScoreDings;
+  audio.pendingScoreDings = 0;
+  for (let index = 0; index < dings; index += 1) {
+    playScoreDing(context, index * 0.12);
+  }
 }
 
 function flushPendingBeeps() {
@@ -9555,6 +9603,12 @@ function playMechanicalBeep(context, delay = 0) {
   playMechanicalTone(context, 520, start + delay + 0.092, 0.07, 0.0275);
 }
 
+function playScoreDing(context, delay = 0) {
+  const start = context.currentTime + 0.006 + delay;
+  playScoreDingTone(context, 1174.66, start, 0.13, 0.024);
+  playScoreDingTone(context, 1567.98, start + 0.045, 0.12, 0.017);
+}
+
 function playVolumePreviewTone(context, id) {
   const start = context.currentTime + 0.006;
   const oscillator = context.createOscillator();
@@ -9585,6 +9639,23 @@ function playMechanicalTone(context, frequency, start, duration, volume) {
   oscillator.frequency.setValueAtTime(frequency, start);
   gain.gain.setValueAtTime(0.0001, start);
   gain.gain.exponentialRampToValueAtTime(effectGain(volume), start + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gain);
+  gain.connect(audioOutputNode(context));
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.02);
+}
+
+function playScoreDingTone(context, frequency, start, duration, volume) {
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(frequency, start);
+  oscillator.frequency.exponentialRampToValueAtTime(frequency * 1.018, start + duration);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(effectGain(volume), start + 0.006);
+  gain.gain.exponentialRampToValueAtTime(effectGain(volume * 0.34), start + duration * 0.45);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
   oscillator.connect(gain);
   gain.connect(audioOutputNode(context));
@@ -12215,6 +12286,33 @@ function recordEliminations(snapshot, timeSeconds) {
 
     state.playerAliveById.set(player.id, player.alive === true);
   }
+}
+
+function recordPlayerScoreAudio(snapshot, timeSeconds) {
+  const players = snapshot?.players || [];
+  if (snapshot?.mode !== GAME_MODES.laserTag) {
+    for (const player of players) {
+      state.playerScoreById.set(player.id, normalizedPlayerScore(player));
+    }
+    return;
+  }
+
+  for (const player of players) {
+    const score = normalizedPlayerScore(player);
+    const previousScore = state.playerScoreById.get(player.id);
+    if (
+      player.id === state.playerId &&
+      Number.isFinite(previousScore) &&
+      score > previousScore
+    ) {
+      requestScoreDing(timeSeconds);
+    }
+    state.playerScoreById.set(player.id, score);
+  }
+}
+
+function normalizedPlayerScore(player) {
+  return Math.max(0, Math.floor(Number(player?.score || 0)));
 }
 
 function recordLaserTagEvents(snapshot, timeSeconds) {
