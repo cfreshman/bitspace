@@ -73,6 +73,26 @@ const SUB_MODE_COLORS = Object.freeze({
   bodyFill: "#000000",
   health: "#48f06d"
 });
+const OCTOPUS_THEMES = Object.freeze({
+  classic: "classic",
+  matrix: "matrix"
+});
+const OCTOPUS_MATRIX_MODE_COLORS = Object.freeze({
+  foreground: "#00ff41",
+  background: "#004118",
+  backgroundDark: "#00280e",
+  shadow: "#001a09",
+  shadowAlpha: 0.78,
+  backing: "#000000",
+  ore: "#00ff41",
+  diamond: "#8dff8d",
+  rockLine: "#00b83f",
+  bodyFill: "#000000",
+  health: "#00ff41",
+  resourceWireframe: true,
+  disableFish: true,
+  octopusTheme: OCTOPUS_THEMES.matrix
+});
 const BUG_BACKING_COLOR = "#070b06";
 const BUG_MODE_COLORS = Object.freeze({
   foreground: "#45b722",
@@ -197,14 +217,14 @@ const SUB_HEALTH_COLORS = Object.freeze([
   "#2fdfff"
 ]);
 const OCTOPUS_BODY_COLORS = Object.freeze([
-  "#00ff5a",
   "#ff3030",
   "#2f63ff",
   "#ff8a00",
   "#8a2cff",
   "#ff2fc3",
   "#ffe600",
-  "#00e6ff"
+  "#00e6ff",
+  "#00ff5a"
 ]);
 const CAR_TIRE_COLOR = "#000000";
 const CAR_TIRE_LENGTH = 6;
@@ -284,6 +304,20 @@ const OCTOPUS_TENTACLE_COUNT = 8;
 const OCTOPUS_TENTACLE_TRAIL_REACH_SCALE = 3.8;
 const OCTOPUS_TENTACLE_BASE_WIDTH = 5.2;
 const OCTOPUS_TENTACLE_TIP_WIDTH = 1.35;
+const OCTOPUS_TENTACLE_PROFILES = Object.freeze({
+  [OCTOPUS_THEMES.classic]: Object.freeze({
+    key: OCTOPUS_THEMES.classic,
+    count: OCTOPUS_TENTACLE_COUNT,
+    baseWidth: OCTOPUS_TENTACLE_BASE_WIDTH,
+    tipWidth: OCTOPUS_TENTACLE_TIP_WIDTH
+  }),
+  [OCTOPUS_THEMES.matrix]: Object.freeze({
+    key: OCTOPUS_THEMES.matrix,
+    count: 12,
+    baseWidth: OCTOPUS_TENTACLE_TIP_WIDTH,
+    tipWidth: OCTOPUS_TENTACLE_TIP_WIDTH
+  })
+});
 const OCTOPUS_TENTACLE_SEGMENTS = 12;
 const OCTOPUS_TENTACLE_FLUID_DRAG = 8.5;
 const OCTOPUS_TENTACLE_INTENT_PULL = 7.2;
@@ -333,7 +367,10 @@ function renderGameMode(snapshot, options = {}) {
 }
 
 function renderGameParams(snapshot, options = {}) {
-  return snapshot?.params || options.room?.params || {};
+  return {
+    ...(snapshot?.params || options.room?.params || {}),
+    octopusTheme: normalizeOctopusTheme(options.octopusTheme)
+  };
 }
 
 function octopusTentacleStateKey(snapshot, options = {}, gameMode = GAME_MODES.bitspace) {
@@ -347,16 +384,29 @@ function octopusTentacleStateKey(snapshot, options = {}, gameMode = GAME_MODES.b
     room.roomId || "",
     room.state || "",
     snapshot?.arenaId || "",
-    snapshot?.seed || ""
+    snapshot?.seed || "",
+    normalizeOctopusTheme(options.octopusTheme)
   ].join(":");
 }
 
 function colorsForGameMode(colors, gameMode, params = {}) {
-  if (isWaterThemedGameMode(gameMode)) {
+  if (gameMode === GAME_MODES.octopus && normalizeOctopusTheme(params.octopusTheme) === OCTOPUS_THEMES.matrix) {
     return {
+      ...colors,
+      ...SUB_MODE_COLORS,
+      ...OCTOPUS_MATRIX_MODE_COLORS
+    };
+  }
+
+  if (isWaterThemedGameMode(gameMode)) {
+    const waterColors = {
       ...colors,
       ...SUB_MODE_COLORS
     };
+    if (gameMode === GAME_MODES.octopus) {
+      waterColors.octopusTheme = OCTOPUS_THEMES.classic;
+    }
+    return waterColors;
   }
 
   if (gameMode === GAME_MODES.bugs) {
@@ -395,6 +445,16 @@ function colorsForGameMode(colors, gameMode, params = {}) {
   }
 
   return carColors;
+}
+
+function normalizeOctopusTheme(value) {
+  return value === OCTOPUS_THEMES.matrix ? OCTOPUS_THEMES.matrix : OCTOPUS_THEMES.classic;
+}
+
+function octopusTentacleProfile(colors = {}) {
+  return colors.octopusTheme === OCTOPUS_THEMES.matrix
+    ? OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.matrix]
+    : OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.classic];
 }
 
 function trueBackingColor(colors) {
@@ -5730,7 +5790,8 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
         ctx.height,
         options.asteroid,
         options.timeSeconds ?? snapshot.tick / 60,
-        options.octopusTentacleStates
+        options.octopusTentacleStates,
+        octopusTentacleProfile(colors)
       );
     }
 
@@ -9852,16 +9913,21 @@ function drawAsteroidTiles(
       gameMode === GAME_MODES.bugs ||
       gameMode === GAME_MODES.clouds ||
       gameMode === GAME_MODES.laserTag;
-    const hullOnly = gameMode === GAME_MODES.bugs
+    const wireframeResources = colors.resourceWireframe === true;
+    const hullOnly = !wireframeResources && (gameMode === GAME_MODES.bugs
       || gameMode === GAME_MODES.octopus
-      || gameMode === GAME_MODES.laserTag;
+      || gameMode === GAME_MODES.laserTag);
     const cloudResources = gameMode === GAME_MODES.clouds;
     const oreFillColor = colors.ore || colors.foreground;
     const diamondFillColor = colors.diamond || colors.foreground;
-    const oreStrokeColor = cloudResources
+    const oreStrokeColor = wireframeResources
+      ? oreFillColor
+      : cloudResources
       ? mixHexColors(oreFillColor, colors.backing, 0.5)
       : colors.backing || colors.foreground;
-    const diamondStrokeColor = cloudResources
+    const diamondStrokeColor = wireframeResources
+      ? diamondFillColor
+      : cloudResources
       ? mixHexColors(diamondFillColor, colors.backing, 0.5)
       : colors.backing || colors.foreground;
     ctx.fillStyle = colors.foreground;
@@ -9895,7 +9961,7 @@ function drawAsteroidTiles(
             oreMiningProgressFor(asteroidMiningTargets, index, amount),
             coloredResources
               ? {
-                  fillColor: oreFillColor,
+                  fillColor: wireframeResources ? null : oreFillColor,
                   strokeColor: oreStrokeColor
                 }
               : null
@@ -9911,7 +9977,7 @@ function drawAsteroidTiles(
             diamondMiningProgressFor(asteroidMiningTargets, index),
             coloredResources
               ? {
-                  fillColor: diamondFillColor,
+                  fillColor: wireframeResources ? null : diamondFillColor,
                   edgeColor: diamondStrokeColor,
                   // hullOnly: true,
                   hullOnly,
@@ -11798,7 +11864,8 @@ function prewarmOctopusTentaclesForViewportPlayers(
   viewportHeight,
   asteroid,
   timeSeconds,
-  tentacleStates
+  tentacleStates,
+  profile = OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.classic]
 ) {
   if (!(tentacleStates instanceof Map) || !Array.isArray(players) || !camera) {
     return;
@@ -11811,8 +11878,8 @@ function prewarmOctopusTentaclesForViewportPlayers(
 
     const radius = shipMainRadius(player);
     const rearAngle = octopusRearAngle(player, shipVisualAngle(player));
-    const state = octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds);
-    octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds);
+    const state = octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds, profile);
+    octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds, profile);
   }
 }
 
@@ -14561,8 +14628,12 @@ function drawWaterDebris(
   waterFishState = null
 ) {
   const gpuCaustics = typeof ctx.queueGpuCausticLayer === "function";
-  updateWaterFishBoids(waterFishState, snapshot, camera, timeSeconds, ctx.width, ctx.height);
-  drawWaterFishField(ctx, waterFishState, camera, visibility, renderMask, gpuCaustics);
+  if (colors.disableFish !== true) {
+    updateWaterFishBoids(waterFishState, snapshot, camera, timeSeconds, ctx.width, ctx.height);
+    drawWaterFishField(ctx, waterFishState, camera, visibility, renderMask, gpuCaustics);
+  } else {
+    resetWaterFishState(waterFishState);
+  }
   if (!gpuCaustics) {
     return true;
   }
@@ -15100,10 +15171,13 @@ function drawEntity(ctx, entity, camera, options, colors, textRenderer) {
         lineColor: bodyColor
       });
     } else if (options.gameMode === GAME_MODES.octopus) {
+      const inkColor = colors.octopusTheme === OCTOPUS_THEMES.matrix
+        ? colors.foreground || OCTOPUS_MATRIX_MODE_COLORS.foreground
+        : "#000000";
       drawHuckRockEntity(ctx, entity, camera, colors, {
         filled: true,
-        fillColor: "#000000",
-        lineColor: "#000000"
+        fillColor: inkColor,
+        lineColor: inkColor
       });
     } else {
       drawHuckRockEntity(ctx, entity, camera, colors, {
@@ -15830,7 +15904,7 @@ function drawShip(
     const octopusColors = {
       ...colors,
       octopusBodyColor: bodyColor,
-      health: octopusHealthColor(player)
+      health: octopusHealthColor(player, colors)
     };
     drawOctopusBody(ctx, x, y, player, camera, asteroid, mainRadius, bodyAngle, octopusColors, timeSeconds, octopusTentacleStates, () => {
       if (player.mining) {
@@ -16463,11 +16537,12 @@ function drawOctopusBody(ctx, x, y, player, camera, asteroid, radius, angle, col
   const bodyColor = colors.bodyFill || SUB_MODE_COLORS.bodyFill || "#000000";
   const outlineColor = colors.bodyFill || SUB_MODE_COLORS.bodyFill || "#000000";
   const rearAngle = octopusRearAngle(player, angle);
-  const state = octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds);
-  const tentacles = octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds);
+  const profile = octopusTentacleProfile(colors);
+  const state = octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds, profile);
+  const tentacles = octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds, profile);
 
   for (const tentacle of tentacles) {
-    drawOctopusTentacle(ctx, camera, tentacle, bodyColor, outlineColor);
+    drawOctopusTentacle(ctx, camera, tentacle, bodyColor, outlineColor, profile);
   }
 
   if (typeof drawMiddleLayer === "function") {
@@ -16489,24 +16564,25 @@ function octopusRearAngle(player, fallbackAngle = 0) {
   return Number.isFinite(fallbackAngle) ? fallbackAngle + Math.PI : Math.PI;
 }
 
-function octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds) {
-  const key = player?.id || `octopus-${player?.number || 0}`;
+function octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds, profile = OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.classic]) {
+  const count = Math.max(1, Math.floor(Number(profile?.count) || OCTOPUS_TENTACLE_COUNT));
+  const key = `${profile?.key || OCTOPUS_THEMES.classic}:${player?.id || `octopus-${player?.number || 0}`}`;
   if (!(tentacleStates instanceof Map)) {
     return {
       key,
       lastSeenAt: timeSeconds,
       lastUpdateTime: Number.NaN,
-      tentacles: octopusCreateTentacleStates(key)
+      tentacles: octopusCreateTentacleStates(key, count)
     };
   }
 
   let state = tentacleStates.get(key);
-  if (!state || !Array.isArray(state.tentacles) || state.tentacles.length !== OCTOPUS_TENTACLE_COUNT) {
+  if (!state || !Array.isArray(state.tentacles) || state.tentacles.length !== count) {
     state = {
       key,
       lastSeenAt: timeSeconds,
       lastUpdateTime: Number.NaN,
-      tentacles: octopusCreateTentacleStates(key)
+      tentacles: octopusCreateTentacleStates(key, count)
     };
     tentacleStates.set(key, state);
   }
@@ -16516,8 +16592,8 @@ function octopusTentacleStateForPlayer(tentacleStates, player, timeSeconds) {
   return state;
 }
 
-function octopusCreateTentacleStates(key) {
-  return Array.from({ length: OCTOPUS_TENTACLE_COUNT }, (_unused, index) => ({
+function octopusCreateTentacleStates(key, count = OCTOPUS_TENTACLE_COUNT) {
+  return Array.from({ length: count }, (_unused, index) => ({
     seed: hashCell("octopus-tentacle", key, index),
     targetX: Number.NaN,
     targetY: Number.NaN,
@@ -16654,7 +16730,7 @@ function octopusTentaclePointInsideBlocker(point, asteroid) {
   return isSolidTile(asteroid.tiles[index]);
 }
 
-function octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds) {
+function octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, timeSeconds, profile = OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.classic]) {
   const dtSeconds = Number.isFinite(state.lastUpdateTime)
     ? clamp(timeSeconds - state.lastUpdateTime, 0, 1 / 12)
     : 0;
@@ -16671,10 +16747,13 @@ function octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, t
     x: -rear.y,
     y: rear.x
   };
+  const count = Math.max(1, Math.floor(Number(profile?.count) || OCTOPUS_TENTACLE_COUNT));
+  const baseWidth = Number.isFinite(profile?.baseWidth) ? profile.baseWidth : OCTOPUS_TENTACLE_BASE_WIDTH;
+  const baseRadius = Math.max(0, radius - baseWidth * 0.5);
 
-  for (let index = 0; index < OCTOPUS_TENTACLE_COUNT; index += 1) {
+  for (let index = 0; index < count; index += 1) {
     const tentacle = state.tentacles[index];
-    const baseAngle = rearAngle + Math.PI + Math.PI / OCTOPUS_TENTACLE_COUNT + (index / OCTOPUS_TENTACLE_COUNT) * Math.PI * 2;
+    const baseAngle = rearAngle + Math.PI + Math.PI / count + (index / count) * Math.PI * 2;
     const seed = Number(tentacle.seed) || index + 1;
     const baseRadial = {
       x: Math.cos(baseAngle),
@@ -16684,8 +16763,8 @@ function octopusTentaclePlacements(state, player, asteroid, radius, rearAngle, t
     const idleReachPulse = 0.78 +
       Math.sin(timeSeconds * (0.86 + randomUnit(seed, 15) * 0.4) + randomUnit(seed, 16) * Math.PI * 2) * 0.09;
     const base = {
-      x: player.x + baseRadial.x * radius * 0.58,
-      y: player.y + baseRadial.y * radius * 0.58
+      x: player.x + baseRadial.x * baseRadius,
+      y: player.y + baseRadial.y * baseRadius
     };
     const trailReach = radius * OCTOPUS_TENTACLE_TRAIL_REACH_SCALE * speedStretch * (0.9 + randomUnit(seed, 4) * 0.16) * idleReachPulse;
     const swimIntent = {
@@ -17062,23 +17141,25 @@ function octopusMoveTentaclePointAlongDirection(point, asteroid, dirX, dirY, dis
   return { moved: true };
 }
 
-function drawOctopusTentacle(ctx, camera, tentacle, tentacleColor, outlineColor) {
+function drawOctopusTentacle(ctx, camera, tentacle, tentacleColor, outlineColor, profile = OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.classic]) {
   if (!Array.isArray(tentacle.points) || tentacle.points.length < 2) {
     return;
   }
 
   const points = tentacle.points.map((point) => worldToScreenExact(point, camera));
-  drawOctopusTentacleStroke(ctx, points, outlineColor, 1.2);
-  drawOctopusTentacleStroke(ctx, points, tentacleColor, 0);
+  drawOctopusTentacleStroke(ctx, points, outlineColor, 1.2, profile);
+  drawOctopusTentacleStroke(ctx, points, tentacleColor, 0, profile);
 }
 
-function drawOctopusTentacleStroke(ctx, points, color, widthAdd) {
+function drawOctopusTentacleStroke(ctx, points, color, widthAdd, profile = OCTOPUS_TENTACLE_PROFILES[OCTOPUS_THEMES.classic]) {
   ctx.fillStyle = color;
+  const baseWidth = Number.isFinite(profile?.baseWidth) ? profile.baseWidth : OCTOPUS_TENTACLE_BASE_WIDTH;
+  const tipWidth = Number.isFinite(profile?.tipWidth) ? profile.tipWidth : OCTOPUS_TENTACLE_TIP_WIDTH;
   for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1];
     const point = points[index];
     const segmentT = (index - 0.5) / (points.length - 1);
-    const width = lerp(OCTOPUS_TENTACLE_BASE_WIDTH, OCTOPUS_TENTACLE_TIP_WIDTH, segmentT) + widthAdd;
+    const width = lerp(baseWidth, tipWidth, segmentT) + widthAdd;
     drawFilledCapsule(ctx, previous, point, Math.max(0.5, width * 0.5));
   }
 }
@@ -18089,7 +18170,10 @@ function octopusBodyColor(player) {
   return player?.alive === false ? desaturateHexColor(color, 0.58) : color;
 }
 
-function octopusHealthColor(player) {
+function octopusHealthColor(player, colors = {}) {
+  if (colors.octopusTheme === OCTOPUS_THEMES.matrix) {
+    return octopusBodyColor(player);
+  }
   return mixHexColors(octopusBodyColor(player), "#ffffff", 0.48);
 }
 
@@ -20652,6 +20736,14 @@ function drawMiningRayHitpoints(ctx, player, camera, asteroid, timeSeconds, colo
 }
 
 function miningRayRenderColors(colors, gameMode, timeSeconds, player = null) {
+  if (gameMode === GAME_MODES.octopus && colors.octopusTheme === OCTOPUS_THEMES.matrix) {
+    return {
+      ...colors,
+      foreground: colors.foreground || OCTOPUS_MATRIX_MODE_COLORS.foreground,
+      miningRayGradient: null
+    };
+  }
+
   if (isWaterThemedGameMode(gameMode)) {
     return {
       ...colors,

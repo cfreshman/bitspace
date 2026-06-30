@@ -80,6 +80,7 @@ const ROOM_ID_STORAGE_KEY = "bitspace.roomId";
 const ROOM_NAME_STORAGE_KEY = "bitspace.roomName";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
+const OCTOPUS_THEME_STORAGE_KEY = "bitspace.octopusTheme";
 const MENU_MODE_STORAGE_KEY = "bitspace.menuMode";
 const MENU_STATE_STORAGE_KEY = "bitspace.menuState";
 const LOCAL_BOT_SAVE_STORAGE_KEY = "bitspace.localBotSave";
@@ -214,6 +215,10 @@ const THEME_SWATCH_EFFECT_FADE_MS = 150;
 const THEME_RANDOM_MIN_HUE_DISTANCE_DEGREES = 15;
 const THEME_REPEAT_RANDOM_MIN_HUE_DISTANCE_DEGREES = 30;
 const THEME_RANDOM_CONTRAST_SAMPLES = 10;
+const OCTOPUS_THEMES = Object.freeze({
+  classic: "classic",
+  matrix: "matrix"
+});
 const THEME_PRESETS = Object.freeze([
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#74cbef" },
   // { id: "blue", label: "BLUE", background: "#1f2433", foreground: "#efcb74" },
@@ -544,6 +549,7 @@ const state = {
     ...createMenuState()
   },
   theme: loadTheme(),
+  octopusTheme: loadOctopusTheme(),
   uiHoverId: null,
   lastReattachRequestAt: 0,
   resumePending: false,
@@ -2241,6 +2247,7 @@ function draw(now = 0) {
     botDebugOverlay,
     theme: state.theme,
     themeName: themeLabelForTheme(state.theme),
+    octopusTheme: state.octopusTheme,
     settings: state.settings,
     voiceHudActive: voiceHudActive(),
     settingsUi: state.settingsUi,
@@ -4581,6 +4588,10 @@ function activateMenuEntity(entity) {
   requestMechanicalBeep();
 
   if (entity.action === "theme") {
+    if (selectedMenuMode() === GAME_MODES.octopus) {
+      toggleOctopusTheme();
+      return;
+    }
     enterMenuRoom(MENU_ROOMS.theme);
     return;
   }
@@ -5538,15 +5549,16 @@ function restoreLocalBotGame() {
   }
 
   const roomState = localBotSaveRoomState(save.roomState);
+  const mode = normalizeMenuMode(save.mode);
   const botCount = clampLocalBotCount(save.botCount ?? Math.max(0, (save.players || []).length - 1));
   const waitingRoom = roomState === "waiting";
-  if (waitingRoom) {
+  if (waitingRoom && mode === GAME_MODES.laserTag) {
     stripAsteroidResources(asteroid);
   }
   const arena = createArena({
     id: LOCAL_BOT_ROOM_ID,
     seed: save.seed,
-    mode: normalizeMenuMode(save.mode),
+    mode,
     playerCount: Math.max(1, (save.players || []).length),
     playerDamage: !waitingRoom,
     storm: !waitingRoom,
@@ -6114,7 +6126,8 @@ function menuEntities() {
   const sideXGap = 116;
   const sideTopY = center.y - 26;
   const sideBottomY = center.y + 16;
-  const themeDisabled = currentMode !== GAME_MODES.bitspace;
+  const octopusSelected = currentMode === GAME_MODES.octopus;
+  const themeDisabled = currentMode !== GAME_MODES.bitspace && !octopusSelected;
 
   return [
     menuTitle("menu-title", menuTitleLabelForMode(currentMode), MENU_ESRB_SUBTITLE, center.x, titleY),
@@ -6142,7 +6155,8 @@ function menuEntities() {
     menuButton("menu-bots", "bots", "BOTS", center.x - sideXGap - buttonWidth / 2, sideBottomY, buttonWidth),
     menuButton("menu-theme", "theme", "THEME", center.x + sideXGap - buttonWidth / 2, sideTopY, buttonWidth, {
       disabled: themeDisabled,
-      strike: themeDisabled
+      strike: themeDisabled,
+      selected: octopusSelected && state.octopusTheme === OCTOPUS_THEMES.matrix
     }),
     menuButton("menu-prefs", "prefs", "PREFS", center.x + sideXGap - buttonWidth / 2, sideBottomY, buttonWidth)
   ];
@@ -6749,6 +6763,7 @@ function menuButton(id, action, label, x, y, width, options = {}) {
     width,
     height: MENU_BUTTON_HEIGHT,
     active: state.menu.activeTargetId === id,
+    selected: options.selected === true,
     disabled: options.disabled === true,
     strike: options.strike === true,
     targetMode: options.targetMode || null
@@ -6903,6 +6918,26 @@ function loadTheme() {
   }
 
   return readThemeSource() || defaultTheme();
+}
+
+function loadOctopusTheme() {
+  try {
+    return normalizeOctopusTheme(window.localStorage.getItem(OCTOPUS_THEME_STORAGE_KEY));
+  } catch {
+    return OCTOPUS_THEMES.classic;
+  }
+}
+
+function saveOctopusTheme() {
+  try {
+    window.localStorage.setItem(OCTOPUS_THEME_STORAGE_KEY, normalizeOctopusTheme(state.octopusTheme));
+  } catch {
+    // Ignore storage failures; the selected octos theme still works for this session.
+  }
+}
+
+function normalizeOctopusTheme(value) {
+  return value === OCTOPUS_THEMES.matrix ? OCTOPUS_THEMES.matrix : OCTOPUS_THEMES.classic;
 }
 
 function loadBotDebugOverlay() {
@@ -7431,6 +7466,14 @@ function setTheme(theme, baseId = themePresetIdForTheme(theme)) {
   state.menu.themeBaseId = validThemePresetId(baseId);
   applyThemeToSource(state.theme);
   saveTheme();
+}
+
+function toggleOctopusTheme() {
+  state.octopusTheme = state.octopusTheme === OCTOPUS_THEMES.matrix
+    ? OCTOPUS_THEMES.classic
+    : OCTOPUS_THEMES.matrix;
+  saveOctopusTheme();
+  clearRendererParticles();
 }
 
 function focusSelectedThemeSwatch(theme = state.theme) {
