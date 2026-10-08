@@ -7279,7 +7279,7 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
 
   if (spectatedPlayer && spectatedPlayer.id !== localPlayer?.id) {
     const header = spectatorHeaderForPlayer(spectatedPlayer);
-    const spectatedHeight = playerHudPanelHeight(header, options.settings, options.voiceHudActive, options.gameMode);
+    const spectatedHeight = playerHudPanelHeight(header, options.settings, options.voiceUi, options.gameMode);
 	    stackPanel = drawPlayerHud(
 	      ctx,
 	      spectatedPlayer,
@@ -7294,7 +7294,7 @@ function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, te
 	        laserTag: snapshot.laserTag,
 	        tick: snapshot.tick,
 	        settings: options.settings,
-	        voiceHudActive: options.voiceHudActive,
+	        voiceUi: options.voiceUi,
 	        y: stackPanel
           ? options.mobileActive || hudStacksUp(options.settings)
             ? Math.max(HUD_EDGE_INSET, stackPanel.y - spectatedHeight - 6)
@@ -18981,7 +18981,7 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
 
   const header = String(layout.header || "").trim().toUpperCase();
   const headerOffset = header ? HUD_PANEL_ROW_STEP : 0;
-  const voiceRow = voiceHudEnabled(layout.settings, layout.voiceHudActive);
+  const voiceRow = Boolean(layout.voiceUi);
   const laserTag = layout.gameMode === GAME_MODES.laserTag;
   const laserTagRows = laserTag ? laserTagHudRows(player, layout, voiceRow) : null;
   const textOptions = { fontSize: 8 };
@@ -18990,8 +18990,8 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
       HUD_PANEL_MIN_WIDTH,
       Math.ceil(Math.max(...laserTagRows.map((row) => textRenderer.measure(row, textOptions))) + HUD_PANEL_PADDING * 2)
     )
-    : HUD_PANEL_MIN_WIDTH;
-  const height = playerHudPanelHeight(header, layout.settings, layout.voiceHudActive, layout.gameMode);
+    : Math.max(HUD_PANEL_MIN_WIDTH, voiceRow ? textRenderer.measure(voiceHudLabel(layout.voiceUi), textOptions) + HUD_PANEL_PADDING * 2 : 0);
+  const height = playerHudPanelHeight(header, layout.settings, layout.voiceUi, layout.gameMode);
   const panel = mainHudPanelRect(ctx, width, height, layout.settings);
   if (Number.isFinite(layout.x)) {
     panel.x = Math.round(layout.x);
@@ -19039,6 +19039,10 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
     });
     drawHudHealthBars(ctx, x + 22, hpY + 1, contentRight - (x + 22), 5, hp, maxHp, healthBars, colors);
     laserTagRows.forEach((row, index) => {
+      if (voiceRow && index === laserTagRows.length - 1) {
+        drawVoiceToggle(ctx, layout.voiceUi, contentX, rowY + rowStep * index, contentRight - contentX, colors, textRenderer);
+        return;
+      }
       drawHudMessage(ctx, row, contentX, rowY + rowStep * index, textRenderer, colors, {
         width: contentRight - contentX
       });
@@ -19068,18 +19072,14 @@ function drawPlayerHud(ctx, player, colors, textRenderer, hudFlash = {}, timeSec
       });
     }
     if (voiceRow) {
-      drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors, {
-        width: contentRight - contentX
-      });
+      drawVoiceToggle(ctx, layout.voiceUi, contentX, rowY + rowStep * 4, contentRight - contentX, colors, textRenderer);
     }
     return panel;
   }
 
   drawHudKillRow(ctx, player.kills || 0, playersLeft, contentX, contentRight, rowY + rowStep * 3, textRenderer, colors);
   if (voiceRow) {
-    drawHudMessage(ctx, "VOICE ON", contentX, rowY + rowStep * 4, textRenderer, colors, {
-      width: contentRight - contentX
-    });
+    drawVoiceToggle(ctx, layout.voiceUi, contentX, rowY + rowStep * 4, contentRight - contentX, colors, textRenderer);
   }
   return panel;
 }
@@ -19104,7 +19104,7 @@ function laserTagHudRows(player, layout = {}, voiceRow = false) {
     `TIME ${formatClock(remainingSeconds)}`
   ];
   if (voiceRow) {
-    rows.push("VOICE ON");
+    rows.push(voiceHudLabel(layout.voiceUi));
   }
   return rows;
 }
@@ -19184,22 +19184,34 @@ function mobilePlayerHudLayout(ctx, options = {}) {
   if (!options.mobileActive) {
     return {
       settings: options.settings,
-      voiceHudActive: options.voiceHudActive
+      voiceUi: options.voiceUi
     };
   }
 
   return {
     x: Math.max(HUD_EDGE_INSET, mobileHudVisibleWidth(ctx) - HUD_PANEL_MIN_WIDTH - HUD_EDGE_INSET),
-    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings, options.voiceHudActive, options.gameMode)),
+    y: mobileHudBottomY(ctx, playerHudPanelHeight("", options.settings, options.voiceUi, options.gameMode)),
     settings: options.settings,
-    voiceHudActive: options.voiceHudActive
+    voiceUi: options.voiceUi
   };
 }
 
-function voiceHudEnabled(settings = {}, voiceHudActive = false) {
-  return settings?.voiceChat !== false &&
-    Number(settings?.masterVolume ?? 1) * Number(settings?.voiceVolume ?? 1) > 0 &&
-    voiceHudActive === true;
+function voiceHudLabel(voiceUi) {
+  const shortcut = voiceUi.mobileActive ? "" : voiceUi.controllerActive ? "R3 - " : "V - ";
+  return `${shortcut}VOICE ${voiceUi.enabled ? "ON" : "OFF"}`;
+}
+
+function drawVoiceToggle(ctx, voiceUi, x, y, width, colors, textRenderer) {
+  voiceUi.toggleRect = { x, y: y - 1, width, height: HUD_PANEL_ROW_STEP };
+  if (voiceUi.hovered) {
+    ctx.fillStyle = colors.foreground;
+    ctx.fillRect(x, y - 1, width, HUD_PANEL_ROW_STEP);
+  }
+  textRenderer.draw(ctx, voiceHudLabel(voiceUi), x, y, {
+    fontSize: 8,
+    color: voiceUi.hovered ? colors.background : colors.foreground,
+    width
+  });
 }
 
 function hudLocation(settings = {}) {
@@ -19280,17 +19292,17 @@ function mobileArenaActionKinds(mapFeatureEnabled = true, leaveVisible = true) {
   return kinds;
 }
 
-function playerHudPanelHeight(header = "", settings = {}, voiceHudActive = false, gameMode = GAME_MODES.bitspace) {
+function playerHudPanelHeight(header = "", settings = {}, voiceUi = null, gameMode = GAME_MODES.bitspace) {
   if (gameMode === GAME_MODES.laserTag) {
     return hudPanelHeightForRows(
       (String(header || "").trim() ? 1 : 0) +
       6 +
-      (voiceHudEnabled(settings, voiceHudActive) ? 1 : 0)
+      (voiceUi ? 1 : 0)
     );
   }
   return 58 +
     (String(header || "").trim() ? HUD_PANEL_ROW_STEP : 0) +
-    (voiceHudEnabled(settings, voiceHudActive) ? HUD_PANEL_ROW_STEP : 0);
+    (voiceUi ? HUD_PANEL_ROW_STEP : 0);
 }
 
 function hudPanelHeightForRows(rowCount) {

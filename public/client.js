@@ -177,7 +177,7 @@ const MENU_ROOMS = Object.freeze({
 const HUD_LOCATIONS = Object.freeze(["top-left", "top", "bottom"]);
 const DEFAULT_SETTINGS = Object.freeze({
   hudLocation: "top-left",
-  voiceChat: true,
+  voiceChat: false,
   micCapture: true,
   masterVolume: 1,
   effectsVolume: 1,
@@ -543,6 +543,7 @@ const state = {
     lastTargetKey: ""
   },
   settings: loadSettings(),
+  voiceUi: null,
   settingsUi: {
     selectedIndex: 0,
     navDirection: 0,
@@ -918,6 +919,14 @@ window.addEventListener("keydown", (event) => {
   }
 
   if (state.chat.active) {
+    return;
+  }
+
+  if (event.code === "KeyV" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    if (!event.repeat) {
+      toggleVoiceChat();
+    }
     return;
   }
 
@@ -2217,6 +2226,13 @@ function draw(now = 0) {
     updatePerfUpdateMetrics(performance.now() - updateStart);
   }
   const renderStart = state.perfDebug.enabled ? performance.now() : 0;
+  state.voiceUi = voiceRoomAvailable() ? {
+    enabled: state.settings.voiceChat,
+    controllerActive: state.controller.connected,
+    mobileActive: mobileControlsActive(),
+    hovered: state.uiHoverId === "voiceToggle",
+    toggleRect: null
+  } : null;
   const renderPerf = renderer.draw(snapshot, {
     playerId,
     cameraPlayerId: readyMenu ? MENU_PLAYER_ID : cameraPlayerId,
@@ -2256,7 +2272,7 @@ function draw(now = 0) {
     octopusTheme: state.octopusTheme,
     bugTheme: state.bugTheme,
     settings: state.settings,
-    voiceHudActive: voiceHudActive(),
+    voiceUi: state.voiceUi,
     settingsUi: state.settingsUi,
     timeSeconds,
     measurePerf: state.perfDebug.enabled
@@ -2313,6 +2329,7 @@ function updateControllerState(timeSeconds) {
     input.pressed.build ||
     input.pressed.upgrades ||
     input.pressed.map ||
+    input.pressed.voice ||
     input.pressed.mining ||
     input.pressed.huckRock
   ) {
@@ -2324,6 +2341,11 @@ function updateControllerState(timeSeconds) {
 
 function handleControllerActions(input) {
   if (!input.connected || state.chat.active) {
+    return;
+  }
+
+  if (input.pressed.voice) {
+    toggleVoiceChat();
     return;
   }
 
@@ -6675,19 +6697,11 @@ function setSettingValue(id, value, options = {}) {
   } else if (id === "micCapture") {
     state.settings.micCapture = Boolean(value);
   } else if (id === "masterVolume" || id === "effectsVolume" || id === "musicVolume" || id === "voiceVolume") {
-    const previousEffectiveVoiceVolume = effectiveVoiceSettingVolume(state.settings);
     const clampedValue = clamp(Number(value), 0, 1);
     state.settings[id] = clampedValue;
     const nextEffectiveVoiceVolume = effectiveVoiceSettingVolume(state.settings);
     if ((id === "masterVolume" || id === "voiceVolume") && nextEffectiveVoiceVolume <= 0) {
       state.settings.voiceChat = false;
-    } else if (
-      (id === "masterVolume" || id === "voiceVolume") &&
-      previousEffectiveVoiceVolume <= 0 &&
-      nextEffectiveVoiceVolume > 0 &&
-      state.settings.voiceChat === false
-    ) {
-      state.settings.voiceChat = true;
     }
   } else {
     return;
@@ -6972,7 +6986,8 @@ function loadPerfDebug() {
 function loadSettings() {
   try {
     const stored = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
-    return normalizeSettings(stored);
+    // Voice is an opt-in for this page session, including when old settings saved it as on.
+    return { ...normalizeSettings(stored), voiceChat: false };
   } catch {
     window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
     return { ...DEFAULT_SETTINGS };
@@ -6988,7 +7003,7 @@ function normalizeSettings(settings) {
     hudLocation: HUD_LOCATIONS.includes(hudLocation)
       ? hudLocation
       : DEFAULT_SETTINGS.hudLocation,
-    voiceChat: source.voiceChat !== false && masterVolume * voiceVolume > 0,
+    voiceChat: source.voiceChat === true && masterVolume * voiceVolume > 0,
     micCapture: source.micCapture !== false,
     masterVolume,
     effectsVolume: clamp(Number(source.effectsVolume ?? DEFAULT_SETTINGS.effectsVolume), 0, 1),
@@ -7079,6 +7094,7 @@ function installControlHandles() {
   handles.voiceStart = () => {
     voice.micAttempted = false;
     voice.micError = null;
+    setSettingValue("voiceChat", true, { silent: true });
     markVoiceUserGesture();
     syncVoiceRoomState();
     startVoiceMicrophone();
@@ -8338,9 +8354,20 @@ function syncVoiceRoomState() {
   startVoiceRoom();
 }
 
+function toggleVoiceChat() {
+  if (!voiceRoomAvailable() && !isSettingsMenu()) {
+    return;
+  }
+
+  setSettingValue("voiceChat", !state.settings.voiceChat);
+}
+
 function voiceRoomJoinAllowed() {
+  return state.settings.voiceChat === true && voiceRoomAvailable();
+}
+
+function voiceRoomAvailable() {
   if (
-    !state.settings.voiceChat ||
     isMapGenMode() ||
     isLocalBotGame() ||
     !socket.connected ||
@@ -9193,59 +9220,6 @@ function voicePeerCurrentGain(peer, now) {
     return targetGain;
   }
   return Number(peer?.voiceCurrentGain ?? 0);
-}
-
-function voiceHudActive() {
-  if (!voiceRoomJoinAllowed() || !voice.joined) {
-    return false;
-  }
-
-  if (voiceMicOutputActive()) {
-    return true;
-  }
-
-  return voiceRemoteOutputActive();
-}
-
-function voiceMicOutputActive() {
-  const tracks = voice.localStream?.getAudioTracks?.() || [];
-  return tracks.some((track) => (
-    track.readyState === "live" &&
-    track.enabled === true &&
-    track.muted !== true
-  ));
-}
-
-function voiceRemoteOutputActive() {
-  if (!voiceRoomJoinAllowed() || !voice.joined || voice.peers.size <= 0) {
-    return false;
-  }
-
-  const context = audio.context;
-  if (!context || context.state !== "running") {
-    return false;
-  }
-
-  const now = context.currentTime;
-  for (const peer of voice.peers.values()) {
-    const connectionState = peer.pc?.connectionState;
-    const iceState = peer.pc?.iceConnectionState;
-    const connected = connectionState === "connected" ||
-      connectionState === "completed" ||
-      iceState === "connected" ||
-      iceState === "completed";
-    if (!connected || !peer.gain || peer.remoteStream?.getAudioTracks().length <= 0) {
-      continue;
-    }
-
-    const currentGain = voicePeerCurrentGain(peer, now);
-    const targetGain = Number(peer.voiceTargetGain || peer.voiceRampTargetGain || 0);
-    if (Math.max(currentGain, targetGain) > 0.001) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 function voiceDebugSnapshot() {
@@ -12597,6 +12571,11 @@ function handleRoomUiClick(buttonId) {
     return;
   }
 
+  if (buttonId === "voiceToggle") {
+    toggleVoiceChat();
+    return;
+  }
+
   if (buttonId === "leaveSpectating" || buttonId === "leaveEnded" || buttonId === "terminalLeave") {
     leaveCurrentRoom();
     return;
@@ -13103,6 +13082,10 @@ function endedHudResultRowCount() {
 }
 
 function screenRoomButtonAtPoint(x, y) {
+  if (voiceRoomAvailable() && pointInRect(x, y, state.voiceUi?.toggleRect)) {
+    return "voiceToggle";
+  }
+
   for (const [buttonId, rect] of Object.entries(activeRoomButtons())) {
     if (x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height) {
       return buttonId;
@@ -14941,6 +14924,7 @@ function shouldCaptureKey(code) {
     "KeyS",
     "KeyD",
     "KeyT",
+    "KeyV",
     "KeyQ",
     "KeyE",
     "Space"
