@@ -1,7 +1,5 @@
 # BITSPACE
 
-BITSPACE is a 1-bit, socket-based competitive arena scaffold for up to eight players.
-
 ## Local Development
 
 ```sh
@@ -15,11 +13,8 @@ The app defaults to port `7024` locally and in production. Set `PORT` or `BITSPA
 
 - The server is authoritative and advances a `60 Hz` arena tick using elapsed `dt`.
 - Clients send normalized WASD movement vectors, mouse aim angle, and mining-ray hold state. The server owns session state, debug movement, and snapshots.
-- The browser renders a square `384x384` logical 1-bit framebuffer: `24x24` visible tiles at `16px` each.
 - The page only displays a literal `object-fit: contain` canvas on a black page background.
 - Shared modules in `shared/` are imported by both the server and browser.
-
-The current scaffold intentionally avoids game mechanics. There is low-drift debug ship movement, procedural 1-bit line-sphere ship art, a shared booster particle plume, a deterministic parallax star field, dashed map bounds, and a visual mining ray to validate input, networking, camera, and rendering. Future mechanics should be added only after they are explicitly designed.
 
 ## Deployment
 

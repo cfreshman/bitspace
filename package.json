@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "BITSPACE 1-bit socket arena scaffold.",
   "scripts": {
     "build:core": "bash scripts/build-core-wasm.sh",
     "start": "node server/index.js",
