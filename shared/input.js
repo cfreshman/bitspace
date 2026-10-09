@@ -15,6 +15,9 @@ export function createEmptyInput() {
 }
 
 export function normalizeInput(payload = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return createEmptyInput();
+  }
   const move = normalizeMoveVector(payload.moveX, payload.moveY);
 
   return {
@@ -33,12 +36,12 @@ export function normalizeInput(payload = {}) {
 }
 
 function normalizeSessionId(value) {
-  const text = String(value || "").trim();
+  const text = typeof value === "string" ? value.trim() : "";
   return /^[a-zA-Z0-9_-]{8,64}$/.test(text) ? text : "";
 }
 
 function normalizeAxis(value) {
-  const number = Number(value);
+  const number = numberFromInput(value);
   if (!Number.isFinite(number)) {
     return 0;
   }
@@ -51,7 +54,7 @@ function normalizeNullableNumber(value) {
     return null;
   }
 
-  const number = Number(value);
+  const number = numberFromInput(value);
   return Number.isFinite(number) ? number : null;
 }
 
@@ -71,7 +74,7 @@ function normalizeMoveVector(x, y) {
 }
 
 function normalizeSequence(value) {
-  const number = Number(value);
+  const number = numberFromInput(value);
   if (!Number.isFinite(number) || number < 0) {
     return 0;
   }
@@ -80,11 +83,19 @@ function normalizeSequence(value) {
 }
 
 function normalizeAngle(value) {
-  const number = Number(value);
+  const number = numberFromInput(value);
   if (!Number.isFinite(number)) {
     return 0;
   }
 
   const fullTurn = Math.PI * 2;
   return ((number % fullTurn) + fullTurn) % fullTurn;
+}
+
+export function numberFromInput(value) {
+  if (value !== null && value !== undefined &&
+      typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
+    return NaN;
+  }
+  return Number(value);
 }

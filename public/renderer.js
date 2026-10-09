@@ -6048,6 +6048,17 @@ function drawFrame(ctx, snapshot, options, colors, textRenderer, particleState) 
   if (shouldDrawHud) measureBucket("hudMs", () => {
     if (mobileUpgradeModal) {
       drawUpgradeHud(ctx, localPlayer, options.upgrades, colors, textRenderer, options.controllerActive, true, options.playerMapFeatureEnabled, options.settings);
+      if (options.voiceUi) {
+        const panel = upgradeMenuLayout(textRenderer, options.controllerActive, true, ctx).panel;
+        drawVoiceToggleAction(
+          ctx,
+          options.voiceUi,
+          panel.x + 2 + MOBILE_UPGRADE_CLOSE_ACTION.width + MOBILE_UPGRADE_CLOSE_ACTION.gap,
+          panel.y + panel.height + MOBILE_UPGRADE_CLOSE_ACTION.gap + 2,
+          colors,
+          textRenderer
+        );
+      }
       return;
     }
 
@@ -7254,7 +7265,7 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
   const textWidth = textRenderer.measure(label, textOptions);
   const visibleWidth = options.mobileActive ? mobileHudVisibleWidth(ctx) : ctx.width;
   const panelWidth = Math.min(visibleWidth - 24, textWidth + 24);
-  const panelHeight = 39;
+  const panelHeight = 39 + (options.voiceUi ? HUD_PANEL_ROW_STEP : 0);
   const panelX = options.mobileActive
     ? Math.max(HUD_EDGE_INSET, visibleWidth - panelWidth - HUD_EDGE_INSET)
     : Math.round((visibleWidth - panelWidth) / 2);
@@ -7267,6 +7278,17 @@ function drawStartingOverlay(ctx, secondsLeft, options, colors, textRenderer) {
 
   drawPanel(ctx, panel.x, panel.y, panel.width, panel.height, colors);
   drawCenteredText(ctx, textRenderer, label, panel.x + panel.width / 2, panel.y + 9, textOptions);
+  if (options.voiceUi) {
+    drawVoiceToggle(
+      ctx,
+      options.voiceUi,
+      panel.x + HUD_PANEL_PADDING,
+      panel.y + panel.height - HUD_PANEL_PADDING - HUD_PANEL_TEXT_HEIGHT,
+      panel.width - HUD_PANEL_PADDING * 2,
+      colors,
+      textRenderer
+    );
+  }
 }
 
 function drawSpectatorHud(ctx, options, localPlayer, spectatedPlayer, colors, textRenderer, snapshot) {
@@ -9035,6 +9057,14 @@ function placeLabel(place) {
 }
 
 function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
+  drawVoiceToggleNearAction(
+    ctx,
+    options.mobileActive ? HUD_EDGE_INSET : x,
+    options.mobileActive ? mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT) : y,
+    options,
+    colors,
+    textRenderer
+  );
   if (options.controllerActive) {
     drawControllerHudAction(ctx, "faceRight", "LEAVE", x, y, colors, textRenderer);
     return;
@@ -9061,6 +9091,14 @@ function drawTerminalLeaveAction(ctx, x, y, options, colors, textRenderer) {
 }
 
 function drawTerminalConfirmLeaveAction(ctx, x, y, options, colors, textRenderer) {
+  drawVoiceToggleNearAction(
+    ctx,
+    options.mobileActive ? 10 : x,
+    options.mobileActive ? mobileHudControlBlockY(ctx, MOBILE_HUD_ACTION_HEIGHT) : y,
+    options,
+    colors,
+    textRenderer
+  );
   if (options.controllerActive) {
     drawControllerHudAction(ctx, "faceBottom", "CONFIRM", x, y, colors, textRenderer);
     return;
@@ -19201,7 +19239,7 @@ function voiceHudLabel(voiceUi) {
   return `${shortcut}VOICE ${voiceUi.enabled ? "ON" : "OFF"}`;
 }
 
-function drawVoiceToggle(ctx, voiceUi, x, y, width, colors, textRenderer) {
+function drawVoiceToggle(ctx, voiceUi, x, y, width, colors, textRenderer, textOptions = {}) {
   voiceUi.toggleRect = { x, y: y - 1, width, height: HUD_PANEL_ROW_STEP };
   if (voiceUi.hovered) {
     ctx.fillStyle = colors.foreground;
@@ -19209,9 +19247,24 @@ function drawVoiceToggle(ctx, voiceUi, x, y, width, colors, textRenderer) {
   }
   textRenderer.draw(ctx, voiceHudLabel(voiceUi), x, y, {
     fontSize: 8,
+    ...textOptions,
     color: voiceUi.hovered ? colors.background : colors.foreground,
     width
   });
+}
+
+function drawVoiceToggleAction(ctx, voiceUi, x, y, colors, textRenderer) {
+  const width = Math.ceil(textRenderer.measure(voiceHudLabel(voiceUi), { fontSize: 8 }));
+  drawVoiceToggle(ctx, voiceUi, x, y, width, colors, textRenderer, HUD_CONTROL_TEXT_BORDER);
+}
+
+function drawVoiceToggleNearAction(ctx, x, y, options, colors, textRenderer) {
+  if (!options.voiceUi || options.voiceUi.toggleRect) {
+    return;
+  }
+  const step = terminalActionLineStep(options);
+  const direction = options.mobileActive || hudStacksUp(options.settings) ? -1 : 1;
+  drawVoiceToggleAction(ctx, options.voiceUi, x, y + direction * step + 2, colors, textRenderer);
 }
 
 function hudLocation(settings = {}) {

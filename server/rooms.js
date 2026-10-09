@@ -279,7 +279,9 @@ export function createRoomManager(options = {}) {
       return { ok: false, reason: "unknown_client" };
     }
 
-    const room = roomId ? rooms.get(String(roomId)) : roomForClient(clientId);
+    const room = roomId
+      ? typeof roomId === "string" ? rooms.get(roomId) : null
+      : roomForClient(clientId);
     if (!room?.participants.has(clientId)) {
       return { ok: false, reason: "not_registered" };
     }
@@ -1156,7 +1158,7 @@ function nextLobbySpawnNumber(room) {
 }
 
 export function sanitizeClientId(value) {
-  const text = String(value || "").trim();
+  const text = typeof value === "string" ? value.trim() : "";
   return CLIENT_ID_PATTERN.test(text) ? text : "";
 }
 
@@ -1165,7 +1167,7 @@ export function createClientId() {
 }
 
 export function sanitizeClientSecret(value) {
-  const text = String(value || "").trim();
+  const text = typeof value === "string" ? value.trim() : "";
   return CLIENT_SECRET_PATTERN.test(text) ? text : "";
 }
 
@@ -1174,7 +1176,7 @@ export function createClientSecret() {
 }
 
 export function sanitizeNamedRoomName(value) {
-  const text = String(value || "")
+  const text = (typeof value === "string" ? value : "")
     .trim()
     .replace(/\s+/g, " ")
     .slice(0, NAMED_ROOM_MAX_LENGTH);

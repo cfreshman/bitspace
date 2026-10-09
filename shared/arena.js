@@ -13,7 +13,7 @@ import {
   serializeAsteroid,
   sweptCircleBlockerHit
 } from "./asteroid.js";
-import { createEmptyInput, normalizeInput } from "./input.js";
+import { createEmptyInput, normalizeInput, numberFromInput } from "./input.js";
 import { simulateCarMovement } from "./car-physics.js";
 import { simulateCloudMovement } from "./cloud-physics.js";
 import {
@@ -326,7 +326,7 @@ export function purchasePlayerUpgrade(arena, playerId, upgradeId) {
     return { ok: false, reason: "player_unavailable" };
   }
 
-  const definition = upgradeDefinitionById(String(upgradeId || ""));
+  const definition = upgradeDefinitionById(upgradeId);
   if (!definition) {
     return { ok: false, reason: "unknown_upgrade" };
   }
@@ -363,8 +363,11 @@ export function buildPlayerWall(arena, playerId, payload = {}) {
   }
 
   const asteroid = arena.asteroid;
-  const tileX = Math.floor(Number(payload.tileX));
-  const tileY = Math.floor(Number(payload.tileY));
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { ok: false, reason: "invalid_build_tile" };
+  }
+  const tileX = Math.floor(numberFromInput(payload.tileX));
+  const tileY = Math.floor(numberFromInput(payload.tileY));
   if (!Number.isFinite(tileX) || !Number.isFinite(tileY)) {
     return { ok: false, reason: "invalid_build_tile" };
   }
@@ -1686,14 +1689,14 @@ export function lobbySnapshot(arena) {
 }
 
 export function sanitizePlayerName(name) {
-  return String(name)
+  return (typeof name === "string" ? name : "")
     .trim()
     .replace(/\s+/g, " ")
     .slice(0, 18) || "Pilot";
 }
 
 export function sanitizeTalkText(text) {
-  return String(text)
+  return (typeof text === "string" ? text : "")
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .trim()
     .replace(/\s+/g, " ")
@@ -3648,7 +3651,7 @@ function tileIsClosestBuildCandidate(arena, player, tileX, tileY, angleOverride 
   const centerX = (tileX + 0.5) * tileSize;
   const centerY = (tileY + 0.5) * tileSize;
   const fallbackAngle = Math.atan2(centerY - player.y, centerX - player.x);
-  const requestedAngle = Number(angleOverride);
+  const requestedAngle = numberFromInput(angleOverride);
   const angle = Number.isFinite(requestedAngle) ? requestedAngle : fallbackAngle;
   const tiles = serverBuildTargetTiles(arena, player, tileSize);
   const closest = closestBuildTileByCenterAngle({

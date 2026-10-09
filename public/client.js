@@ -77,6 +77,7 @@ const ROOM_NAME_MAX_CHARS = 24;
 const CLIENT_ID_STORAGE_KEY = "bitspace.clientId";
 const CLIENT_SECRET_STORAGE_KEY = "bitspace.clientSecret";
 const ROOM_ID_STORAGE_KEY = "bitspace.roomId";
+const PENDING_LEAVE_STORAGE_KEY = "bitspace.pendingLeaveRoomId";
 const ROOM_NAME_STORAGE_KEY = "bitspace.roomName";
 const LEGACY_REGISTERED_ROOM_STORAGE_KEY = "bitspace.registeredRoom";
 const THEME_STORAGE_KEY = "bitspace.theme";
@@ -376,6 +377,7 @@ const voice = {
   micError: null,
   micAttempted: false,
   micStarting: false,
+  micRequestId: 0,
   retryAtMs: 0,
   roomId: null,
   lastJoinAnnounceAtMs: 0,
@@ -561,7 +563,8 @@ const state = {
   lastReattachRequestAt: 0,
   resumePending: false,
   deferredMenuRoom: null,
-  resumeFallbackTimer: null
+  resumeFallbackTimer: null,
+  pendingLeaveRoomId: loadPendingRoomLeave()
 };
 
 state.menu.themeBaseId = themePresetIdForTheme(state.theme);
@@ -621,6 +624,10 @@ socket.on(SERVER_EVENTS.welcome, (payload) => {
     };
   }
   emitHeartbeat();
+  if (state.pendingLeaveRoomId) {
+    requestPendingRoomLeave();
+    return;
+  }
   if (!isLocalBotGame()) {
     if (storedRoomId()) {
       requestRoomReattach(0, true);
@@ -642,6 +649,12 @@ socket.on("disconnect", () => {
 socket.on(SERVER_EVENTS.room, handleServerRoom);
 
 function handleServerRoom(room) {
+  if (state.pendingLeaveRoomId) {
+    if (room?.roomId === state.pendingLeaveRoomId) {
+      return;
+    }
+    setPendingRoomLeave("");
+  }
   if (isLocalBotGame()) {
     return;
   }
@@ -783,7 +796,7 @@ function resetControlStateForNewMatch() {
 }
 
 socket.on(SERVER_EVENTS.snapshot, (payload) => {
-  if (isLocalBotGame()) {
+  if (isLocalBotGame() || state.pendingLeaveRoomId) {
     return;
   }
 
@@ -809,7 +822,7 @@ socket.on(SERVER_EVENTS.snapshot, (payload) => {
 });
 
 socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
-  if (isLocalBotGame()) {
+  if (isLocalBotGame() || state.pendingLeaveRoomId) {
     return;
   }
 
@@ -817,7 +830,7 @@ socket.on(SERVER_EVENTS.asteroid, (asteroid) => {
 });
 
 socket.on(SERVER_EVENTS.asteroidUpdate, (updates) => {
-  if (isLocalBotGame()) {
+  if (isLocalBotGame() || state.pendingLeaveRoomId) {
     return;
   }
 
@@ -1058,12 +1071,19 @@ window.addEventListener("keyup", (event) => {
   keys.delete(event.code);
 });
 
-window.addEventListener("blur", () => {
+function clearHeldPlayerInput() {
   keys.clear();
   releasedKeysUntilKeyup.clear();
   state.mouse.down = false;
+  state.controller.move = { x: 0, y: 0 };
+  state.controller.mining = false;
+  state.controller.huckRock = false;
+  resetMobileJoysticks();
+  clearMobileHuckRockQueue();
   clearSettingsDrag();
-});
+}
+
+window.addEventListener("blur", clearHeldPlayerInput);
 window.addEventListener("pagehide", () => {
   saveLocalBotGame({ force: true });
 });
@@ -1324,6 +1344,11 @@ function handleMobilePointerDown(event) {
 
   if (isSettingsMenu()) {
     handleSettingsPointerDown(hudPoint.x, hudPoint.y, event.pointerId);
+    return true;
+  }
+
+  if (screenRoomButtonAtPoint(hudPoint.x, hudPoint.y) === "voiceToggle") {
+    handleRoomUiClick("voiceToggle");
     return true;
   }
 
@@ -8522,6 +8547,7 @@ async function startVoiceMicrophone(options = {}) {
   const roomId = state.room?.roomId || null;
   voice.micAttempted = true;
   voice.micStarting = true;
+  const requestId = ++voice.micRequestId;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -8532,7 +8558,7 @@ async function startVoiceMicrophone(options = {}) {
       },
       video: false
     });
-    if (!voiceRoomJoinAllowed() || !voiceMicCaptureAllowed() || state.room?.roomId !== roomId) {
+    if (requestId !== voice.micRequestId || !voiceRoomJoinAllowed() || !voiceMicCaptureAllowed() || state.room?.roomId !== roomId) {
       stopVoiceStream(stream);
       return;
     }
@@ -8546,13 +8572,18 @@ async function startVoiceMicrophone(options = {}) {
       restartVoiceRoomForLocalTracks();
     }
   } catch (error) {
+    if (requestId !== voice.micRequestId) {
+      return;
+    }
     console.warn("BITSPACE voice microphone unavailable", error);
     voice.micError = {
       name: error?.name || "MicrophoneError",
       message: error?.message || String(error || "microphone unavailable")
     };
   } finally {
-    voice.micStarting = false;
+    if (requestId === voice.micRequestId) {
+      voice.micStarting = false;
+    }
   }
 }
 
@@ -8652,6 +8683,7 @@ function stopVoiceRoom(options = {}) {
   const notify = options.notify !== false;
   const keepGesture = options.keepGesture === true;
   clearVoiceMicrophoneStartTimer();
+  voice.micRequestId += 1;
   if (notify && voice.joined && socket.connected) {
     socket.emit(CLIENT_EVENTS.voiceLeave);
   }
@@ -8679,6 +8711,7 @@ function stopVoiceMicrophone(options = {}) {
     return;
   }
 
+  voice.micRequestId += 1;
   disconnectLocalVoiceMeter();
   stopVoiceStream(voice.localStream);
   voice.localStream = null;
@@ -9781,6 +9814,10 @@ function musicVolumeScale(settings = state.settings) {
 
 function handleDocumentVisibilityChange() {
   if (document.hidden) {
+    clearHeldPlayerInput();
+    if (socket.connected && state.playerId && !isLocalBotGame()) {
+      socket.emit(CLIENT_EVENTS.input, readInput());
+    }
     pauseMusicTracks();
     return;
   }
@@ -12880,12 +12917,19 @@ function leaveCurrentRoom() {
     return;
   }
 
-  if (!socket.connected) {
-    return;
-  }
-
+  setPendingRoomLeave(state.room?.roomId || storedRoomId());
+  clearResumeFallbackTimer();
+  state.resumePending = false;
+  state.deferredMenuRoom = null;
   forgetRegisteredRoom();
-  socket.emit(CLIENT_EVENTS.leave);
+  applyServerRoom({ state: "menu", clientId: state.clientId });
+  requestPendingRoomLeave();
+}
+
+function requestPendingRoomLeave() {
+  if (socket.connected && state.pendingLeaveRoomId) {
+    socket.emit(CLIENT_EVENTS.leave, { roomId: state.pendingLeaveRoomId });
+  }
 }
 
 function requestPathNamedRoomJoin() {
@@ -12901,6 +12945,10 @@ function requestPathNamedRoomJoin() {
 }
 
 function requestRoomReattach(now = performance.now(), silent = true) {
+  if (state.pendingLeaveRoomId) {
+    requestPendingRoomLeave();
+    return;
+  }
   const roomId = storedRoomId();
   if (!roomId) {
     return;
@@ -12978,6 +13026,28 @@ function rememberRegisteredRoom(roomId) {
 function forgetRegisteredRoom() {
   window.localStorage.removeItem(ROOM_ID_STORAGE_KEY);
   window.localStorage.removeItem(LEGACY_REGISTERED_ROOM_STORAGE_KEY);
+}
+
+function loadPendingRoomLeave() {
+  try {
+    const roomId = window.localStorage.getItem(PENDING_LEAVE_STORAGE_KEY);
+    return roomId && ROOM_ID_PATTERN.test(roomId) ? roomId : "";
+  } catch {
+    return "";
+  }
+}
+
+function setPendingRoomLeave(roomId) {
+  state.pendingLeaveRoomId = typeof roomId === "string" && ROOM_ID_PATTERN.test(roomId) ? roomId : "";
+  try {
+    if (state.pendingLeaveRoomId) {
+      window.localStorage.setItem(PENDING_LEAVE_STORAGE_KEY, state.pendingLeaveRoomId);
+    } else {
+      window.localStorage.removeItem(PENDING_LEAVE_STORAGE_KEY);
+    }
+  } catch {
+    // Keep the leave intent in memory if browser storage is unavailable.
+  }
 }
 
 function spectatorTargetRoomId() {
@@ -13109,7 +13179,7 @@ function isRoomUiBlocking() {
 }
 
 function isInputBlocked() {
-  return isRoomUiBlocking();
+  return document.hidden || isRoomUiBlocking();
 }
 
 function isLocalPlayerEliminated() {

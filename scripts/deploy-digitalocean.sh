@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BITSPACE_PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${BITSPACE_PROJECT_DIR}"
 if [[ -f "${SCRIPT_DIR}/config.sh" ]]; then
   # shellcheck source=/dev/null
   source "${SCRIPT_DIR}/config.sh"
@@ -26,7 +28,7 @@ fi
 REMOTE_DIR="${BITSPACE_DO_REMOTE_DIR:-${DEFAULT_REMOTE_DIR}}"
 PM2_NAME="${BITSPACE_DO_PM2_NAME:-bitspace}"
 APP_PORT="${BITSPACE_DO_PORT:-${BITSPACE_PORT:-7024}}"
-BOOTSTRAP="${BITSPACE_DO_BOOTSTRAP:-1}"
+BOOTSTRAP="${BITSPACE_DO_BOOTSTRAP:-0}"
 CONFIGURE_WEB="${BITSPACE_DO_CONFIGURE_WEB:-1}"
 DOMAIN="${BITSPACE_DO_DOMAIN:-${BITSPACE_DOMAIN:-}}"
 CERTBOT_EMAIL="${BITSPACE_DO_CERTBOT_EMAIL:-${CERTBOT_EMAIL:-}}"
@@ -49,6 +51,10 @@ REMOTE_SSH_PORT_Q="$(shell_quote "${REMOTE_SSH_PORT}")"
 CONFIGURE_WEB_Q="$(shell_quote "${CONFIGURE_WEB}")"
 DOMAIN_Q="$(shell_quote "${DOMAIN}")"
 CERTBOT_EMAIL_Q="$(shell_quote "${CERTBOT_EMAIL}")"
+
+npm run check
+npm test
+npm run smoke:core
 
 echo "Deploying BITSPACE to DigitalOcean ${REMOTE_HOST}:${REMOTE_DIR}"
 
@@ -156,6 +162,7 @@ rsync -az --delete \
 BITSPACE_REMOTE_DIR=${REMOTE_DIR_Q} \
 BITSPACE_PM2_NAME=${PM2_NAME_Q} \
 BITSPACE_APP_PORT=${APP_PORT_Q} \
+BITSPACE_BOOTSTRAP=$(shell_quote "${BOOTSTRAP}") \
 bash -s" <<'REMOTE_DEPLOY'
 set -euo pipefail
 
@@ -171,14 +178,17 @@ cd "${BITSPACE_REMOTE_DIR}"
 npm ci --omit=dev
 BITSPACE_PM2_NAME="${BITSPACE_PM2_NAME}" BITSPACE_PORT="${BITSPACE_APP_PORT}" pm2 startOrReload ecosystem.config.cjs --update-env
 
-pm2_user="$(id -un)"
-pm2_home="$(getent passwd "${pm2_user}" | cut -d: -f6 || true)"
-if [[ -z "${pm2_home}" ]]; then
-  pm2_home="${HOME}"
+if [[ "${BITSPACE_BOOTSTRAP}" != "0" ]]; then
+  pm2_user="$(id -un)"
+  pm2_home="$(getent passwd "${pm2_user}" | cut -d: -f6 || true)"
+  if [[ -z "${pm2_home}" ]]; then
+    pm2_home="${HOME}"
+  fi
+  run_root env PATH="${PATH}" pm2 startup systemd -u "${pm2_user}" --hp "${pm2_home}"
 fi
-
-run_root env PATH="${PATH}" pm2 startup systemd -u "${pm2_user}" --hp "${pm2_home}"
 pm2 save
+curl --fail --silent --show-error --retry 5 --retry-delay 1 --retry-connrefused \
+  "http://127.0.0.1:${BITSPACE_APP_PORT}/health" >/dev/null
 REMOTE_DEPLOY
 
 echo "BITSPACE deployed to DigitalOcean as pm2 process ${PM2_NAME} on port ${APP_PORT}"

@@ -49,7 +49,7 @@ These are the main arena controls. Controller button names use the standard Xbox
 | Leave / back | `Escape`; confirm when prompted | Right face button (`B` / circle) |
 | Change spectated player | `A` / `D` or left / right arrows | D-pad left / right |
 
-Press `T` to edit a talk bubble, `Enter` to send, or `Escape` to cancel. The upgrade panel pauses movement and attacks while open.
+Press `T` to edit a talk bubble, `Enter` to send, or `Escape` to cancel. The upgrade panel blocks attacks while open; desktop movement remains available.
 
 On touch devices, use the left virtual stick to move and the right virtual stick to aim and use the primary attack. Tap the arena to use the secondary attack, and tap the HUD actions for upgrades, building, leaving, voice, and the map when enabled.
 
@@ -101,6 +101,7 @@ For example, `BITSPACE_SEED=example npm run dev` uses a fixed base seed. `.env.e
 | Command | What it does |
 | --- | --- |
 | `npm run check` | Checks JavaScript syntax across the server, shared modules, client, and smoke scripts |
+| `npm test` | Checks microphone cancellation, reconnect/leave handling, packet validation, controller input, voice controls, and snapshot cleanup without starting the app |
 | `npm run smoke:core` | Exercises the WebAssembly trajectory, visibility, geometry, and storm helpers |
 | `npm run smoke:socket` | Connects to an already-running server, joins a lobby, checks a player snapshot, sends input, and leaves |
 | `npm run build:core` | Rebuilds the C++ core into `public/wasm/bitspace_core.js` and `.wasm` |
@@ -130,7 +131,7 @@ The `/health` endpoint reports server health, uptime, seed, loaded Laser Tag map
 
 ## Deployment
 
-Deployment scripts run locally and use `rsync` over SSH. They install production npm dependencies and start or reload the `bitspace` PM2 process on port `7024`.
+Deployment scripts run locally from the project directory and use `rsync` over SSH. They run syntax, regression, and native-core checks before uploading, install production npm dependencies, start or reload the `bitspace` PM2 process on port `7024`, and check the running server's health.
 
 ### DigitalOcean
 
@@ -139,11 +140,11 @@ The configured production site is [bitspace.freshman.dev](https://bitspace.fresh
 For an already-provisioned host:
 
 ```sh
-BITSPACE_DO_BOOTSTRAP=0 BITSPACE_DO_CONFIGURE_WEB=0 npm run deploy:do
+npm run deploy:do
 npm run status:do
 ```
 
-Running `npm run deploy:do` with bootstrap enabled also provisions Node, PM2, nginx, firewall rules, and HTTPS certificates. Set `BITSPACE_DO_HOST`, `BITSPACE_DO_DOMAIN`, `BITSPACE_DO_REMOTE_DIR`, `BITSPACE_DO_SSH_PORT`, `BITSPACE_DO_PORT`, or `BITSPACE_DO_PM2_NAME` to change the target. `BITSPACE_DO_CERTBOT_EMAIL` supplies the certificate contact email.
+For first-time provisioning, run `BITSPACE_DO_BOOTSTRAP=1 npm run deploy:do` to set up Node, PM2, nginx, firewall rules, and HTTPS certificates. Normal deployments skip provisioning. Set `BITSPACE_DO_HOST`, `BITSPACE_DO_DOMAIN`, `BITSPACE_DO_REMOTE_DIR`, `BITSPACE_DO_SSH_PORT`, `BITSPACE_DO_PORT`, or `BITSPACE_DO_PM2_NAME` to change the target. `BITSPACE_DO_CERTBOT_EMAIL` supplies the certificate contact email.
 
 ### Raspberry Pi
 

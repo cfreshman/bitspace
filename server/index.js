@@ -296,12 +296,16 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on(CLIENT_EVENTS.leave, () => {
+  socket.on(CLIENT_EVENTS.leave, (payload = {}) => {
     if (!isCurrentSocket(socket)) {
       return;
     }
 
     const roomBeforeLeave = roomManager.clientRoom(clientId);
+    if (payload?.roomId && payload.roomId !== roomBeforeLeave?.id) {
+      emitRoom(socket);
+      return;
+    }
     leaveVoiceRoom(clientId, roomBeforeLeave);
     const result = roomManager.leaveClient(clientId);
     socket.emit(SERVER_EVENTS.beep, { kind: "button" });
@@ -355,6 +359,9 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    if (!isCurrentSocket(socket)) {
+      return;
+    }
     const room = roomManager.clientRoom(clientId);
     leaveVoiceRoom(clientId, room);
     roomManager.disconnectClient(clientId, socket.id);
@@ -409,7 +416,14 @@ setInterval(() => {
 
   const ticksPerSnapshot = Math.max(1, Math.floor(ENGINE.tickRate / ENGINE.snapshotRate));
   const ticksPerFullSnapshot = Math.max(1, ENGINE.tickRate);
-  for (const room of roomManager.allRooms()) {
+  const rooms = roomManager.allRooms();
+  const roomIds = new Set(rooms.map((room) => room.id));
+  for (const roomId of roomSnapshotBaselines.keys()) {
+    if (!roomIds.has(roomId)) {
+      roomSnapshotBaselines.delete(roomId);
+    }
+  }
+  for (const room of rooms) {
     if (!room.arena) {
       roomSnapshotBaselines.delete(room.id);
       continue;
@@ -567,6 +581,9 @@ function leaveVoiceRoom(clientId, expectedRoom = null) {
 }
 
 function relayVoiceSignal(clientId, payload = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return;
+  }
   const targetId = typeof payload.targetId === "string" ? payload.targetId : "";
   const signal = payload.signal;
   if (!targetId || targetId === clientId || !signal || typeof signal !== "object") {
