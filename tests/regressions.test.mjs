@@ -314,7 +314,7 @@ test("voice toggle is visible and hittable on countdown, terminal, and confirm s
         else context[draw](canvas, 0, 370, options, colors, text);
         assert.ok(voiceUi.toggleRect, draw);
         assert.ok(voiceUi.toggleRect.y >= 0 && voiceUi.toggleRect.y + voiceUi.toggleRect.height <= canvas.height);
-        assert.ok(drawn.some((value) => value.includes(`VOICE ${enabled ? "ON" : "OFF"}`)));
+        assert.ok(drawn.some((value) => value.includes(`VOICE IS ${enabled ? "ON" : "OFF"}`)));
         drawn.length = 0;
       }
     }
@@ -346,7 +346,7 @@ test("mobile upgrade rendering includes the voice toggle beside CLOSE", () => {
     renderPhase: "hud", gameMode: GAME_MODES.bitspace, room: { state: "active" }, mobileActive: true, upgrades: { active: true }, voiceUi,
     renderState: { ready: true, localPlayer: { alive: true } }
   }, { foreground: "#fff", background: "#000" }, { measure: (value) => value.length * 4, draw: (_ctx, value) => drawn.push(value) }, {});
-  assert.ok(drawn.includes("VOICE OFF"));
+  assert.ok(drawn.includes("VOICE IS OFF"));
   assert.ok(voiceUi.toggleRect.x > 8 + 2 + 52);
   assert.ok(voiceUi.toggleRect.y + voiceUi.toggleRect.height <= canvas.height);
 });

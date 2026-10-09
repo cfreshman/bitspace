@@ -19236,7 +19236,7 @@ function mobilePlayerHudLayout(ctx, options = {}) {
 
 function voiceHudLabel(voiceUi) {
   const shortcut = voiceUi.mobileActive ? "" : voiceUi.controllerActive ? "R3 - " : "V - ";
-  return `${shortcut}VOICE ${voiceUi.enabled ? "ON" : "OFF"}`;
+  return `${shortcut}VOICE IS ${voiceUi.enabled ? "ON" : "OFF"}`;
 }
 
 function drawVoiceToggle(ctx, voiceUi, x, y, width, colors, textRenderer, textOptions = {}) {
