@@ -345,11 +345,7 @@ export function createRoomManager(options = {}) {
       maybeEndActiveRoom(room, "leave");
     }
 
-    if (
-      (room.state === ROOM_STATES.waiting || room.state === ROOM_STATES.ended) &&
-      room.participants.size === 0
-    ) {
-      destroyRoom(room);
+    if (destroyEmptyRoom(room)) {
       return { ok: true, room: null, previousRoom: room, emptied: true };
     }
 
@@ -523,6 +519,18 @@ export function createRoomManager(options = {}) {
     for (const clientId of room.participants.keys()) {
       clientRooms.delete(clientId);
     }
+  }
+
+  function destroyEmptyRoom(room) {
+    if (
+      (room.state !== ROOM_STATES.waiting && room.state !== ROOM_STATES.ended) ||
+      room.participants.size !== 0
+    ) {
+      return false;
+    }
+
+    destroyRoom(room);
+    return true;
   }
 
   function createWaitingRoom(options = {}) {
@@ -705,6 +713,7 @@ export function createRoomManager(options = {}) {
       room.resetToLobbyAtMs = room.kind === ROOM_KIND.named
         ? now() + NAMED_ROOM_RESET_DELAY_MS
         : null;
+      destroyEmptyRoom(room);
       return true;
     }
 
@@ -722,6 +731,7 @@ export function createRoomManager(options = {}) {
     room.resetToLobbyAtMs = room.kind === ROOM_KIND.named
       ? now() + NAMED_ROOM_RESET_DELAY_MS
       : null;
+    destroyEmptyRoom(room);
     return true;
   }
 

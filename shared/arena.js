@@ -217,6 +217,7 @@ export function addPlayer(arena, playerOptions) {
     },
     stormWarning: "",
     stormDamagePerSecond: 0,
+    participating: true,
     alive: true,
     input: createEmptyInput(),
     inputSessionId: "",
@@ -242,6 +243,8 @@ export function eliminatePlayer(arena, playerId, options = {}) {
     return false;
   }
 
+  player.participating = false;
+  clearPlayerInput(arena, playerId);
   killPlayer(player, {
     arena,
     tick: options.tick ?? arena.tick,
@@ -252,7 +255,7 @@ export function eliminatePlayer(arena, playerId, options = {}) {
 
 export function setPlayerInput(arena, playerId, payload) {
   const player = arena.players.get(playerId);
-  if (!player) {
+  if (!player || player.participating === false) {
     return false;
   }
 
@@ -459,6 +462,9 @@ function initializeLaserTagArena(arena) {
 
 function stepLaserTagArena(arena, dtSeconds, options = {}) {
   for (const player of arena.players.values()) {
+    if (player.participating === false) {
+      continue;
+    }
     player.alive = true;
     if (laserTagPlayerIsOut(player)) {
       stepLaserTagGhostReturn(arena, player, dtSeconds);
@@ -1382,7 +1388,7 @@ function laserTagSpawnTileIsOpen(asteroid, spawn) {
 function laserTagSpawnPointIsFree(arena, player, spawn) {
   const radius = Math.max(0.1, player?.radius || playerRadiusForGameMode(arena.mode));
   for (const other of arena.players.values()) {
-    if (other === player || other.id === player?.id || laserTagPlayerIsOut(other)) {
+    if (other === player || other.id === player?.id || other.participating === false || laserTagPlayerIsOut(other)) {
       continue;
     }
     const otherRadius = Math.max(0.1, other.radius || playerRadiusForGameMode(arena.mode));
@@ -4359,6 +4365,7 @@ function snapshotPlayer(player, tick = 0, mode = GAME_MODES.bitspace) {
     },
     stormWarning: player.stormWarning,
     stormDamagePerSecond: roundForSnapshot(player.stormDamagePerSecond || 0),
+    participating: player.participating !== false,
     alive: player.alive
   };
 }
